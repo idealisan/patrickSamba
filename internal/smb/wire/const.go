@@ -176,23 +176,23 @@ const (
 type ShareFlags uint32
 
 const (
-	ShareFlagManualCaching             ShareFlags = 0x00000000 // SMB2_SHAREFLAG_MANUAL_CACHING
-	ShareFlagAutoCaching               ShareFlags = 0x00000010 // SMB2_SHAREFLAG_AUTO_CACHING
-	ShareFlagVDOCaching                ShareFlags = 0x00000020 // SMB2_SHAREFLAG_VDO_CACHING
-	ShareFlagNoCaching                 ShareFlags = 0x00000030 // SMB2_SHAREFLAG_NO_CACHING
-	ShareFlagDFS                       ShareFlags = 0x00000001 // SMB2_SHAREFLAG_DFS
-	ShareFlagDFSRoot                   ShareFlags = 0x00000002 // SMB2_SHAREFLAG_DFS_ROOT
-	ShareFlagRestrictExclusiveOpens    ShareFlags = 0x00000100 // SMB2_SHAREFLAG_RESTRICT_EXCLUSIVE_OPENS
-	ShareFlagForceSharedDelete         ShareFlags = 0x00000200 // SMB2_SHAREFLAG_FORCE_SHARED_DELETE
-	ShareFlagAllowNamespaceCaching     ShareFlags = 0x00000400 // SMB2_SHAREFLAG_ALLOW_NAMESPACE_CACHING
-	ShareFlagAccessBasedDirectoryEnum  ShareFlags = 0x00000800 // SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM
-	ShareFlagForceLevelIIOplock        ShareFlags = 0x00001000 // SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK
-	ShareFlagEnableHashV1              ShareFlags = 0x00002000 // SMB2_SHAREFLAG_ENABLE_HASH_V1
-	ShareFlagEnableHashV2              ShareFlags = 0x00004000 // SMB2_SHAREFLAG_ENABLE_HASH_V2
-	ShareFlagEncryptData               ShareFlags = 0x00008000 // SMB2_SHAREFLAG_ENCRYPT_DATA
-	ShareFlagIdentityRemoting          ShareFlags = 0x00040000 // SMB2_SHAREFLAG_IDENTITY_REMOTING
-	ShareFlagCompressData              ShareFlags = 0x00100000 // SMB2_SHAREFLAG_COMPRESS_DATA
-	ShareFlagIsolatedTransport         ShareFlags = 0x00200000 // SMB2_SHAREFLAG_ISOLATED_TRANSPORT
+	ShareFlagManualCaching            ShareFlags = 0x00000000 // SMB2_SHAREFLAG_MANUAL_CACHING
+	ShareFlagAutoCaching              ShareFlags = 0x00000010 // SMB2_SHAREFLAG_AUTO_CACHING
+	ShareFlagVDOCaching               ShareFlags = 0x00000020 // SMB2_SHAREFLAG_VDO_CACHING
+	ShareFlagNoCaching                ShareFlags = 0x00000030 // SMB2_SHAREFLAG_NO_CACHING
+	ShareFlagDFS                      ShareFlags = 0x00000001 // SMB2_SHAREFLAG_DFS
+	ShareFlagDFSRoot                  ShareFlags = 0x00000002 // SMB2_SHAREFLAG_DFS_ROOT
+	ShareFlagRestrictExclusiveOpens   ShareFlags = 0x00000100 // SMB2_SHAREFLAG_RESTRICT_EXCLUSIVE_OPENS
+	ShareFlagForceSharedDelete        ShareFlags = 0x00000200 // SMB2_SHAREFLAG_FORCE_SHARED_DELETE
+	ShareFlagAllowNamespaceCaching    ShareFlags = 0x00000400 // SMB2_SHAREFLAG_ALLOW_NAMESPACE_CACHING
+	ShareFlagAccessBasedDirectoryEnum ShareFlags = 0x00000800 // SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM
+	ShareFlagForceLevelIIOplock       ShareFlags = 0x00001000 // SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK
+	ShareFlagEnableHashV1             ShareFlags = 0x00002000 // SMB2_SHAREFLAG_ENABLE_HASH_V1
+	ShareFlagEnableHashV2             ShareFlags = 0x00004000 // SMB2_SHAREFLAG_ENABLE_HASH_V2
+	ShareFlagEncryptData              ShareFlags = 0x00008000 // SMB2_SHAREFLAG_ENCRYPT_DATA
+	ShareFlagIdentityRemoting         ShareFlags = 0x00040000 // SMB2_SHAREFLAG_IDENTITY_REMOTING
+	ShareFlagCompressData             ShareFlags = 0x00100000 // SMB2_SHAREFLAG_COMPRESS_DATA
+	ShareFlagIsolatedTransport        ShareFlags = 0x00200000 // SMB2_SHAREFLAG_ISOLATED_TRANSPORT
 )
 
 // ShareCapabilities 是 TREE_CONNECT Response 的 Capabilities（MS-SMB2 §2.2.10）。
