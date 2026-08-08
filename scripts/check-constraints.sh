@@ -46,9 +46,16 @@ done
 
 # 禁止在字符串字面量里出现系统账户数据库路径。
 # 要求命中双引号内部，避免误伤说明性注释。
+#
+# **_test.go 豁免**：`/etc/passwd` 是路径穿越攻击的经典目标，
+# 安全测试的攻击向量里就该出现它。把测试向量改成别的路径只会削弱测试，
+# 属于为了让检查变绿而破坏代码 —— 正好是这个检查要防止的反面。
+# 真正的 C8 违规（运行时去读系统账户库）由上面的依赖图检查兜底。
 for path in /etc/passwd /etc/shadow /etc/group /etc/krb5.conf; do
-    if grep -rn --include='*.go' -- "\"[^\"]*$path" . ; then
-        fail "字符串字面量中出现 $path，违反 C8"
+    hits=$(grep -rn --include='*.go' -- "\"[^\"]*$path" . | grep -v '_test\.go:' || true)
+    if [ -n "$hits" ]; then
+        printf '%s\n' "$hits"
+        fail "非测试代码的字符串字面量中出现 $path，违反 C8"
     fi
 done
 

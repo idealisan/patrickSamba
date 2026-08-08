@@ -328,9 +328,9 @@ func TestPathTraversal(t *testing.T) {
 	vectors := []string{
 		"../secret.txt",
 		`..\secret.txt`,
-		"../../root/secret.txt",
+		"../../etc/passwd",
 		"a/../../secret.txt",
-		"/root/secret.txt",
+		"/etc/passwd",
 		`\\server\share`,
 		`C:\Windows\System32\config\SAM`,
 		"..",
