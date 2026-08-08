@@ -26,24 +26,8 @@ $:
           script: |
             out=$(gofmt -l .)
             if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi
-        - name: 校验认证不依赖系统用户管理 (AGENTS.md C8)
-          script: |
-            set -e
-            bad=0
-            for pat in '"os/user"' '/etc/passwd' '/etc/shadow' 'getpwnam' 'getgrnam' 'pam_authenticate'; do
-              if grep -rnF -- "$pat" --include='*.go' . ; then
-                echo "错误: 命中禁用模式 [$pat]，违反 AGENTS.md C8"; bad=1
-              fi
-            done
-            [ "$bad" = "0" ] || exit 1
-            echo "OK: 认证自成体系"
-        - name: 校验未引入 CGO (AGENTS.md C1)
-          script: |
-            set -e
-            if grep -rn '^import "C"\|"C"$' --include='*.go' . | grep -v '_test.go'; then
-              echo "错误: 检测到 CGO import"; exit 1
-            fi
-            echo "OK: 无 CGO"
+        - name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
+          script: sh scripts/check-constraints.sh
         - name: 单元测试
           script: CGO_ENABLED=0 go test -race -count=1 ./...
         - name: 交叉编译校验 (AGENTS.md C7)
