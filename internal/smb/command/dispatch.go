@@ -62,11 +62,11 @@ func defaultHandler(ctx *Context) error {
 // 无论成功失败都会产生一条格式正确的响应 —— SMB2 不允许对请求静默不答，
 // 客户端会一直等到超时。
 func Dispatch(ctx *Context) {
-	if err := dispatch(ctx); err != nil {
+	err := dispatch(ctx)
+	if err != nil {
 		ctx.fail(status.FromVFSError(err))
 	}
 	ctx.finishHeader()
-	ctx.rollPreauth()
 
 	// 把本条解析/新建出的会话与树记入链，供后续 related 消息继承。
 	if ctx.Session != nil {
@@ -76,7 +76,10 @@ func Dispatch(ctx *Context) {
 		ctx.Chain.Tree = ctx.Tree
 	}
 
-	if ctx.Status.IsError() {
+	// 只有 handler **真的失败**才中断复合链。
+	// 带响应体的非 SUCCESS 状态（SESSION_SETUP 的 MORE_PROCESSING_REQUIRED、
+	// QUERY_INFO 的 BUFFER_OVERFLOW）不算失败，后续 related 消息照常执行。
+	if err != nil {
 		ctx.Chain.Failed = true
 		if ctx.Chain.FailStatus == 0 {
 			ctx.Chain.FailStatus = ctx.Status
@@ -91,27 +94,9 @@ func Dispatch(ctx *Context) {
 func DispatchFailed(ctx *Context, st status.Status) {
 	ctx.fail(st)
 	ctx.finishHeader()
-	ctx.rollPreauth()
 	ctx.Chain.Failed = true
 	if ctx.Chain.FailStatus == 0 {
 		ctx.Chain.FailStatus = st
-	}
-}
-
-// rollPreauth 按 handler 的要求把**最终写出的响应字节**滚进 preauth hash。
-//
-// 必须在 finishHeader 之后执行：Status 与 Credits 都在签名/哈希覆盖范围内，
-// 提前哈希会与客户端算出的值对不上（protocol-notes §6）。
-func (c *Context) rollPreauth() {
-	if !c.HashResponseConn && c.HashResponseSession == nil {
-		return
-	}
-	msg := c.Out[c.msgStart:]
-	if c.HashResponseConn {
-		c.Conn.UpdatePreauthHash(msg)
-	}
-	if s := c.HashResponseSession; s != nil {
-		s.UpdatePreauthHash(msg)
 	}
 }
 
@@ -234,7 +219,7 @@ func (c *Context) checkSignature() error {
 		// 客户端声称签了名，但我们没有密钥可校验 —— 只能拒绝。
 		return status.AccessDenied
 	}
-	if err := crypto.Verify(uint16(c.Conn.Dialect), key, c.Msg); err != nil {
+	if err := crypto.VerifyWith(c.Conn.SigningAlg(), key, c.Msg); err != nil {
 		c.Log.Warn("请求签名校验失败",
 			"command", c.Header.Command.String(), "session", s.ID, "err", err)
 		return status.AccessDenied

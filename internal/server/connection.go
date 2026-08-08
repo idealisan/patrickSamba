@@ -12,7 +12,6 @@ import (
 
 	"github.com/finalappstore/stupidsamba/internal/smb/command"
 	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 )
 
@@ -296,73 +295,10 @@ func (c *Connection) processMessage(hdr wire.Header, msg []byte,
 	charge := c.credits.Charge(hdr.CreditCharge)
 	ctx.SetCredits(c.credits.Grant(charge, hdr.Credits))
 
-	// —— 解析会话（related 操作继承前一条的 SessionId）——
-	if hdr.IsRelated() && chain.Session != nil {
-		ctx.Session = chain.Session
-	} else {
-		ctx.Session = c.state.Session(hdr.SessionID)
-	}
-	if ctx.Session != nil {
-		ctx.RespHeader.SessionID = ctx.Session.ID
-	}
-
-	// —— 签名校验（必须在执行 handler 之前）——
-	if st := c.verifySignature(hdr, msg, ctx.Session); st != status.Success {
-		ctx.SignKey = nil
-		ctx.Session = nil
-		ctx.Tree = nil
-		ctx.Status = st
-		// 走统一的失败路径，保证回的是格式正确的 ERROR Response。
-		command.DispatchFailed(ctx, st)
-		return ctx
-	}
-
-	// —— 解析树（related 操作继承前一条的 TreeId）——
-	if hdr.IsRelated() && chain.Tree != nil {
-		ctx.Tree = chain.Tree
-	} else if ctx.Session != nil {
-		ctx.Tree = ctx.Session.Tree(hdr.TreeID)
-	}
-	if ctx.Tree != nil {
-		ctx.RespHeader.TreeID = ctx.Tree.ID
-	}
-
+	// 会话/树定位与签名校验都在 command.Dispatch 内完成
+	// （它需要在同一处决定响应是否签名）。
 	command.Dispatch(ctx)
 	return ctx
-}
-
-// verifySignature 按 MS-SMB2 §3.3.5.2.4 校验请求签名。
-//
-// 规则：
-//   - 会话尚未建立（NEGOTIATE / 第一轮 SESSION_SETUP）时无从校验，放行；
-//   - 请求带 SMB2_FLAGS_SIGNED 且会话有签名密钥 → 必须校验通过；
-//   - 会话要求签名但请求没签 → STATUS_ACCESS_DENIED。
-//     SESSION_SETUP 例外：认证过程中的请求可以不签。
-func (c *Connection) verifySignature(hdr wire.Header, msg []byte, sess *command.Session) status.Status {
-	if sess == nil || !sess.Established() {
-		return status.Success
-	}
-	key := sess.SigningKey()
-
-	if hdr.IsSigned() {
-		if len(key) == 0 {
-			// guest/匿名会话没有密钥却送来了签名，无法校验。
-			return status.AccessDenied
-		}
-		if err := crypto.VerifyWith(c.state.SigningAlg(), key, msg); err != nil {
-			c.log.Warn("请求签名校验失败",
-				"command", hdr.Command.String(), "session", sess.ID, "err", err)
-			return status.AccessDenied
-		}
-		return status.Success
-	}
-
-	if sess.SigningRequired() && hdr.Command != wire.CommandSessionSetup {
-		c.log.Warn("会话要求签名但请求未签名",
-			"command", hdr.Command.String(), "session", sess.ID)
-		return status.AccessDenied
-	}
-	return status.Success
 }
 
 // pad8 把 dst 补齐到 8 字节对齐（复合响应链要求，MS-SMB2 §3.3.5.2.7）。
