@@ -193,4 +193,32 @@ func TestIsSMB1SMB2(t *testing.T) {
 	if IsSMB1(nil) || IsSMB2([]byte{0xFE}) {
 		t.Error("短缓冲区不应误判")
 	}
+	if !IsTransform([]byte{0xFD, 'S', 'M', 'B'}) || IsTransform(goldenSyncHeader) {
+		t.Error("TRANSFORM 魔数识别错误")
+	}
+}
+
+// TestHeaderPutAt 验证就地写入与 Append 产出一致（复合链回填要用）。
+func TestHeaderPutAt(t *testing.T) {
+	h := Header{Command: CommandCreate, Credits: 8, Flags: FlagServerToRedir,
+		MessageID: 42, TreeID: 1, SessionID: 0x1122334455667788, NextCommand: 0x70}
+
+	buf := make([]byte, HeaderSize+16)
+	for i := range buf {
+		buf[i] = 0xAA
+	}
+	if err := h.PutAt(buf); err != nil {
+		t.Fatalf("PutAt: %v", err)
+	}
+	if got, want := buf[:HeaderSize], h.Append(nil); !bytes.Equal(got, want) {
+		t.Errorf("PutAt 与 Append 结果不一致\n got=% X\nwant=% X", got, want)
+	}
+	for _, c := range buf[HeaderSize:] {
+		if c != 0xAA {
+			t.Fatal("PutAt 越界写入了 64 字节之后的数据")
+		}
+	}
+	if err := h.PutAt(buf[:HeaderSize-1]); err == nil {
+		t.Error("缓冲区不足 64 字节应报错")
+	}
 }
