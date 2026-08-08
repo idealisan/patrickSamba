@@ -359,6 +359,12 @@ func (h *localHandle) snapshotLocked() error {
 		if ValidateComponent(n) != nil {
 			continue
 		}
+		// AppleDouble 资源派生旁路文件不作为独立条目出现：
+		// 客户端要拿资源派生是通过 AFP_Resource 流，不是通过 ._foo。
+		// 列出来会让 Finder 显示重影，也会让 Time Machine 的 band 计数翻倍。
+		if isDotUnderscoreName(n) {
+			continue
+		}
 		kept = append(kept, n)
 	}
 
