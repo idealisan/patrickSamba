@@ -1,0 +1,91 @@
+# captureproxy 帧摘要
+# 每个 .bin 是去掉 4 字节 Direct TCP 长度前缀之后的 SMB 报文本体。
+# 列：序号 方向 连接 长度 命令 摘要
+001 c2s conn1    256B NEGOTIATE mid=0 credits=31
+002 s2c conn1    268B NEGOTIATE mid=0 credits=1 status=0x00000000
+003 c2s conn1    162B SESSION_SETUP mid=1 credits=8192
+004 s2c conn1    275B SESSION_SETUP mid=1 credits=1 sid=0x35913e65 status=0xc0000016
+005 c2s conn1    562B SESSION_SETUP mid=2 credits=8192 sid=0x35913e65
+006 s2c conn1    101B SESSION_SETUP mid=2 credits=8192 sid=0x35913e65 status=0x00000000 SIGNED
+007 c2s conn1    104B TREE_CONNECT mid=3 credits=1 sid=0x35913e65 SIGNED
+008 s2c conn1     80B TREE_CONNECT mid=3 credits=1 sid=0x35913e65 tid=0xa08cc3a0 status=0x00000000 SIGNED
+009 c2s conn1    160B IOCTL     mid=4 credits=1 sid=0x35913e65 tid=0xa08cc3a0
+010 s2c conn1     73B IOCTL     mid=4 credits=1 sid=0x35913e65 tid=0xa08cc3a0 status=0xc0000225
+011 c2s conn1     68B TREE_DISCONNECT mid=5 credits=1 sid=0x35913e65 tid=0xa08cc3a0
+012 s2c conn1     68B TREE_DISCONNECT mid=5 credits=1 sid=0x35913e65 tid=0xa08cc3a0 status=0x00000000
+013 c2s conn1    110B TREE_CONNECT mid=6 credits=1 sid=0x35913e65 SIGNED
+014 s2c conn1     80B TREE_CONNECT mid=6 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000 SIGNED
+015 c2s conn1    132B CREATE    mid=7 credits=1 sid=0x35913e65 tid=0xf7a4318b
+016 s2c conn1    152B CREATE    mid=7 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+017 c2s conn1    129B WRITE     mid=8 credits=1 sid=0x35913e65 tid=0xf7a4318b
+018 s2c conn1     80B WRITE     mid=8 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+019 c2s conn1     88B CLOSE     mid=9 credits=1 sid=0x35913e65 tid=0xf7a4318b
+020 s2c conn1    124B CLOSE     mid=9 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+021 c2s conn1    132B CREATE    mid=10 credits=1 sid=0x35913e65 tid=0xf7a4318b
+022 s2c conn1    152B CREATE    mid=10 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+023 c2s conn1    130B SET_INFO  mid=11 credits=1 sid=0x35913e65 tid=0xf7a4318b
+024 s2c conn1     66B SET_INFO  mid=11 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+025 c2s conn1     88B CLOSE     mid=12 credits=1 sid=0x35913e65 tid=0xf7a4318b
+026 s2c conn1    124B CLOSE     mid=12 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+027 c2s conn1    136B CREATE    mid=13 credits=1 sid=0x35913e65 tid=0xf7a4318b
+028 s2c conn1     73B CREATE    mid=13 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0xc0000103
+029 c2s conn1    136B CREATE    mid=14 credits=1 sid=0x35913e65 tid=0xf7a4318b
+030 s2c conn1    152B CREATE    mid=14 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+031 c2s conn1     88B CLOSE     mid=15 credits=1 sid=0x35913e65 tid=0xf7a4318b
+032 s2c conn1    124B CLOSE     mid=15 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+033 c2s conn1    136B CREATE    mid=16 credits=1 sid=0x35913e65 tid=0xf7a4318b
+034 s2c conn1    152B CREATE    mid=16 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+035 c2s conn1    136B SET_INFO  mid=17 credits=1 sid=0x35913e65 tid=0xf7a4318b
+036 s2c conn1     66B SET_INFO  mid=17 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+037 c2s conn1     88B CLOSE     mid=18 credits=1 sid=0x35913e65 tid=0xf7a4318b
+038 s2c conn1    124B CLOSE     mid=18 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+039 c2s conn1    136B CREATE    mid=19 credits=1 sid=0x35913e65 tid=0xf7a4318b
+040 s2c conn1     73B CREATE    mid=19 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0xc0000103
+041 c2s conn1    136B CREATE    mid=20 credits=1 sid=0x35913e65 tid=0xf7a4318b
+042 s2c conn1    152B CREATE    mid=20 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+043 c2s conn1     88B CLOSE     mid=21 credits=1 sid=0x35913e65 tid=0xf7a4318b
+044 s2c conn1    124B CLOSE     mid=21 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+045 c2s conn1    136B CREATE    mid=22 credits=1 sid=0x35913e65 tid=0xf7a4318b
+046 s2c conn1    152B CREATE    mid=22 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+047 c2s conn1    136B SET_INFO  mid=23 credits=1 sid=0x35913e65 tid=0xf7a4318b
+048 s2c conn1     66B SET_INFO  mid=23 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+049 c2s conn1     88B CLOSE     mid=24 credits=1 sid=0x35913e65 tid=0xf7a4318b
+050 s2c conn1    124B CLOSE     mid=24 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+051 c2s conn1    136B CREATE    mid=25 credits=1 sid=0x35913e65 tid=0xf7a4318b
+052 s2c conn1     73B CREATE    mid=25 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0xc0000103
+053 c2s conn1    136B CREATE    mid=26 credits=1 sid=0x35913e65 tid=0xf7a4318b
+054 s2c conn1    152B CREATE    mid=26 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+055 c2s conn1     88B CLOSE     mid=27 credits=1 sid=0x35913e65 tid=0xf7a4318b
+056 s2c conn1    124B CLOSE     mid=27 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+057 c2s conn1    136B CREATE    mid=28 credits=1 sid=0x35913e65 tid=0xf7a4318b
+058 s2c conn1    152B CREATE    mid=28 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+059 c2s conn1    136B SET_INFO  mid=29 credits=1 sid=0x35913e65 tid=0xf7a4318b
+060 s2c conn1     66B SET_INFO  mid=29 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+061 c2s conn1     88B CLOSE     mid=30 credits=1 sid=0x35913e65 tid=0xf7a4318b
+062 s2c conn1    124B CLOSE     mid=30 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+063 c2s conn1    136B CREATE    mid=31 credits=1 sid=0x35913e65 tid=0xf7a4318b
+064 s2c conn1     73B CREATE    mid=31 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0xc0000103
+065 c2s conn1    136B CREATE    mid=32 credits=1 sid=0x35913e65 tid=0xf7a4318b
+066 s2c conn1    152B CREATE    mid=32 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+067 c2s conn1     88B CLOSE     mid=33 credits=1 sid=0x35913e65 tid=0xf7a4318b
+068 s2c conn1    124B CLOSE     mid=33 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+069 c2s conn1    136B CREATE    mid=34 credits=1 sid=0x35913e65 tid=0xf7a4318b
+070 s2c conn1    152B CREATE    mid=34 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+071 c2s conn1    136B SET_INFO  mid=35 credits=1 sid=0x35913e65 tid=0xf7a4318b
+072 s2c conn1     66B SET_INFO  mid=35 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+073 c2s conn1     88B CLOSE     mid=36 credits=1 sid=0x35913e65 tid=0xf7a4318b
+074 s2c conn1    124B CLOSE     mid=36 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+075 c2s conn1    121B CREATE    mid=37 credits=1 sid=0x35913e65 tid=0xf7a4318b
+076 s2c conn1    152B CREATE    mid=37 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+077 c2s conn1    110B QUERY_DIRECTORY mid=38 credits=1 sid=0x35913e65 tid=0xf7a4318b
+078 s2c conn1    190B QUERY_DIRECTORY mid=38 credits=128 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+079 c2s conn1    136B CREATE    mid=166 credits=1 sid=0x35913e65 tid=0xf7a4318b
+080 s2c conn1    152B CREATE    mid=166 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+081 c2s conn1     88B CLOSE     mid=167 credits=1 sid=0x35913e65 tid=0xf7a4318b
+082 s2c conn1    124B CLOSE     mid=167 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+083 c2s conn1    110B QUERY_DIRECTORY mid=168 credits=1 sid=0x35913e65 tid=0xf7a4318b
+084 s2c conn1     73B QUERY_DIRECTORY mid=168 credits=128 sid=0x35913e65 tid=0xf7a4318b status=0x80000006
+085 c2s conn1     88B CLOSE     mid=296 credits=1 sid=0x35913e65 tid=0xf7a4318b
+086 s2c conn1    124B CLOSE     mid=296 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000
+087 c2s conn1     68B TREE_DISCONNECT mid=297 credits=1 sid=0x35913e65 tid=0xf7a4318b
+088 s2c conn1     68B TREE_DISCONNECT mid=297 credits=1 sid=0x35913e65 tid=0xf7a4318b status=0x00000000

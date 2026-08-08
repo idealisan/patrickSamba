@@ -175,6 +175,13 @@ run_scenario() {
 		# allinfo 会打一串 QUERY_INFO：FileAllInformation / FileStreamInformation 等。
 		capture query-info sc -m SMB3 -c 'allinfo hello.txt; ls'
 		;;
+	set-info)
+		# rename → SET_INFO/FileRenameInformation（注意文件名不带前导反斜杠）；
+		# setmode → FileBasicInformation；rm → FileDispositionInformation。
+		printf 'set-info fixture\n' >/tmp/capture-si.txt
+		capture set-info sc -m SMB3 \
+			-c 'put /tmp/capture-si.txt si.txt; rename si.txt si2.txt; setmode si2.txt +r; setmode si2.txt -r; rm si2.txt'
+		;;
 	gosmb2)
 		# 第三方 Go 客户端库（hirochachacha/go-smb2），与 smbclient 是两套独立实现，
 		# 两边都能对上才说明我们的理解不是被单一实现带偏的。
@@ -188,7 +195,7 @@ run_scenario() {
 	esac
 }
 
-ALL="negotiate-smb202 negotiate-smb210 negotiate-smb311 session-setup tree-connect create-read-write query-directory query-info gosmb2"
+ALL="negotiate-smb202 negotiate-smb210 negotiate-smb311 session-setup tree-connect create-read-write query-directory query-info set-info gosmb2"
 
 CGO_ENABLED=0 "$GO" build -o "$PROXY_BIN" "$REPO/test/capture"
 trap teardown_smbd EXIT
