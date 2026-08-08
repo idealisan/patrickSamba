@@ -73,7 +73,7 @@ func setFileInfo(ctx *Context, open *Open, req *wire.SetInfoRequest) error {
 		return setAllocation(open, h, req.Buffer)
 
 	case wire.FileDispositionInformation:
-		return setDisposition(ctx, open, req.Buffer)
+		return setDisposition(open, req.Buffer)
 
 	case wire.FileRenameInformation:
 		return setRename(ctx, open, req.Buffer)
@@ -238,7 +238,7 @@ func setAllocation(open *Open, h vfs.Handle, buf []byte) error {
 
 // setDisposition 处理 FileDispositionInformation（MS-FSCC §2.4.11）：
 // 置位表示"关闭时删除"。
-func setDisposition(ctx *Context, open *Open, buf []byte) error {
+func setDisposition(open *Open, buf []byte) error {
 	if len(buf) < wire.FileDispositionInfoSize {
 		return status.InfoLengthMismatch
 	}
@@ -259,7 +259,6 @@ func setDisposition(ctx *Context, open *Open, buf []byte) error {
 		}
 	}
 	open.SetDeleteOnClose(del)
-	_ = ctx
 	return nil
 }
 
