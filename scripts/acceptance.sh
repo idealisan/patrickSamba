@@ -65,6 +65,11 @@ cat > "$WORK/config.yaml" <<EOF
 server:
   name: STUPIDSAMBA
   domain: WORKGROUP
+  # impacket 的 SMBConnection 默认走 negotiateSessionWildcard，
+  # 会先发 SMB1 多协议协商再升级到 SMB2。impacket 是 AGENTS.md §3
+  # 必测矩阵的第 3 项，所以验收环境必须开这个入口。
+  # 注意：这里只是**协商入口**，不提供任何 SMB1 文件操作。
+  smb1: true
 listen:
   addresses:
     - 127.0.0.1
