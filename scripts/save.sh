@@ -19,7 +19,7 @@
 #   auth   → internal/auth internal/smb/crypto
 #   vfs    → internal/vfs
 #   server → internal/server internal/smb/command internal/smb/dialect test/integration
-#   mdns   → internal/mdns internal/config cmd
+#   mdns   → internal/mdns internal/config cmd configs
 #
 # 注意：这是**开发脚本**，不是软件运行时依赖，不违反 AGENTS.md C3。
 set -e
@@ -44,7 +44,8 @@ if [ "$#" -eq 0 ]; then
     ADD_ARGS="-A"
 else
     for p in "$@"; do
-        if [ -d "$REPO/$p" ]; then
+        # 只对含 .go 文件的目录做编译校验；configs/ 这类纯资源目录直接跳过
+        if [ -d "$REPO/$p" ] && [ -n "$(find "$REPO/$p" -name '*.go' -print -quit)" ]; then
             echo ">>> go build ./$p/..."
             go build "./$p/..."
         fi
