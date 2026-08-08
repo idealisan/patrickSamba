@@ -65,9 +65,16 @@ def main() -> int:
     conn.deleteDirectory(share, "impacket_dir")
     print("  创建/删除目录 OK")
 
-    # 8) 删除文件
-    conn.deleteFile(share, "impacket.txt")
-    assert "impacket.txt" not in [f.get_longname() for f in conn.listPath(share, "\\*")]
+    # 8) 重命名（走 SMB2 FILE_RENAME_INFO，impacket 高层 rename 内部用 setInfo 实现）
+    conn.rename(share, "impacket.txt", "impacket_renamed.txt")
+    after = [f.get_longname() for f in conn.listPath(share, "\\*")]
+    assert "impacket_renamed.txt" in after, "重命名后找不到 impacket_renamed.txt"
+    assert "impacket.txt" not in after, "重命名后旧名仍存在"
+    print("  重命名 OK")
+
+    # 9) 删除文件
+    conn.deleteFile(share, "impacket_renamed.txt")
+    assert "impacket_renamed.txt" not in [f.get_longname() for f in conn.listPath(share, "\\*")]
     print("  删除文件 OK")
 
     conn.logoff()
