@@ -31,14 +31,28 @@ type Handler interface {
 	Handle(input []byte) (output []byte, err error)
 }
 
-// Pipe 模拟一个 SMB 命名管道端点：客户端 WRITE/IOCTL 的输入经 Write 进入，
-// 服务端 READ/IOCTL 的输出经 Read 取走。server 层负责把 SMB2 WRITE/READ 与
+// Pipe 模拟一个 SMB 命名管道端点。server 层负责把 SMB2 WRITE/READ 与
 // FSCTL_PIPE_TRANSCEIVE(0x0011C017) 都接到这一接口上。
+//
+// 两种用法：
+//   - **推荐**：直接用 Transact 做一次请求/响应交换（IOCTL 与 WRITE+READ 都适用），
+//     截断产生的剩余字节由 Pipe 自己保管，后续 Transact/Read 继续取。
+//   - 流式：Write 塞入请求、Read 分批取走响应。Read 在缓冲取空后返回 io.EOF，
+//     因此可以安全地用 io.ReadAll。
 type Pipe interface {
+	// Transact 写入 in（可为 nil，表示只取剩余响应），返回至多 maxOut 字节的响应。
+	// maxOut <= 0 表示不限。响应被截断时返回 ErrMoreData，**剩余部分不会丢失**。
+	Transact(in []byte, maxOut int) ([]byte, error)
+
 	Write(p []byte) (int, error)
 	Read(p []byte) (int, error)
 	Close() error
 }
+
+// ErrMoreData 表示响应超出了调用方给的 maxOut，返回的是截断后的前缀，
+// 剩余字节仍留在管道里，可由后续 Transact/Read 取走。
+// SMB 层应把它映射为 STATUS_BUFFER_OVERFLOW（MS-SMB2 §3.3.5.10）。
+var ErrMoreData = errors.New("dcerpc: 管道响应超出输出缓冲")
 
 // NCA 状态码（MS-RPCE §3.1.1.1 / C706 §13.2.4.1），用于 fault PDU。
 const (
@@ -70,6 +84,10 @@ func OpenPipe(name string, h Handler) (Pipe, error) {
 func (p *pipe) Write(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.writeLocked(b)
+}
+
+func (p *pipe) writeLocked(b []byte) (int, error) {
 	if p.closed {
 		return 0, io.ErrClosedPipe
 	}
@@ -103,15 +121,45 @@ func (p *pipe) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Read 从 outBuf 取走响应数据。没有数据时返回 (0, nil)，由 server 决定重试/挂起。
+// Transact 做一次请求/响应交换：写入 in，取回至多 maxOut 字节的响应。
+//
+// 这是 server 层该用的入口。与 Write+io.ReadAll 相比，它保证
+//   - 截断时剩余字节留在管道内（后续 Transact(nil, n) 或 Read 继续取），
+//   - 不会因为「暂时没数据」而空转。
+func (p *pipe) Transact(in []byte, maxOut int) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(in) > 0 {
+		if _, err := p.writeLocked(in); err != nil {
+			return nil, err
+		}
+	} else if p.closed {
+		return nil, io.ErrClosedPipe
+	}
+
+	n := len(p.outBuf)
+	if maxOut > 0 && n > maxOut {
+		n = maxOut
+	}
+	out := make([]byte, n)
+	copy(out, p.outBuf[:n])
+	p.outBuf = p.outBuf[n:]
+
+	if len(p.outBuf) > 0 {
+		return out, ErrMoreData
+	}
+	return out, nil
+}
+
+// Read 从 outBuf 取走响应数据。缓冲取空后返回 io.EOF ——
+// DCERPC over SMB 是消息模式，一次 Transact 的响应取完就是结束；
+// 返回 (0, nil) 会让 io.ReadAll 这类调用方**死循环**。
 func (p *pipe) Read(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.outBuf) == 0 {
-		if p.closed {
-			return 0, io.EOF
-		}
-		return 0, nil
+		return 0, io.EOF
 	}
 	n := copy(b, p.outBuf)
 	p.outBuf = p.outBuf[n:]
