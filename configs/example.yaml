@@ -54,6 +54,11 @@ shares:
     comment: "Time Machine"
     time_machine: true
     time_machine_max_size: 0   # 0 表示不限制
+    # POSIX 元数据（uid/gid/mode）旁路存储的落盘路径。
+    # **仅 Windows 使用**：NTFS 表达不了 POSIX 属主与权限位，需要一个纯 Go 的
+    # 嵌入式 KV 旁路保存；Linux/macOS 原生能力足够，留空即可（填了会被忽略）。
+    # 建议放在共享目录之外，否则客户端会看到这个数据库文件。
+    # metadata_path: "C:\\ProgramData\\stupidsamba\\backup-meta.db"
 
 mdns:
   enabled: true

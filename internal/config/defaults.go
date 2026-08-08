@@ -40,6 +40,8 @@ func ApplyDefaults(c *Config) {
 			t := true
 			s.Browseable = &t
 		}
+		// Share.MetadataPath 故意不填默认值：它只在 Windows 生效，
+		// 落点由 vfs 层自己决定（AGENTS.md §5 P7），config 不替它做决定。
 	}
 
 	if c.MDNS.Instance == "" {
