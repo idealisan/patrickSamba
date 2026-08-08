@@ -97,10 +97,12 @@ const (
 
 // MsvAvFlags 的位（MS-NLMP §2.2.2.1）。
 const (
+	// AvFlagConstrainedAuth：账户认证受限。
+	AvFlagConstrainedAuth uint32 = 0x00000001
 	// AvFlagMICPresent：AUTHENTICATE_MESSAGE 里带了 MIC 字段，服务端**必须**校验。
 	AvFlagMICPresent uint32 = 0x00000002
-	// AvFlagAccountIsGuest：客户端账户是 guest。
-	AvFlagAccountIsGuest uint32 = 0x00000004
+	// AvFlagUntrustedSPN：客户端提供的 target SPN 来自不可信来源。
+	AvFlagUntrustedSPN uint32 = 0x00000004
 )
 
 // AvPair 是一条 AV_PAIR：AvId(2) || AvLen(2) || Value。
