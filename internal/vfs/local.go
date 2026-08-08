@@ -49,6 +49,15 @@ type LocalConfig struct {
 	// MetadataPath 是旁路元数据库的路径（仅 Windows 使用，见 AGENTS.md §5 P7）。
 	// 空则放在 Root 下的默认位置。
 	MetadataPath string
+
+	// QuotaBytes 限制**向客户端上报**的卷容量（字节），0 表示不限。
+	//
+	// Time Machine 会一直备份到把整个卷吃满为止，所以真实 NAS 都提供
+	// 给 TM 共享设配额的能力。设了以后 StatFS 按 min(宿主真实值, 配额) 上报。
+	//
+	// 这**不是**强制配额：只影响上报的数字，不阻止本地写入。
+	// 真正的强制配额要靠宿主文件系统，不在本软件职责范围内。
+	QuotaBytes uint64
 }
 
 const (
@@ -557,7 +566,63 @@ func (l *LocalFS) StatFS() (*FSInfo, error) {
 	if info.BlockSize == 0 {
 		info.BlockSize = 4096
 	}
+	l.applyQuota(info)
 	return info, nil
+}
+
+// applyQuota 把上报的容量压到配额以内。
+//
+// 语义：配额限制的是**本共享**的总容量，所以
+//
+//	Total = min(宿主 Total, 配额)
+//	Free  = min(宿主 Free,  配额 - 已用)
+//
+// 「已用」取共享自己的占用量还是宿主的占用量？这里取**宿主的**
+// （Total-Free），理由是递归统计共享目录大小在十万级 band 目录上
+// 要几秒钟，每次 QUERY_FS_INFO 都做一遍完全不可接受。
+// 代价是：同一个宿主卷上放多个带配额的共享时，它们互相看得见对方的占用。
+// 对 Time Machine 这个主要场景（一块盘一个备份共享）是准确的。
+func (l *LocalFS) applyQuota(info *FSInfo) {
+	if l.cfg.QuotaBytes == 0 {
+		return
+	}
+	bs := uint64(info.BlockSize)
+	if bs == 0 {
+		return
+	}
+	// 向下取整成块数：宁可少报一点，也不要报出一个写不进去的容量。
+	quotaBlocks := l.cfg.QuotaBytes / bs
+
+	usedBlocks := uint64(0)
+	if info.TotalBlocks > info.FreeBlocks {
+		usedBlocks = info.TotalBlocks - info.FreeBlocks
+	}
+
+	var quotaFree uint64
+	if quotaBlocks > usedBlocks {
+		quotaFree = quotaBlocks - usedBlocks
+	}
+
+	if quotaBlocks < info.TotalBlocks {
+		info.TotalBlocks = quotaBlocks
+	}
+	if quotaFree < info.FreeBlocks {
+		info.FreeBlocks = quotaFree
+	}
+
+	// 收尾时强制维持 Avail <= Free <= Total。
+	//
+	// 少了这一步会在一种真实情况下倒挂：有些网络文件系统的 statfs
+	// 会返回 Free > Total。那时 usedBlocks 被算成 0，配额剩余就没被压住，
+	// 于是压完 Total 之后 Free 反而比 Total 大。
+	// 客户端（尤其 Time Machine）会拿这几个数做减法，一旦倒挂就会
+	// 算出天文数字的可用空间，然后一路写到真正的 ENOSPC。
+	if info.FreeBlocks > info.TotalBlocks {
+		info.FreeBlocks = info.TotalBlocks
+	}
+	if info.AvailBlocks > info.FreeBlocks {
+		info.AvailBlocks = info.FreeBlocks
+	}
 }
 
 // Streams 实现 FileSystem，列出 alternate data stream
