@@ -21,6 +21,7 @@
 | `create-read-write` | smbclient put/get/rm | CREATE / WRITE / READ / SET_INFO |
 | `query-directory` | smbclient `ls` | FileIdBothDirectoryInformation 的对齐与末项 NextEntryOffset=0 |
 | `query-info` | smbclient `allinfo` | FileAllInformation / FileStreamInformation |
+| `set-info` | smbclient rename/setmode/rm | FileRenameInformation / FileBasicInformation / FileDispositionInformation |
 | `gosmb2` | hirochachacha/go-smb2 | 与 smbclient 相互印证的第二套独立实现 |
 
 重新采集：`./test/capture/capture.sh [场景名...]`（需要本机装 samba + smbclient）。
