@@ -60,6 +60,11 @@ type Open struct {
 	// STATUS_NO_SUCH_FILE（首次无匹配）与 STATUS_NO_MORE_FILES（枚举完毕）。
 	dirStarted bool
 
+	// dirPending 是上一轮从 VFS 取出但没能塞进响应缓冲的目录项。
+	// VFS 的枚举游标已经走过它们了，所以必须由这里保管到下一轮，
+	// 否则客户端会**丢文件**。
+	dirPending []vfs.DirEntry
+
 	// pipeOut 是管道上待客户端 READ 取走的响应字节。
 	// 客户端用 WRITE+READ 两步做 DCERPC 调用时，WRITE 阶段产生的响应
 	// 先存在这里，READ 阶段分批吐出。
@@ -132,6 +137,7 @@ func (o *Open) DirScan(pattern string, restart bool) (string, bool) {
 
 	if restart {
 		o.dirStarted = false
+		o.dirPending = nil
 	}
 	if pattern != "" {
 		o.dirPattern = pattern
@@ -142,6 +148,44 @@ func (o *Open) DirScan(pattern string, restart bool) (string, bool) {
 	first := !o.dirStarted
 	o.dirStarted = true
 	return o.dirPattern, first
+}
+
+// ReadDir 取下一批目录项，优先消费上一轮遗留的条目。
+//
+// max <= 0 表示不限条数。返回空切片表示枚举结束。
+func (o *Open) ReadDir(pattern string, restart bool, max int) ([]vfs.DirEntry, error) {
+	o.mu.Lock()
+	if len(o.dirPending) > 0 {
+		out := o.dirPending
+		if max > 0 && len(out) > max {
+			out, o.dirPending = out[:max], out[max:]
+		} else {
+			o.dirPending = nil
+		}
+		o.mu.Unlock()
+		return out, nil
+	}
+	h := o.Handle
+	o.mu.Unlock()
+
+	if h == nil {
+		return nil, vfs.ErrClosed
+	}
+	return h.ReadDir(pattern, restart, max)
+}
+
+// UnreadDir 把没能写进本次响应的目录项退回，下一轮 QUERY_DIRECTORY 先吐它们。
+func (o *Open) UnreadDir(entries []vfs.DirEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	keep := make([]vfs.DirEntry, len(entries))
+	copy(keep, entries)
+
+	o.mu.Lock()
+	// 退回的条目排在已有 pending 之前 —— 它们在枚举顺序上更靠前。
+	o.dirPending = append(keep, o.dirPending...)
+	o.mu.Unlock()
 }
 
 // close 释放底层 VFS 句柄。幂等。
