@@ -193,6 +193,36 @@ func TestTransformErrors(t *testing.T) {
 	}
 }
 
+// nonce 计数器必须单调递增且不重复（含 64 位进位）。
+func TestNonceCounter(t *testing.T) {
+	var n NonceCounter
+	seen := make(map[[16]byte]bool)
+	var prev [16]byte
+	for i := 0; i < 1000; i++ {
+		v := n.Next()
+		if seen[v] {
+			t.Fatalf("第 %d 个 nonce 重复: % x", i, v)
+		}
+		seen[v] = true
+		if bytes.Equal(v[:], make([]byte, 16)) {
+			t.Fatal("不得产生全零 nonce")
+		}
+		prev = v
+	}
+	if binary.LittleEndian.Uint64(prev[0:]) != 1000 {
+		t.Errorf("低 64 位 = %d, want 1000", binary.LittleEndian.Uint64(prev[0:]))
+	}
+
+	// 低位回绕时高位进位。
+	n2 := NonceCounter{low: ^uint64(0) - 1}
+	_ = n2.Next() // low = MaxUint64
+	v := n2.Next()
+	if binary.LittleEndian.Uint64(v[0:]) != 0 || binary.LittleEndian.Uint64(v[8:]) != 1 {
+		t.Errorf("进位错: low=%d high=%d",
+			binary.LittleEndian.Uint64(v[0:]), binary.LittleEndian.Uint64(v[8:]))
+	}
+}
+
 func TestCipherMetadata(t *testing.T) {
 	cases := []struct {
 		c        Cipher

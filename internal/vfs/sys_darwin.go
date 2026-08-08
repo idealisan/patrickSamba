@@ -80,3 +80,6 @@ func platformPreallocate(f *os.File, off, length int64) error {
 	}
 	return nil
 }
+
+// openNoFollow 是 open(2) 的 O_NOFOLLOW 标志。
+const openNoFollow = unix.O_NOFOLLOW

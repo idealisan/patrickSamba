@@ -61,3 +61,7 @@ func platformPreallocate(f *os.File, off, length int64) error {
 	}
 	return nil
 }
+
+// openNoFollow 是 open(2) 的 O_NOFOLLOW 标志。
+// 见 path.go 的 TOCTOU 说明：本包**永远**带着它打开最后一跳。
+const openNoFollow = unix.O_NOFOLLOW

@@ -33,6 +33,9 @@ func mapErrno(errno syscall.Errno) error {
 		return ErrInvalidPath
 	case syscall.EOPNOTSUPP, syscall.ENOSYS:
 		return ErrNotSupported
+	case syscall.EINVAL, syscall.EOVERFLOW:
+		// 参数非法（负 offset、越界 length 等），不是路径问题。
+		return ErrInvalidArg
 	}
 	return nil
 }

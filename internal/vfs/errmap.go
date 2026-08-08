@@ -55,7 +55,7 @@ func isVFSError(err error) bool {
 	for _, s := range []error{
 		ErrNotFound, ErrExist, ErrNotDir, ErrIsDir, ErrNotEmpty,
 		ErrPermission, ErrReadOnly, ErrInvalidPath, ErrNotSupported,
-		ErrNoSpace, ErrTooLarge, ErrClosed,
+		ErrNoSpace, ErrTooLarge, ErrClosed, ErrInvalidArg,
 	} {
 		if errors.Is(err, s) {
 			return true
