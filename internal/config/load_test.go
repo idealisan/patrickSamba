@@ -57,6 +57,14 @@ func TestLoadGood(t *testing.T) {
 	if c.MDNS.Instance != "TESTSRV" {
 		t.Errorf("mdns.instance = %q, 期望回落为 TESTSRV", c.MDNS.Instance)
 	}
+	// good.yaml 里显式写了 smb1: false。用 *bool 的全部意义就在这里：
+	// 显式 false 必须被保留，不能被"默认 true"覆盖掉。
+	if c.Server.SMB1 == nil {
+		t.Fatal("server.smb1 显式设为 false 后不应为 nil")
+	}
+	if *c.Server.SMB1 {
+		t.Error("server.smb1 显式 false 被默认值覆盖了")
+	}
 }
 
 func TestLoadMinimalAppliesDefaults(t *testing.T) {
@@ -82,6 +90,11 @@ func TestLoadMinimalAppliesDefaults(t *testing.T) {
 	}
 	if c.Shares[0].Browseable == nil || !*c.Shares[0].Browseable {
 		t.Error("share.browseable 默认应为 true")
+	}
+	// SMB1 协商入口默认开启：impacket 等客户端默认先发 SMB1 协商，
+	// 默认关掉会让 AGENTS.md §3 必测矩阵里的客户端开箱即用失败。
+	if c.Server.SMB1 == nil || !*c.Server.SMB1 {
+		t.Errorf("server.smb1 默认应为 true，实际 %v", c.Server.SMB1)
 	}
 	if c.MDNS.Apple.Model != DefaultAppleModel {
 		t.Errorf("mdns.apple.model = %q, 期望默认 %q", c.MDNS.Apple.Model, DefaultAppleModel)

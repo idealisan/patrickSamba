@@ -9,7 +9,8 @@ import (
 //
 // 只在**零值**时填默认，不覆盖用户的显式设置。
 // 注意：布尔字段无法区分「未设置」与「显式 false」，
-// 因此所有布尔项的默认值都必须是 false（Share.Browseable 例外，用 *bool）。
+// 因此所有 `bool` 项的默认值都必须是 false；需要默认 true 的项一律用 `*bool`
+// （目前有 Server.SMB1 与 Share.Browseable 两处）。
 func ApplyDefaults(c *Config) {
 	if c.Server.Name == "" {
 		c.Server.Name = defaultServerName()
@@ -28,6 +29,14 @@ func ApplyDefaults(c *Config) {
 	}
 	if c.Server.MaxDialect == "" {
 		c.Server.MaxDialect = DefaultMaxDialect
+	}
+
+	// SMB1 多协议协商入口默认开启（见 config.go 该字段注释）：
+	// impacket 等客户端默认先发 SMB1 协商，关掉会让它们开箱即用失败。
+	// 只是协商入口，不提供 SMB1 文件操作，没有额外攻击面。
+	if c.Server.SMB1 == nil {
+		t := DefaultSMB1Negotiate
+		c.Server.SMB1 = &t
 	}
 
 	if c.Listen.Port == 0 {

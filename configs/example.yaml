@@ -9,8 +9,15 @@ server:
   # 协商范围
   min_dialect: "2.0.2"
   max_dialect: "3.1.1"
-  # 是否响应 SMB1 多协议协商入口（仅用于让老客户端升级到 SMB2）
-  smb1: false
+  # 是否响应 SMB1 多协议协商入口，**留空即默认 true**。
+  #
+  # 这只是 MS-SMB2 §3.3.5.3.1 的协商入口：客户端先发 SMB1 SMB_COM_NEGOTIATE、
+  # 方言表里带 "SMB 2.???"，我们直接用 SMB2 响应把它升级到 SMB2。
+  # 本服务**不提供任何 SMB1 文件操作**，因此没有 SMB1 那些历史漏洞的攻击面。
+  #
+  # 默认开启是为了兼容：impacket 等客户端默认先发 SMB1 协商，关掉就连不上。
+  # 只有在你确信所有客户端都直接发 SMB2 时才需要设成 false。
+  # smb1: true
   signing_required: false
   encryption_required: false
   max_connections: 0
