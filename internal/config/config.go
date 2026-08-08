@@ -83,6 +83,14 @@ type Share struct {
 	TimeMachine bool `yaml:"time_machine"`
 	// TimeMachineMaxSize 限制 Time Machine 可用容量（字节），0 表示不限。
 	TimeMachineMaxSize uint64 `yaml:"time_machine_max_size"`
+	// MetadataPath 是 POSIX 元数据旁路存储（纯 Go 嵌入式 KV）的落盘路径。
+	//
+	// **仅 Windows 使用**（AGENTS.md §5 P7）：NTFS 表达不了 POSIX 的
+	// uid/gid/mode，需要旁路存储；Linux/macOS 原生能力足够，该字段留空即可，
+	// 填了也会被忽略（会有一条启动 WARN）。
+	//
+	// 留空时由 vfs 层决定默认落点，config 不替它做决定。
+	MetadataPath string `yaml:"metadata_path"`
 }
 
 // MDNS 是 mDNS/DNS-SD 广播设置。

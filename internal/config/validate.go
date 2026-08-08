@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -162,6 +163,7 @@ func validateShares(c *Config, errs *ValidationErrors) {
 		prefix := fmt.Sprintf("shares[%d]", i)
 		validateShareName(s, i, prefix, seen, errs)
 		validateSharePath(s, prefix, errs)
+		validateShareMetadataPath(s, prefix, errs)
 
 		if s.TimeMachine && s.ReadOnly {
 			errs.add(prefix+".time_machine", "共享 %q 标记为 Time Machine 目标但同时是只读，备份会失败", s.Name)
@@ -225,6 +227,32 @@ func validateSharePath(s *Share, prefix string, errs *ValidationErrors) {
 	}
 	if !fi.IsDir() {
 		errs.add(prefix+".path", "共享 %q 的路径不是目录: %s", s.Name, s.Path)
+	}
+}
+
+// validateShareMetadataPath 校验 POSIX 元数据旁路存储路径（仅 Windows 生效）。
+//
+// 只校验"路径本身写得对不对"，文件存不存在由 vfs 层在启动时创建。
+func validateShareMetadataPath(s *Share, prefix string, errs *ValidationErrors) {
+	if s.MetadataPath == "" {
+		return
+	}
+	field := prefix + ".metadata_path"
+	if !isAbsPath(s.MetadataPath) {
+		errs.add(field, "共享 %q 的 metadata_path 必须是绝对路径，当前 %q", s.Name, s.MetadataPath)
+		return
+	}
+
+	// 父目录必须已存在，否则 vfs 启动时创建 KV 数据库会失败。
+	dir := filepath.Dir(s.MetadataPath)
+	fi, err := os.Stat(dir)
+	switch {
+	case err != nil && os.IsNotExist(err):
+		errs.add(field, "共享 %q 的 metadata_path 所在目录不存在: %s", s.Name, dir)
+	case err != nil:
+		errs.add(field, "共享 %q 的 metadata_path 所在目录无法访问: %v", s.Name, err)
+	case !fi.IsDir():
+		errs.add(field, "共享 %q 的 metadata_path 所在路径不是目录: %s", s.Name, dir)
 	}
 }
 
@@ -364,6 +392,18 @@ func Warnings(c *Config) []string {
 		if s.GuestOK && !c.Auth.AllowGuest {
 			w = append(w, fmt.Sprintf("shares[%d] %q 设置了 guest_ok 但 auth.allow_guest=false，该设置不会生效", i, s.Name))
 		}
+		if s.MetadataPath == "" {
+			continue
+		}
+		// POSIX 元数据旁路存储只在 Windows 编译进来（AGENTS.md §5 P7）。
+		if runtime.GOOS != "windows" {
+			w = append(w, fmt.Sprintf("shares[%d] %q 设置了 metadata_path，但该字段仅在 Windows 上生效，当前平台（%s）会忽略它",
+				i, s.Name, runtime.GOOS))
+		}
+		if isUnderDir(s.MetadataPath, s.Path) {
+			w = append(w, fmt.Sprintf("shares[%d] %q 的 metadata_path 位于共享目录内部，客户端会看到这个数据库文件，建议放到共享之外",
+				i, s.Name))
+		}
 	}
 
 	for i := range c.Auth.Users {
@@ -378,6 +418,20 @@ func Warnings(c *Config) []string {
 	}
 
 	return w
+}
+
+// isUnderDir 判断 p 是否位于目录 dir 之内（不含 dir 自身）。
+//
+// 只做词法比较，不解析符号链接 —— 这里只用于生成提示，不用于安全判定。
+func isUnderDir(p, dir string) bool {
+	if p == "" || dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	return rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
 
 // isHex32 判断是否为 32 位十六进制字符串。
