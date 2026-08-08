@@ -110,6 +110,9 @@ if [ $i -ge 50 ]; then
 fi
 echo "  已监听 127.0.0.1:$PORT (pid $SRVPID)"
 
+SKIPPED=""
+skip() { printf '\033[1;33m  [SKIP] %s (%s)\033[0m\n' "$1" "$2"; SKIPPED="$SKIPPED $1"; }
+
 run_client() {
     name=$1
     if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
@@ -117,7 +120,14 @@ run_client() {
     fi
     say "客户端 $2"
     shift 2
-    if "$@"; then ok "$name"; else bad "$name"; fi
+    rc=0
+    "$@" || rc=$?
+    # 约定：返回 77 表示环境不满足而跳过，不计入通过数（GNU 惯例）
+    case "$rc" in
+        0)  ok "$name" ;;
+        77) skip "$name" "环境不满足" ;;
+        *)  bad "$name" ;;
+    esac
 }
 
 # ---------------------------------------------------------------- 客户端 1: smbclient
@@ -158,7 +168,7 @@ t_gosmb2() {
 # ---------------------------------------------------------------- 客户端 4: mount.cifs (Linux 内核)
 
 t_mountcifs() {
-    [ "$(id -u)" = "0" ] || { echo "  跳过：需要 root"; return 0; }
+    [ "$(id -u)" = "0" ] || { echo "  跳过：需要 root 才能 mount"; return 77; }
     MNT="$WORK/mnt"
     mkdir -p "$MNT"
     mount -t cifs "//127.0.0.1/public" "$MNT" \
@@ -183,6 +193,7 @@ run_client mountcifs "mount.cifs (Linux 内核客户端)"     t_mountcifs
 say "结果汇总"
 echo "  通过:$PASSED"
 echo "  失败:$FAILED"
+[ -n "$SKIPPED" ] && echo "  跳过:$SKIPPED"
 
 n=0
 for _ in $PASSED; do n=$((n + 1)); done
