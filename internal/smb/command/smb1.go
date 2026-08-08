@@ -6,6 +6,7 @@ import (
 
 	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
 
 // SMB1 多协议协商入口（MS-SMB2 §3.3.5.3.1，protocol-notes §4）。
@@ -132,8 +133,8 @@ func AppendSMB1NegotiateReply(conn *Conn, dialects []string, out []byte) ([]byte
 		MaxTransactSize: chosen.MaxTransactSize(),
 		MaxReadSize:     chosen.MaxTransactSize(),
 		MaxWriteSize:    chosen.MaxTransactSize(),
-		SystemTime:      fileTime(time.Now()),
-		ServerStartTime: fileTime(conn.Settings.StartTime),
+		SystemTime:      vfs.TimeToFiletime(time.Now()),
+		ServerStartTime: vfs.TimeToFiletime(conn.Settings.StartTime),
 		SecurityBuffer:  conn.Settings.Auth.InitialToken(),
 	}
 	if conn.Settings.SigningRequired {

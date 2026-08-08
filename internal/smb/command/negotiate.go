@@ -7,243 +7,292 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
 
-func init() {
-	// NEGOTIATE 是唯一在没有会话时也必须处理的命令。
-	register(wire.CommandNegotiate, false, false, handleNegotiate)
-}
-
-// preauthSaltSize 是 3.1.1 PREAUTH_INTEGRITY_CAPABILITIES 里服务端 Salt 的长度。
+// preauthSaltSize 是 3.1.1 PREAUTH_INTEGRITY_CAPABILITIES 里 Salt 的长度。
 //
-// MS-SMB2 §2.2.3.1.1 没有规定长度，Windows 与 Samba 都用 32 字节。
+// MS-SMB2 §2.2.3.1.1 没有规定具体长度，Windows 实现用 32 字节，
+// 这里对齐它（协议上只要求双方各自把对方的报文原样滚进 hash）。
 const preauthSaltSize = 32
 
-// serverSupportedCiphers 是本端实现的加密算法，用于与客户端列表求交集。
+// cipherPreference 是本端对 3.1.1 加密算法的偏好顺序（MS-SMB2 §2.2.3.1.2）。
 //
-// AES-CCM 由 internal/smb/crypto 自实现（标准库没有），
-// AES-GCM 来自标准库。四种都支持。
-var serverSupportedCiphers = []uint16{
+// GCM 优先于 CCM：两者安全性等价，但 GCM 在有 AES-NI 的机器上快一个数量级，
+// 且 Windows / macOS 现代客户端默认也偏好 GCM。
+var cipherPreference = []uint16{
 	wire.CipherAES128GCM,
-	wire.CipherAES128CCM,
 	wire.CipherAES256GCM,
+	wire.CipherAES128CCM,
 	wire.CipherAES256CCM,
 }
 
-// serverSupportedSigningAlgorithms 是本端实现的签名算法。
-var serverSupportedSigningAlgorithms = []uint16{
-	wire.SigningAlgorithmAESCMAC,
-	wire.SigningAlgorithmAESGMAC,
-	wire.SigningAlgorithmHMACSHA256,
+func init() {
+	// NEGOTIATE 是连接上的第一条命令，既没有会话也没有树。
+	register(wire.CommandNegotiate, false, false, handleNegotiate)
 }
 
-// handleNegotiate 处理 SMB2 NEGOTIATE（MS-SMB2 §3.3.5.4）。
+// handleNegotiate 处理 SMB2 NEGOTIATE（MS-SMB2 §2.2.3 / §3.3.5.4）。
 func handleNegotiate(ctx *Context) error {
-	conn := ctx.Conn
+	c := ctx.Conn
+	set := c.Settings
 
-	// MS-SMB2 §3.3.5.4：一条连接上只允许协商一次。
-	if conn.NegotiateDone {
+	// MS-SMB2 §3.3.5.4：同一连接上重复 NEGOTIATE 必须回 STATUS_INVALID_PARAMETER。
+	// 不这样做会给降级攻击留口子（协商完 3.1.1 再"重协商"回 2.0.2）。
+	if c.NegotiateDone {
+		ctx.Log.Warn("同一连接上重复 NEGOTIATE")
 		return status.InvalidParameter
 	}
 
 	req, err := wire.ParseNegotiateRequest(ctx.Msg)
 	if err != nil {
-		ctx.Log.Debug("NEGOTIATE 请求解析失败", "remote", conn.RemoteAddr, "err", err)
+		ctx.Log.Warn("NEGOTIATE 请求解析失败", "err", err)
+		return status.InvalidParameter
+	}
+	if len(req.Dialects) == 0 {
 		return status.InvalidParameter
 	}
 
-	client := make([]dialect.Dialect, 0, len(req.Dialects))
-	for _, d := range req.Dialects {
-		client = append(client, dialect.Dialect(d))
+	// ---- 方言协商：取双方交集中的最高方言（MS-SMB2 §3.3.5.4）----
+	client := make([]dialect.Dialect, len(req.Dialects))
+	for i, d := range req.Dialects {
+		client[i] = dialect.Dialect(d)
 	}
-
-	chosen, ok := dialect.Negotiate(client, conn.Settings.MinDialect, conn.Settings.MaxDialect)
+	d, ok := dialect.Negotiate(client, set.MinDialect, set.MaxDialect)
 	if !ok {
-		ctx.Log.Warn("没有共同支持的 SMB 方言",
-			"remote", conn.RemoteAddr, "client_dialects", client)
+		ctx.Log.Warn("没有可用的公共方言", "client", client,
+			"server", dialect.Range(set.MinDialect, set.MaxDialect))
 		return status.NotSupported
 	}
 
-	conn.Dialect = chosen
-	conn.ClientGUID = req.ClientGUID
-	conn.ClientCapabilities = req.Capabilities
-	conn.ClientSecurityMode = req.SecurityMode
-	conn.ClientDialects = client
+	// 先定型方言：3.1.1 的 preauth hash 更新依赖它。
+	c.Dialect = d
+	c.ClientGUID = req.ClientGUID
+	c.ClientCapabilities = req.Capabilities
+	c.ClientSecurityMode = req.SecurityMode
+	c.ClientDialects = client
 
-	// 3.1.1 的 preauth integrity hash 从 NEGOTIATE Request 本身开始滚动。
-	// 必须在这里做（方言此时才确定），响应部分由 internal/server 在
-	// 复合链拼装完成后追加（见 Context.HashResponseConn）。
-	conn.UpdatePreauthHash(ctx.Msg)
+	// MS-SMB2 §3.3.5.4：3.1.1 的 preauth hash 从全零开始，
+	// 第一条滚进去的就是 NEGOTIATE Request 本身。
+	c.UpdatePreauthHash(ctx.Msg)
 
-	resp := &wire.NegotiateResponse{
-		DialectRevision: wire.Dialect(chosen),
-		ServerGUID:      conn.Settings.ServerGUID,
-		MaxTransactSize: chosen.MaxTransactSize(),
-		MaxReadSize:     chosen.MaxTransactSize(),
-		MaxWriteSize:    chosen.MaxTransactSize(),
-		SystemTime:      fileTime(time.Now()),
-		ServerStartTime: fileTime(conn.Settings.StartTime),
-		SecurityBuffer:  conn.Settings.Auth.InitialToken(),
+	// ---- 签名策略 ----
+	//
+	// 只要任意一方要求签名，本连接就强制签名（MS-SMB2 §3.3.5.4）。
+	c.SigningRequired = set.SigningRequired ||
+		req.SecurityMode&wire.NegotiateSigningRequired != 0
+
+	// 服务端始终宣告"支持签名"。要求与否由 SIGNING_REQUIRED 位表达。
+	c.ServerSecurityMode = wire.NegotiateSigningEnabled
+	if set.SigningRequired {
+		c.ServerSecurityMode |= wire.NegotiateSigningRequired
 	}
 
-	// SecurityMode：我们**始终**声明支持签名；是否强制由配置决定
-	// （MS-SMB2 §2.2.4 SecurityMode）。
-	resp.SecurityMode = wire.NegotiateSigningEnabled
-	if conn.Settings.SigningRequired {
-		resp.SecurityMode |= wire.NegotiateSigningRequired
-	}
+	// ---- 尺寸上限 ----
+	maxSize := d.MaxTransactSize()
+	c.MaxTransactSize = maxSize
+	c.MaxReadSize = maxSize
+	c.MaxWriteSize = maxSize
 
-	// 3.1.1 用 negotiate context 协商加密；3.0/3.0.2 用 Capabilities 位。
-	encryptionOK := conn.Settings.EncryptionEnabled && chosen.SupportsEncryption()
-	resp.Capabilities = wire.Capabilities(chosen.ServerCapabilities(encryptionOK))
-
-	if chosen.SupportsNegotiateContexts() {
-		if err := negotiateContexts(ctx, req, resp, encryptionOK); err != nil {
+	// ---- 3.1.1 negotiate contexts ----
+	var respContexts []wire.NegotiateContext
+	if d.SupportsNegotiateContexts() {
+		respContexts, err = negotiateContexts(ctx, req)
+		if err != nil {
+			c.Dialect = 0 // 协商失败，连接回到未协商状态
 			return err
 		}
 	}
 
-	conn.ServerCapabilities = resp.Capabilities
-	conn.ServerSecurityMode = resp.SecurityMode
-	conn.MaxTransactSize = resp.MaxTransactSize
-	conn.MaxReadSize = resp.MaxReadSize
-	conn.MaxWriteSize = resp.MaxWriteSize
-	// 只要任何一方要求签名，本连接就强制签名（MS-SMB2 §3.3.5.4）。
-	conn.SigningRequired = conn.Settings.SigningRequired ||
-		req.SecurityMode&wire.NegotiateSigningRequired != 0
-	conn.NegotiateDone = true
+	encryption := c.Cipher != 0
+	c.ServerCapabilities = wire.Capabilities(d.ServerCapabilities(encryption))
+
+	now := time.Now()
+	start := set.StartTime
+	if start.IsZero() {
+		start = now
+	}
+
+	resp := &wire.NegotiateResponse{
+		SecurityMode:    c.ServerSecurityMode,
+		DialectRevision: wire.Dialect(d),
+		ServerGUID:      set.ServerGUID,
+		Capabilities:    c.ServerCapabilities,
+		MaxTransactSize: c.MaxTransactSize,
+		MaxReadSize:     c.MaxReadSize,
+		MaxWriteSize:    c.MaxWriteSize,
+		SystemTime:      vfs.TimeToFiletime(now),
+		ServerStartTime: vfs.TimeToFiletime(start),
+		// SPNEGO negTokenInit2：宣告服务端支持的认证机制。
+		SecurityBuffer: set.Auth.InitialToken(),
+		Contexts:       respContexts,
+	}
 
 	out, err := resp.Append(ctx.Out)
 	if err != nil {
-		ctx.Log.Error("NEGOTIATE 响应编码失败", "remote", conn.RemoteAddr, "err", err)
-		return status.InsuffServerResources
+		ctx.Log.Error("NEGOTIATE 响应编码失败", "err", err)
+		c.Dialect = 0
+		return status.InsufficientResources
 	}
 	ctx.Out = out
 
-	// 响应字节也要滚进连接级 preauth hash（在头回填之后由 server 执行）。
-	ctx.HashResponseConn = chosen.SupportsPreauthIntegrity()
+	// 响应字节也要滚进连接级 preauth hash —— 但必须等响应头回填之后，
+	// 所以只在这里打标记，实际计算在 Dispatch 里做。
+	ctx.HashResponseConn = true
 
+	c.NegotiateDone = true
 	ctx.Log.Info("SMB 方言协商完成",
-		"remote", conn.RemoteAddr,
-		"dialect", chosen.String(),
-		"signing_required", conn.SigningRequired,
-		"cipher", conn.Cipher,
-	)
+		"dialect", d.String(),
+		"signing_required", c.SigningRequired,
+		"cipher", c.Cipher,
+		"max_transact", c.MaxTransactSize)
 	return nil
 }
 
-// negotiateContexts 处理 3.1.1 的 negotiate context 协商（MS-SMB2 §3.3.5.4）。
-func negotiateContexts(ctx *Context, req *wire.NegotiateRequest,
-	resp *wire.NegotiateResponse, encryptionOK bool) error {
+// negotiateContexts 处理 3.1.1 的 negotiate context 协商，返回要回给客户端的
+// context 列表（MS-SMB2 §2.2.3.1 / §3.3.5.4）。
+func negotiateContexts(ctx *Context, req *wire.NegotiateRequest) ([]wire.NegotiateContext, error) {
+	c := ctx.Conn
+	var out []wire.NegotiateContext
 
-	conn := ctx.Conn
-	sawPreauth := false
+	preauthCtx, err := negotiatePreauth(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, preauthCtx)
 
-	for _, c := range req.Contexts {
-		switch c.Type {
-		case wire.ContextPreauthIntegrityCapabilities:
-			p, err := wire.ParsePreauthIntegrityCapabilities(c.Data)
-			if err != nil {
-				return status.InvalidParameter
-			}
-			if !containsU16(p.HashAlgorithms, wire.HashAlgorithmSHA512) {
-				// 无交集：MS-SMB2 §3.3.5.4 要求回专用错误码。
-				return status.SMBNoPreauthIntegrityHashOverlap
-			}
-			sawPreauth = true
-
-			salt := make([]byte, preauthSaltSize)
-			if _, err := rand.Read(salt); err != nil {
-				return status.InsuffServerResources
-			}
-			data, err := (&wire.PreauthIntegrityCapabilities{
-				HashAlgorithms: []uint16{wire.HashAlgorithmSHA512},
-				Salt:           salt,
-			}).Encode()
-			if err != nil {
-				return status.InsuffServerResources
-			}
-			resp.Contexts = append(resp.Contexts, wire.NegotiateContext{
-				Type: wire.ContextPreauthIntegrityCapabilities,
-				Data: data,
-			})
-
-		case wire.ContextEncryptionCapabilities:
-			e, err := wire.ParseEncryptionCapabilities(c.Data)
-			if err != nil {
-				return status.InvalidParameter
-			}
-			// MS-SMB2 §3.3.5.4：收到 ENCRYPTION_CAPABILITIES 就**必须**回应；
-			// 无交集时回 Ciphers[0] = 0x0000 表示不加密。
-			chosenCipher := uint16(0)
-			if encryptionOK {
-				chosenCipher = firstSupported(e.Ciphers, serverSupportedCiphers)
-			}
-			conn.Cipher = chosenCipher
-			data, err := (&wire.EncryptionCapabilities{
-				Ciphers: []uint16{chosenCipher},
-			}).Encode()
-			if err != nil {
-				return status.InsuffServerResources
-			}
-			resp.Contexts = append(resp.Contexts, wire.NegotiateContext{
-				Type: wire.ContextEncryptionCapabilities,
-				Data: data,
-			})
-
-		case wire.ContextSigningCapabilities:
-			s, err := wire.ParseSigningCapabilities(c.Data)
-			if err != nil {
-				return status.InvalidParameter
-			}
-			// MS-SMB2 §3.3.5.4：选客户端列表中**第一个**本端支持的算法。
-			alg := firstSupported(s.SigningAlgorithms, serverSupportedSigningAlgorithms)
-			conn.SigningAlgorithm = alg
-			data, err := (&wire.SigningCapabilities{
-				SigningAlgorithms: []uint16{alg},
-			}).Encode()
-			if err != nil {
-				return status.InsuffServerResources
-			}
-			resp.Contexts = append(resp.Contexts, wire.NegotiateContext{
-				Type: wire.ContextSigningCapabilities,
-				Data: data,
-			})
-
-		case wire.ContextCompressionCapabilities,
-			wire.ContextNetnameNegotiateContextID,
-			wire.ContextTransportCapabilities,
-			wire.ContextRDMATransformCapabilities:
-			// 不支持压缩 / RDMA；NETNAME 与 TRANSPORT 规范要求忽略。
-			// 对压缩**不回应**即表示不启用（protocol-notes §4）。
-
-		default:
-			// 未知 context 一律忽略（MS-SMB2 §3.3.5.4 要求向前兼容）。
-		}
+	if encCtx, ok, err := negotiateCipher(ctx, req); err != nil {
+		return nil, err
+	} else if ok {
+		out = append(out, encCtx)
 	}
 
-	// MS-SMB2 §3.3.5.4：3.1.1 客户端**必须**恰好发一个
-	// PREAUTH_INTEGRITY_CAPABILITIES，没有就是协议错误。
-	if !sawPreauth {
-		return status.InvalidParameter
+	// SIGNING_CAPABILITIES 刻意**不回应**。
+	//
+	// MS-SMB2 §3.2.5.2：响应里没有该 context 时，客户端把签名算法置为方言
+	// 默认值（3.x 为 AES-CMAC），这正是 crypto.SigningAlgorithmForDialect
+	// 的行为，双方天然一致。等 AES-GMAC 端到端验证过了再考虑协商它。
+	// TODO(M4): 支持协商 AES-GMAC（wire.SigningAlgorithmAESGMAC）。
+	if hasContext(req.Contexts, wire.ContextSigningCapabilities) {
+		c.SigningAlgorithm = wire.SigningAlgorithmAESCMAC
 	}
 
-	// 未协商 SIGNING_CAPABILITIES 时，3.1.1 默认用 AES-CMAC（protocol-notes §6）。
-	if conn.SigningAlgorithm == 0 && !hasContext(req.Contexts, wire.ContextSigningCapabilities) {
-		conn.SigningAlgorithm = wire.SigningAlgorithmAESCMAC
-	}
-	return nil
+	return out, nil
 }
 
-func hasContext(list []wire.NegotiateContext, t wire.NegotiateContextType) bool {
-	for _, c := range list {
-		if c.Type == t {
-			return true
-		}
+// negotiatePreauth 校验并回应 SMB2_PREAUTH_INTEGRITY_CAPABILITIES。
+//
+// MS-SMB2 §3.3.5.4：协商到 3.1.1 时该 context **必须**存在，
+// 且双方必须至少有一个共同的哈希算法（目前规范只定义了 SHA-512）。
+func negotiatePreauth(ctx *Context, req *wire.NegotiateRequest) (wire.NegotiateContext, error) {
+	var zero wire.NegotiateContext
+
+	data, ok := findContext(req.Contexts, wire.ContextPreauthIntegrityCapabilities)
+	if !ok {
+		ctx.Log.Warn("3.1.1 协商缺少 PREAUTH_INTEGRITY_CAPABILITIES")
+		return zero, status.InvalidParameter
 	}
-	return false
+	caps, err := wire.ParsePreauthIntegrityCapabilities(data)
+	if err != nil {
+		ctx.Log.Warn("PREAUTH_INTEGRITY_CAPABILITIES 解析失败", "err", err)
+		return zero, status.InvalidParameter
+	}
+	if !containsU16(caps.HashAlgorithms, wire.HashAlgorithmSHA512) {
+		ctx.Log.Warn("客户端不支持 SHA-512 preauth 哈希", "algorithms", caps.HashAlgorithms)
+		return zero, status.SMBNoPreauthIntegrityHashOverlap
+	}
+
+	salt := make([]byte, preauthSaltSize)
+	if _, err := rand.Read(salt); err != nil {
+		ctx.Log.Error("生成 preauth salt 失败", "err", err)
+		return zero, status.InsufficientResources
+	}
+
+	payload, err := (&wire.PreauthIntegrityCapabilities{
+		HashAlgorithms: []uint16{wire.HashAlgorithmSHA512},
+		Salt:           salt,
+	}).Encode()
+	if err != nil {
+		return zero, status.InsufficientResources
+	}
+	return wire.NegotiateContext{
+		Type: wire.ContextPreauthIntegrityCapabilities,
+		Data: payload,
+	}, nil
 }
 
+// negotiateCipher 选择 3.1.1 的加密算法。
+//
+// 返回 ok=false 表示不需要回 ENCRYPTION_CAPABILITIES（客户端没提，或本端
+// 没开加密）。MS-SMB2 §3.3.5.4：客户端提了但没有共同算法时，服务端要回一个
+// Ciphers 为空（等价于 SMB2_ENCRYPTION_NONE）的 context，而不是直接失败。
+func negotiateCipher(ctx *Context, req *wire.NegotiateRequest) (wire.NegotiateContext, bool, error) {
+	var zero wire.NegotiateContext
+	c := ctx.Conn
+	set := c.Settings
+
+	data, ok := findContext(req.Contexts, wire.ContextEncryptionCapabilities)
+	if !ok {
+		if set.EncryptionRequired {
+			ctx.Log.Warn("配置要求加密但客户端未提供 ENCRYPTION_CAPABILITIES")
+			return zero, false, status.AccessDenied
+		}
+		return zero, false, nil
+	}
+	if !set.EncryptionEnabled {
+		// 本端没开加密：不回该 context，客户端会当作服务端不支持。
+		return zero, false, nil
+	}
+
+	caps, err := wire.ParseEncryptionCapabilities(data)
+	if err != nil {
+		ctx.Log.Warn("ENCRYPTION_CAPABILITIES 解析失败", "err", err)
+		return zero, false, status.InvalidParameter
+	}
+
+	chosen := uint16(0)
+	for _, want := range cipherPreference {
+		if containsU16(caps.Ciphers, want) {
+			chosen = want
+			break
+		}
+	}
+	if chosen == 0 {
+		if set.EncryptionRequired {
+			ctx.Log.Warn("配置要求加密但与客户端无共同算法", "client", caps.Ciphers)
+			return zero, false, status.AccessDenied
+		}
+		ctx.Log.Warn("与客户端无共同加密算法，本会话不加密", "client", caps.Ciphers)
+	}
+	c.Cipher = chosen
+
+	payload, err := (&wire.EncryptionCapabilities{Ciphers: []uint16{chosen}}).Encode()
+	if err != nil {
+		return zero, false, status.InsufficientResources
+	}
+	return wire.NegotiateContext{
+		Type: wire.ContextEncryptionCapabilities,
+		Data: payload,
+	}, true, nil
+}
+
+// findContext 返回第一个指定类型的 negotiate context 载荷。
+func findContext(ctxs []wire.NegotiateContext, typ wire.NegotiateContextType) ([]byte, bool) {
+	for _, c := range ctxs {
+		if c.Type == typ {
+			return c.Data, true
+		}
+	}
+	return nil, false
+}
+
+// hasContext 报告是否存在指定类型的 negotiate context。
+func hasContext(ctxs []wire.NegotiateContext, typ wire.NegotiateContextType) bool {
+	_, ok := findContext(ctxs, typ)
+	return ok
+}
+
+// containsU16 报告 list 中是否含有 v。
 func containsU16(list []uint16, v uint16) bool {
 	for _, x := range list {
 		if x == v {
@@ -251,27 +300,4 @@ func containsU16(list []uint16, v uint16) bool {
 		}
 	}
 	return false
-}
-
-// firstSupported 返回 client 列表中第一个出现在 server 列表里的值；
-// 无交集返回 0。
-func firstSupported(client, server []uint16) uint16 {
-	for _, c := range client {
-		if containsU16(server, c) {
-			return c
-		}
-	}
-	return 0
-}
-
-// filetimeEpochOffset 是 1601-01-01 UTC 到 1970-01-01 UTC 的 100ns 数
-// （protocol-notes §11）。
-const filetimeEpochOffset = 116444736000000000
-
-// fileTime 把 Go 时间转换为 Windows FILETIME（1601 epoch，100ns 单位）。
-func fileTime(t time.Time) uint64 {
-	if t.IsZero() {
-		return 0
-	}
-	return uint64(t.UnixNano()/100 + filetimeEpochOffset)
 }
