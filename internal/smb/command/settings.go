@@ -72,6 +72,10 @@ type Settings struct {
 	// Shares 是全部已装配的共享（含 IPC$）。
 	Shares []*Share
 
+	// Pipes 是 IPC$ 上的命名管道后端（由 internal/dcerpc 实现、cmd 层装配）。
+	// nil 时对 IPC$ 的 CREATE 一律回 STATUS_OBJECT_NAME_NOT_FOUND。
+	Pipes PipeOpener
+
 	// 资源上限，0 表示使用默认值。
 	MaxSessionsPerConn int
 	MaxTreesPerSession int

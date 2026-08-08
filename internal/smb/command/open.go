@@ -26,7 +26,11 @@ type Open struct {
 
 	// Handle 是 VFS 句柄。仅请求属性（vfs.OpenAttrOnly）时也会有句柄，
 	// 由 VFS 后端决定是否真的持有 fd。
+	// IPC$ 上的管道句柄没有 VFS 后端，此处为 nil。
 	Handle vfs.Handle
+
+	// Pipe 是 IPC$ 上的命名管道实例，非管道句柄为 nil。
+	Pipe Pipe
 
 	// IsDir 表示该句柄指向目录。
 	IsDir bool
@@ -56,7 +60,53 @@ type Open struct {
 	// STATUS_NO_SUCH_FILE（首次无匹配）与 STATUS_NO_MORE_FILES（枚举完毕）。
 	dirStarted bool
 
+	// pipeOut 是管道上待客户端 READ 取走的响应字节。
+	// 客户端用 WRITE+READ 两步做 DCERPC 调用时，WRITE 阶段产生的响应
+	// 先存在这里，READ 阶段分批吐出。
+	pipeOut []byte
+
 	closed bool
+}
+
+// IsPipe 报告本句柄是否为 IPC$ 上的命名管道。
+func (o *Open) IsPipe() bool { return o.Pipe != nil }
+
+// PipeTransact 在管道上做一次请求/响应交换，并把响应存入待读缓冲。
+//
+// 返回的是**本次可以立即回给客户端**的字节数上限内的响应；
+// 调用方（WRITE handler）通常不直接使用它，而是让后续 READ 取走。
+func (o *Open) PipeTransact(in []byte, maxOut int) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	out, err := o.Pipe.Transact(in, maxOut)
+	// ErrPipeMoreData 时 out 仍是有效的截断前缀，要一并缓存。
+	if out != nil {
+		o.pipeOut = append(o.pipeOut, out...)
+	}
+	return err
+}
+
+// PipeRead 从待读缓冲取走至多 max 字节。返回的切片是缓冲的副本。
+func (o *Open) PipeRead(max int) []byte {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if len(o.pipeOut) == 0 {
+		return nil
+	}
+	n := min(max, len(o.pipeOut))
+	out := make([]byte, n)
+	copy(out, o.pipeOut[:n])
+	o.pipeOut = o.pipeOut[n:]
+	return out
+}
+
+// PipePending 返回待读缓冲中剩余的字节数。
+func (o *Open) PipePending() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.pipeOut)
 }
 
 // SetDeleteOnClose 设置/清除关闭时删除标志。
@@ -106,11 +156,17 @@ func (o *Open) close() {
 	}
 	o.closed = true
 	h := o.Handle
+	p := o.Pipe
 	o.Handle = nil
+	o.Pipe = nil
+	o.pipeOut = nil
 	o.mu.Unlock()
 
 	if h != nil {
 		_ = h.Close()
+	}
+	if p != nil {
+		_ = p.Close()
 	}
 }
 
