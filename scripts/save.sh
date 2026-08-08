@@ -38,16 +38,19 @@ export CGO_ENABLED=0
 
 # ---------------------------------------------------------------- 1. 编译校验
 
+# -o /dev/null：只做编译校验，不落产物。
+# 不加的话，只要路径里有 main 包（例如 test/capture），go build 会把二进制
+# 直接吐在仓库根，5 个 agent 共用一个工作树，很容易被别人的 `git add -A` 带进提交。
 if [ "$#" -eq 0 ]; then
     echo ">>> go build ./...  (整树)"
-    go build ./...
+    go build -o /dev/null ./...
     ADD_ARGS="-A"
 else
     for p in "$@"; do
         # 只对含 .go 文件的目录做编译校验；configs/ 这类纯资源目录直接跳过
         if [ -d "$REPO/$p" ] && [ -n "$(find "$REPO/$p" -name '*.go' -print -quit)" ]; then
             echo ">>> go build ./$p/..."
-            go build "./$p/..."
+            go build -o /dev/null "./$p/..."
         fi
     done
     ADD_ARGS="$*"
