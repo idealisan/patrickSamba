@@ -1,5 +1,7 @@
 /bin/
 /dist/
+# `go build ./cmd/stupidsamba` 在仓库根直接产出的二进制
+/stupidsamba
 *.exe
 *.test
 *.out
