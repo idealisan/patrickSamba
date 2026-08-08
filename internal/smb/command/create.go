@@ -1,0 +1,325 @@
+package command
+
+import (
+	"errors"
+	"strings"
+
+	"github.com/finalappstore/stupidsamba/internal/smb/status"
+	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/finalappstore/stupidsamba/internal/vfs"
+)
+
+func init() {
+	register(wire.CommandCreate, true, true, handleCreate)
+}
+
+// handleCreate 处理 SMB2 CREATE（MS-SMB2 §3.3.5.9）。
+//
+// CREATE 是整个协议里语义最重的命令：它同时承担 open / create / truncate /
+// mkdir / delete-on-close 五件事，具体做哪件由 CreateDisposition 与
+// CreateOptions 的组合决定。这里把这些组合翻译成 vfs.OpenRequest，
+// 真正的路径校验与 IO 由 VFS 层负责（AGENTS.md §8：路径穿越防御统一在 VFS）。
+func handleCreate(ctx *Context) error {
+	req, err := wire.ParseCreateRequest(ctx.Msg)
+	if err != nil {
+		ctx.Log.Debug("CREATE 请求解析失败", "err", err)
+		return status.InvalidParameter
+	}
+
+	if ctx.Tree.IsIPC() {
+		return createPipe(ctx, req)
+	}
+	return createFile(ctx, req)
+}
+
+// createFile 在磁盘共享上打开/创建对象。
+func createFile(ctx *Context, req *wire.CreateRequest) error {
+	fs := ctx.Tree.FS()
+	if fs == nil {
+		return status.NetworkNameDeleted
+	}
+
+	// 不支持按 FileId 打开（需要一张全卷 FileId→路径表，且客户端有回退路径）。
+	if req.CreateOptions&wire.FileOpenByFileID != 0 {
+		return status.NotSupported
+	}
+
+	path, stream, err := splitCreateName(req.Name)
+	if err != nil {
+		return err
+	}
+
+	// GENERIC_* 要先展开成具体位，后续判定才有意义（MS-DTYP §2.4.3）。
+	access := req.DesiredAccess.Expand()
+	// MAXIMUM_ALLOWED：按本树允许的上限授予。授权依据是配置，不是宿主 ACL。
+	if access&wire.MaximumAllowed != 0 {
+		access = maximalAccessFor(ctx.Tree)
+	}
+
+	writing := access&(wire.FileWriteData|wire.FileAppendData|wire.FileWriteEA|
+		wire.FileWriteAttributes|wire.Delete|wire.WriteDAC|wire.WriteOwner) != 0
+	// 除 FILE_OPEN 外的所有 disposition 都会改动文件系统。
+	mutating := req.CreateDisposition != wire.FileOpen
+	if writing || mutating {
+		if err := ctx.RequireWritable(); err != nil {
+			return err
+		}
+	}
+
+	openReq := &vfs.OpenRequest{
+		Path:           path,
+		Stream:         stream,
+		Flags:          openFlags(access, req.CreateOptions),
+		Disposition:    vfs.Disposition(req.CreateDisposition),
+		FileAttributes: uint32(req.FileAttributes),
+	}
+
+	h, action, err := fs.Open(openReq)
+	if err != nil {
+		ctx.Log.Debug("CREATE 打开失败", "path", path, "stream", stream, "err", err)
+		return createStatus(err, req.CreateDisposition)
+	}
+
+	attr, err := h.Stat()
+	if err != nil {
+		_ = h.Close()
+		return status.FromVFSError(err)
+	}
+
+	isDir := attr.FileAttributes&vfs.FileAttributeDirectory != 0
+	// FILE_DIRECTORY_FILE / FILE_NON_DIRECTORY_FILE 是硬性断言，
+	// VFS 后端可能没能力提前判断，这里兜底（MS-SMB2 §3.3.5.9）。
+	if req.CreateOptions&wire.FileDirectoryFile != 0 && !isDir {
+		_ = h.Close()
+		return status.NotADirectory
+	}
+	if req.CreateOptions&wire.FileNonDirectoryFile != 0 && isDir {
+		_ = h.Close()
+		return status.FileIsADirectory
+	}
+
+	open := &Open{
+		Tree:           ctx.Tree,
+		Path:           path,
+		Stream:         stream,
+		Handle:         h,
+		IsDir:          isDir,
+		GrantedAccess:  access,
+		ShareAccess:    req.ShareAccess,
+		CreateAction:   wire.CreateAction(action),
+		CreateOptions:  req.CreateOptions,
+		FileAttributes: wire.FileAttributes(attr.FileAttributes),
+	}
+	if req.CreateOptions&wire.FileDeleteOnClose != 0 {
+		if err := ctx.RequireWritable(); err != nil {
+			_ = h.Close()
+			return err
+		}
+		open.SetDeleteOnClose(true)
+	}
+
+	if st := ctx.Session.AddOpen(open); st != status.Success {
+		_ = h.Close()
+		return st
+	}
+	ctx.Chain.LastOpen = open
+
+	resp := &wire.CreateResponse{
+		// 不实现 oplock/lease：一律回 NONE。客户端会退化成不缓存，
+		// 正确性不受影响（protocol-notes §9）。
+		OplockLevel:    wire.OplockLevelNone,
+		CreateAction:   open.CreateAction,
+		CreationTime:   vfs.TimeToFiletime(attr.CreateTime),
+		LastAccessTime: vfs.TimeToFiletime(attr.AccessTime),
+		LastWriteTime:  vfs.TimeToFiletime(attr.WriteTime),
+		ChangeTime:     vfs.TimeToFiletime(attr.ChangeTime),
+		AllocationSize: uint64(attr.Alloc),
+		EndOfFile:      uint64(attr.Size),
+		FileAttributes: wire.FileAttributes(attr.FileAttributes),
+		FileID:         wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
+		Contexts:       createResponseContexts(req, attr),
+	}
+
+	out, err := resp.Append(ctx.Out)
+	if err != nil {
+		ctx.Log.Error("编码 CREATE Response 失败", "err", err)
+		return status.InsuffServerResources
+	}
+	ctx.Out = out
+
+	ctx.Log.Debug("CREATE",
+		"share", ctx.Tree.Share.Name, "path", path, "dir", isDir,
+		"action", action, "fid", open.Volatile)
+	return nil
+}
+
+// createPipe 在 IPC$ 上打开一个命名管道。
+func createPipe(ctx *Context, req *wire.CreateRequest) error {
+	opener := ctx.Conn.Settings.Pipes
+	if opener == nil {
+		// 管道后端尚未装配：报「没有这个对象」而不是 NOT_SUPPORTED，
+		// 客户端会当成共享枚举不可用而优雅退化。
+		return status.ObjectNameNotFound
+	}
+
+	// 管道名不含路径分隔符，且大小写不敏感。
+	name := strings.ToLower(strings.Trim(req.Name, `\`))
+	if name == "" || strings.ContainsAny(name, `\/`) {
+		return status.ObjectNameInvalid
+	}
+
+	pipe, err := opener.OpenPipe(name, ctx.Session.Identity())
+	if err != nil {
+		if errors.Is(err, ErrNoSuchPipe) {
+			ctx.Log.Debug("请求了未提供的命名管道", "pipe", name)
+			return status.ObjectNameNotFound
+		}
+		ctx.Log.Warn("打开命名管道失败", "pipe", name, "err", err)
+		return status.FromVFSError(err)
+	}
+
+	open := &Open{
+		Tree:          ctx.Tree,
+		Path:          name,
+		Pipe:          pipe,
+		GrantedAccess: req.DesiredAccess.Expand(),
+		ShareAccess:   req.ShareAccess,
+		CreateAction:  wire.FileOpened,
+		CreateOptions: req.CreateOptions,
+		// 管道在 Windows 上报为 NORMAL。
+		FileAttributes: wire.FileAttributeNormal,
+	}
+	if st := ctx.Session.AddOpen(open); st != status.Success {
+		_ = pipe.Close()
+		return st
+	}
+	ctx.Chain.LastOpen = open
+
+	// 管道没有真正的时间戳与长度，全部回 0 —— 客户端不看这些字段。
+	resp := &wire.CreateResponse{
+		OplockLevel:    wire.OplockLevelNone,
+		CreateAction:   wire.FileOpened,
+		FileAttributes: wire.FileAttributeNormal,
+		FileID:         wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
+	}
+	out, err := resp.Append(ctx.Out)
+	if err != nil {
+		return status.InsuffServerResources
+	}
+	ctx.Out = out
+
+	ctx.Log.Debug("打开命名管道", "pipe", name, "fid", open.Volatile)
+	return nil
+}
+
+// splitCreateName 把 CREATE 的 Name 拆成「共享内相对路径」与「流名」。
+//
+// 线格式用反斜杠分隔且无前导反斜杠（protocol-notes §8），VFS 用正斜杠。
+// 流名语法是 `path:stream:$DATA`（MS-FSCC §2.1.5.4）。
+//
+// 真正的路径穿越防御在 VFS 层（AGENTS.md §8），这里只做**语法**校验：
+// 拒绝绝对路径与显然畸形的输入，避免把垃圾喂给下层。
+func splitCreateName(name string) (path, stream string, err error) {
+	if strings.ContainsRune(name, 0) {
+		return "", "", status.ObjectNameInvalid
+	}
+	// 客户端偶尔会带前导反斜杠，容忍之。
+	name = strings.TrimPrefix(name, `\`)
+	name = strings.ReplaceAll(name, `\`, "/")
+
+	if i := strings.IndexByte(name, ':'); i >= 0 {
+		path, stream = name[:i], name[i+1:]
+		// 去掉 `:$DATA` 后缀；类型不是 $DATA 的流我们不支持。
+		if j := strings.IndexByte(stream, ':'); j >= 0 {
+			if !strings.EqualFold(stream[j:], ":$DATA") {
+				return "", "", status.NotSupported
+			}
+			stream = stream[:j]
+		}
+		if stream == "" {
+			// `file::$DATA` 就是主数据流。
+			stream = ""
+		}
+	} else {
+		path = name
+	}
+
+	// vfs.CleanPath 负责规范化并拒绝 ".."、绝对路径等越界写法。
+	clean, cerr := vfs.CleanPath(path)
+	if cerr != nil {
+		return "", "", status.ObjectPathInvalid
+	}
+	return clean, stream, nil
+}
+
+// openFlags 把 SMB 的 DesiredAccess/CreateOptions 翻译成 vfs.OpenFlags。
+func openFlags(access wire.Access, opts wire.CreateOptions) vfs.OpenFlags {
+	var f vfs.OpenFlags
+
+	if access&(wire.FileReadData|wire.FileExecute) != 0 {
+		f |= vfs.OpenRead
+	}
+	if access&(wire.FileWriteData) != 0 {
+		f |= vfs.OpenWrite
+	}
+	if access&wire.FileAppendData != 0 {
+		f |= vfs.OpenAppend
+	}
+	// 只要了属性/EA/ACL 而没要数据流：告诉后端可以走轻量路径。
+	// Explorer 与 Finder 会为列表里的每个文件做这种探测，量很大。
+	if f == 0 {
+		f |= vfs.OpenAttrOnly
+	}
+
+	if opts&wire.FileDirectoryFile != 0 {
+		f |= vfs.OpenDirectory
+	}
+	if opts&wire.FileNonDirectoryFile != 0 {
+		f |= vfs.OpenNonDirectory
+	}
+	if opts&wire.FileOpenReparsePoint != 0 {
+		f |= vfs.OpenNoFollow
+	}
+	if opts&wire.FileWriteThrough != 0 {
+		f |= vfs.OpenWriteThrough
+	}
+	if opts&wire.FileDeleteOnClose != 0 {
+		f |= vfs.OpenDeleteOnClose
+	}
+	return f
+}
+
+// maximalAccessFor 返回 MAXIMUM_ALLOWED 在本树上应当授予的访问掩码。
+func maximalAccessFor(t *Tree) wire.Access {
+	if t.Writable() {
+		return wire.Access(wire.MaximalAccessReadWrite)
+	}
+	return wire.Access(wire.MaximalAccessReadOnly)
+}
+
+// createStatus 把 VFS 错误映射为 CREATE 语境下的 NTSTATUS。
+//
+// 与通用映射的差别只有一处：CREATE 语境里 ErrExist 的含义取决于
+// disposition —— FILE_CREATE 下是「已存在」，其它情况下是「名字冲突」。
+func createStatus(err error, disp wire.CreateDisposition) status.Status {
+	if errors.Is(err, vfs.ErrExist) && disp == wire.FileCreate {
+		return status.ObjectNameCollision
+	}
+	return status.FromVFSError(err)
+}
+
+// createResponseContexts 生成要回给客户端的 create context 链。
+//
+// 目前只支持 "QFid"（请求稳定 FileId）—— macOS 与 Windows 都会带，
+// 回它可以让客户端少发一轮 QUERY_INFO。其余 context（DHnQ/RqLs/AAPL）
+// 属于后续阶段，**不认识的 context 必须静默忽略**而不是报错
+// （MS-SMB2 §3.3.5.9：服务端忽略不支持的 create context）。
+func createResponseContexts(req *wire.CreateRequest, attr *vfs.Attr) []wire.CreateContext {
+	if _, ok := wire.FindCreateContext(req.Contexts, wire.CreateContextQFid); !ok {
+		return nil
+	}
+	return []wire.CreateContext{{
+		Name: wire.CreateContextQFid,
+		Data: wire.DiskIDContext{DiskFileID: attr.FileID}.Encode(),
+	}}
+}
