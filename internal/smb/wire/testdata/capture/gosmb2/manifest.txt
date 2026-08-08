@@ -1,0 +1,31 @@
+# captureproxy 帧摘要
+# 每个 .bin 是去掉 4 字节 Direct TCP 长度前缀之后的 SMB 报文本体。
+# 列：序号 方向 连接 长度 命令 摘要
+001 c2s conn1    174B NEGOTIATE mid=0 credits=1
+002 s2c conn1    254B NEGOTIATE mid=0 credits=1 status=0x00000000
+003 c2s conn1    162B SESSION_SETUP mid=1 credits=126
+004 s2c conn1    275B SESSION_SETUP mid=1 credits=1 sid=0x341a683f status=0xc0000016
+005 c2s conn1    465B SESSION_SETUP mid=2 credits=126 sid=0x341a683f
+006 s2c conn1    101B SESSION_SETUP mid=2 credits=126 sid=0x341a683f status=0x00000000 SIGNED
+007 c2s conn1    120B TREE_CONNECT mid=3 credits=1 sid=0x341a683f SIGNED
+008 s2c conn1     80B TREE_CONNECT mid=3 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+009 c2s conn1    121B CREATE    mid=4 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+010 s2c conn1    152B CREATE    mid=4 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+011 c2s conn1     98B QUERY_DIRECTORY mid=5 credits=16 sid=0x341a683f tid=0x60c67c44 SIGNED
+012 s2c conn1    700B QUERY_DIRECTORY mid=5 credits=31 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+013 c2s conn1     98B QUERY_DIRECTORY mid=21 credits=16 sid=0x341a683f tid=0x60c67c44 SIGNED
+014 s2c conn1     73B QUERY_DIRECTORY mid=21 credits=31 sid=0x341a683f tid=0x60c67c44 status=0x80000006 SIGNED
+015 c2s conn1     88B CLOSE     mid=37 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+016 s2c conn1    124B CLOSE     mid=37 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+017 c2s conn1    138B CREATE    mid=38 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+018 s2c conn1    152B CREATE    mid=38 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+019 c2s conn1    113B READ      mid=39 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+020 s2c conn1    106B READ      mid=39 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+021 c2s conn1    113B READ      mid=40 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+022 s2c conn1     73B READ      mid=40 credits=1 sid=0x341a683f tid=0x60c67c44 status=0xc0000011 SIGNED
+023 c2s conn1     88B CLOSE     mid=41 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+024 s2c conn1    124B CLOSE     mid=41 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+025 c2s conn1     68B TREE_DISCONNECT mid=42 credits=1 sid=0x341a683f tid=0x60c67c44 SIGNED
+026 s2c conn1     68B TREE_DISCONNECT mid=42 credits=1 sid=0x341a683f tid=0x60c67c44 status=0x00000000 SIGNED
+027 c2s conn1     68B LOGOFF    mid=43 credits=1 sid=0x341a683f SIGNED
+028 s2c conn1     68B LOGOFF    mid=43 credits=1 sid=0x341a683f status=0x00000000 SIGNED

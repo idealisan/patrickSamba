@@ -169,8 +169,10 @@ func TestWriteRoundTrip(t *testing.T) {
 
 	resp := &WriteResponse{Count: uint32(len(data))}
 	rmsg := resp.Append(dummyHeader(CommandWrite))
-	if n := len(rmsg) - HeaderSize; n != 17 {
-		t.Fatalf("响应体长度 = %d, want 17（16 固定 + 1 占位）", n)
+	// 体就是 16 字节，比 StructureSize(17) 少 1：真实 Samba 的 WRITE Response
+	// 长 80 字节（64 头 + 16 体），见 testdata/capture/create-read-write/018-s2c-WRITE.bin。
+	if n := len(rmsg) - HeaderSize; n != writeResponseFixed {
+		t.Fatalf("响应体长度 = %d, want %d", n, writeResponseFixed)
 	}
 	gotResp, err := ParseWriteResponse(rmsg)
 	if err != nil {
