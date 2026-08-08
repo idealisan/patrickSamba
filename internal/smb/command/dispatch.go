@@ -66,6 +66,7 @@ func Dispatch(ctx *Context) {
 		ctx.fail(status.FromVFSError(err))
 	}
 	ctx.finishHeader()
+	ctx.rollPreauth()
 
 	// 把本条解析/新建出的会话与树记入链，供后续 related 消息继承。
 	if ctx.Session != nil {
@@ -80,6 +81,37 @@ func Dispatch(ctx *Context) {
 		if ctx.Chain.FailStatus == 0 {
 			ctx.Chain.FailStatus = ctx.Status
 		}
+	}
+}
+
+// DispatchFailed 在前置检查（如签名校验）就已经判定失败时，
+// 直接产生一条 ERROR Response 并回填响应头。
+//
+// 与 Dispatch 一样，它保证一定会写出一条格式正确的响应。
+func DispatchFailed(ctx *Context, st status.Status) {
+	ctx.fail(st)
+	ctx.finishHeader()
+	ctx.rollPreauth()
+	ctx.Chain.Failed = true
+	if ctx.Chain.FailStatus == 0 {
+		ctx.Chain.FailStatus = st
+	}
+}
+
+// rollPreauth 按 handler 的要求把**最终写出的响应字节**滚进 preauth hash。
+//
+// 必须在 finishHeader 之后执行：Status 与 Credits 都在签名/哈希覆盖范围内，
+// 提前哈希会与客户端算出的值对不上（protocol-notes §6）。
+func (c *Context) rollPreauth() {
+	if !c.HashResponseConn && c.HashResponseSession == nil {
+		return
+	}
+	msg := c.Out[c.msgStart:]
+	if c.HashResponseConn {
+		c.Conn.UpdatePreauthHash(msg)
+	}
+	if s := c.HashResponseSession; s != nil {
+		s.UpdatePreauthHash(msg)
 	}
 }
 
