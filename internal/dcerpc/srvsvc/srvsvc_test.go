@@ -1,8 +1,12 @@
 package srvsvc
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/dcerpc"
 )
@@ -258,5 +262,76 @@ func TestPipeIntegration(t *testing.T) {
 	_, entries, werr := decodeEnumAllResp(t, pdu.Stub)
 	if werr != werrOK || len(entries) != 2 {
 		t.Fatalf("经 Pipe 往返失败: werr=%#x entries=%d", werr, len(entries))
+	}
+}
+
+// TestPipeReadAll 覆盖 server 层的实际用法：Write 之后用 io.ReadAll 一次读完。
+// Read 在缓冲取空后必须返回 io.EOF，否则 io.ReadAll 会死循环。
+func TestPipeReadAll(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	pipe, err := dcerpc.OpenPipe("srvsvc", h)
+	if err != nil {
+		t.Fatalf("OpenPipe: %v", err)
+	}
+	if _, err := pipe.Write(buildEnumAllReq(7, 1)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	done := make(chan []byte, 1)
+	go func() {
+		b, err := io.ReadAll(pipe)
+		if err != nil {
+			t.Errorf("ReadAll: %v", err)
+		}
+		done <- b
+	}()
+	select {
+	case b := <-done:
+		if _, err := dcerpc.ParsePDU(b); err != nil {
+			t.Fatalf("ReadAll 结果不是完整 PDU: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("io.ReadAll 死循环：Read 在缓冲取空后没有返回 io.EOF")
+	}
+}
+
+// TestPipeTransactTruncate 验证 maxOut 截断不会丢字节：
+// NetShareEnumAll 的响应通常超过客户端首个 READ 缓冲，剩余部分必须还能取到。
+func TestPipeTransactTruncate(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	pipe, err := dcerpc.OpenPipe("srvsvc", h)
+	if err != nil {
+		t.Fatalf("OpenPipe: %v", err)
+	}
+
+	// 先量一次完整响应长度。
+	full, err := dcerpc.OpenPipe("srvsvc", NewHandler(fakeLister{sampleShares()}))
+	if err != nil {
+		t.Fatalf("OpenPipe: %v", err)
+	}
+	whole, err := full.Transact(buildEnumAllReq(7, 1), 0)
+	if err != nil {
+		t.Fatalf("Transact(maxOut=0): %v", err)
+	}
+	if len(whole) < 32 {
+		t.Fatalf("完整响应过短: %d", len(whole))
+	}
+
+	// 再用一个小得多的 maxOut 分两次取。
+	cut := 16
+	head, err := pipe.Transact(buildEnumAllReq(7, 1), cut)
+	if !errors.Is(err, dcerpc.ErrMoreData) {
+		t.Fatalf("截断时应返回 ErrMoreData，得到 %v", err)
+	}
+	if len(head) != cut {
+		t.Fatalf("首段长度 = %d, want %d", len(head), cut)
+	}
+	tail, err := pipe.Transact(nil, 0)
+	if err != nil {
+		t.Fatalf("取剩余: %v", err)
+	}
+	got := append(append([]byte{}, head...), tail...)
+	if !bytes.Equal(got, whole) {
+		t.Fatalf("截断丢字节: 拼回 %d 字节, 完整 %d 字节", len(got), len(whole))
 	}
 }
