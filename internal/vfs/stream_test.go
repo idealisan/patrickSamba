@@ -451,3 +451,73 @@ func TestStreamPathTraversal(t *testing.T) {
 		}
 	}
 }
+
+// TestAppleInfoCapability 覆盖 AAPL readdir_attr 的数据来源。
+//
+// wire 层拼 readdir_attr 时每条目录项都要这两样东西，
+// 这里确认「有」和「没有」两种情况都给出正确结果。
+func TestAppleInfoCapability(t *testing.T) {
+	fs := newTestFS(t, false)
+	requireXattr(t, fs)
+
+	am, ok := interface{}(fs).(AppleMetadata)
+	if !ok {
+		t.Fatal("LocalFS 应实现 AppleMetadata")
+	}
+
+	// 没有任何 Apple 元数据的普通文件：全零 + 0，且**不报错**
+	writeFile(t, fs, "plain.txt", "hello")
+	fi, rsrc, err := am.AppleInfo("plain.txt")
+	if err != nil {
+		t.Fatalf("没有 Apple 元数据不该报错: %v", err)
+	}
+	if rsrc != 0 {
+		t.Errorf("资源派生大小 = %d, want 0", rsrc)
+	}
+	if fi != ([FinderInfoSize]byte{}) {
+		t.Errorf("FinderInfo 应为全零，得到 % x", fi)
+	}
+
+	// 写入 FinderInfo 与资源派生之后
+	writeFile(t, fs, "rich.bin", "data")
+	ai := NewAfpInfo()
+	copy(ai.FinderInfo[:], finderInfoPattern())
+	h, _ := openStreamH(t, fs, "rich.bin", StreamAFPInfo, OpenRead|OpenWrite, OpenAlways)
+	if _, err := h.WriteAt(ai.Marshal(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h2, _ := openStreamH(t, fs, "rich.bin", StreamAFPResource, OpenRead|OpenWrite, OpenAlways)
+	if _, err := h2.WriteAt(make([]byte, 4096), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fi, rsrc, err = am.AppleInfo("rich.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rsrc != 4096 {
+		t.Errorf("资源派生大小 = %d, want 4096", rsrc)
+	}
+	if !bytes.Equal(fi[:], finderInfoPattern()) {
+		t.Errorf("FinderInfo 不对: % x", fi)
+	}
+	// wire 层要用的是前 8 字节（类型码 + 创建者码），确认它们在位
+	if string(fi[0:4]) != "TEXT" || string(fi[4:8]) != "ttxt" {
+		t.Errorf("类型/创建者码错位: %q %q", fi[0:4], fi[4:8])
+	}
+
+	// 不存在的对象要报 ErrNotFound，不能返回全零假装成功
+	if _, _, err := am.AppleInfo("ghost"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("不存在的对象应返回 ErrNotFound，得到 %v", err)
+	}
+	// 穿越向量同样要被拦住
+	if _, _, err := am.AppleInfo("../secret"); err == nil {
+		t.Error("穿越向量应被拒绝")
+	}
+}
