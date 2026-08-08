@@ -183,6 +183,13 @@ internal/mdns            进程内 mDNS/DNS-SD responder（与 SMB 层无耦合�
 - **P5 错误就是 NTSTATUS**：内部错误类型统一能映射到 NTSTATUS，
   在 `internal/smb/status` 集中定义，禁止在 handler 里裸写魔数。
 - **P6 不要过早抽象**：只在已经有第二个实现或明确即将有时才抽接口。
+- **P7 平台差异用 build tag 隔离，不要让兼容层污染主路径**：
+  Windows 上要能作为 Time Machine 的存储后端，但 Windows 没有 POSIX 的 uid/gid/mode。
+  这类"宿主文件系统表达不了的元数据"通过一个 `MetadataStore` 旁路存储解决
+  （纯 Go 的嵌入式 KV，**禁止 `mattn/go-sqlite3` 这类需要 CGO 的方案**）。
+  **该兼容层只在 Windows 编译进来**；Linux/macOS 原生能力足够，使用 noop 实现，零开销。
+  注意 NTFS 原生就支持 alternate data stream、稀疏文件、稳定 FileID、真实创建时间和
+  DOS 属性，这些**不需要**旁路存储 —— 只有 POSIX 属主/权限位才需要。
 
 ### 编码规范
 
