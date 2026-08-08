@@ -123,8 +123,8 @@ func (h *Handler) netShareEnumAll(pdu *dcerpc.PDU) ([]byte, error) {
 		return dcerpc.MarshalFault(pdu.CallID, dcerpc.NCAStatusProtocolError), nil
 	}
 	if req.Level != 0 && req.Level != 1 {
-		// 不支持的 level：返回 WERR_NOT_SUPPORTED，union 指针置空。
-		return marshalEnumAllResp(pdu.CallID, req.Level, nil, werrNotSupported), nil
+		// 不支持的 level：返回 WERR_NOT_SUPPORTED，容器指针置空。
+		return marshalEnumAllResp(pdu.CallID, req.Level, req.HasResume, nil, werrNotSupported), nil
 	}
 	all := h.Lister.Shares()
 	entries := make([]dcerpc.ShareEntry, 0, len(all))
@@ -136,60 +136,98 @@ func (h *Handler) netShareEnumAll(pdu *dcerpc.PDU) ([]byte, error) {
 		}
 		entries = append(entries, e)
 	}
-	return marshalEnumAllResp(pdu.CallID, req.Level, entries, werrOK), nil
+	return marshalEnumAllResp(pdu.CallID, req.Level, req.HasResume, entries, werrOK), nil
 }
 
-// decodeEnumAllReq 解析 NetrShareEnum 请求 stub（MS-SRVS §3.1.4.10）。
-// 固定部分布局：ServerName ptr | Level ptr | PreferedMaximumLength u32 | ResumeHandle ptr。
-func decodeEnumAllReq(stub []byte) (struct {
+type enumAllReq struct {
 	ServerName string
 	Level      uint32
 	Resume     uint32
-}, error) {
-	type reqT struct {
-		ServerName string
-		Level      uint32
-		Resume     uint32
-	}
+	HasResume  bool
+}
+
+// decodeEnumAllReq 解析 NetrShareEnum 请求 stub（MS-SRVS §3.1.4.10）。
+//
+//	NET_API_STATUS NetrShareEnum(
+//	  [in, string, unique] SRVSVC_HANDLE ServerName,
+//	  [in, out] LPSHARE_ENUM_STRUCT InfoStruct,   // ref → 无 referent id
+//	  [in] DWORD PreferedMaximumLength,
+//	  [out] DWORD* TotalEntries,
+//	  [in, out, unique] DWORD* ResumeHandle);
+//
+// SHARE_ENUM_STRUCT（§2.2.4.38）= Level(u32) + 封装联合。NDR 封装联合的线格式是
+// switch 值(u32) 后跟选中分支，这里分支是 SHARE_INFO_x_CONTAINER 的 unique 指针。
+func decodeEnumAllReq(stub []byte) (enumAllReq, error) {
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
-	var r reqT
-	d.HeadPtr(func() { r.ServerName = d.WStringT() })
-	d.HeadPtr(func() { r.Level = d.U32T() })
-	_ = d.U32() // PreferedMaximumLength（本实现忽略）
-	d.HeadPtr(func() { r.Resume = d.U32T() })
-	if err := d.Run(); err != nil {
+	var r enumAllReq
+
+	d.Ptr(func() { r.ServerName = d.WString() })
+	r.Level = d.U32()
+	_ = d.U32() // union switch（与 Level 相同）
+	d.Ptr(func() {
+		// SHARE_INFO_x_CONTAINER：EntriesRead + Buffer 指针。
+		// 请求里客户端总是传 0/NULL，读掉即可。
+		_ = d.U32()
+		d.Ptr(func() {
+			_ = d.U32() // 数组 max_count
+		})
+	})
+	_ = d.U32() // PreferedMaximumLength（本实现一次返回全部，忽略）
+	d.Ptr(func() {
+		r.Resume = d.U32()
+		r.HasResume = true
+	})
+	if err := d.Err(); err != nil {
 		return r, err
 	}
 	return r, nil
 }
 
 // marshalEnumAllResp 构造 NetrShareEnum 响应 stub 并封装为 response PDU。
-// 固定部分：Level u32 | Union ptr | TotalEntries ptr | ResumeHandle ptr | WERROR。
-func marshalEnumAllResp(callID, level uint32, entries []dcerpc.ShareEntry, werr uint32) []byte {
+//
+// 线格式（[out] 参数按声明顺序）：
+//
+//	InfoStruct : Level u32 | switch u32 | Container 指针 → { EntriesRead u32 | Buffer 指针 → 数组 }
+//	TotalEntries : u32     （[out] 顶层指针是 ref，**不带 referent id**）
+//	ResumeHandle : unique 指针 → u32（客户端传了才回）
+//	返回值 WERROR : u32
+func marshalEnumAllResp(callID, level uint32, hasResume bool,
+	entries []dcerpc.ShareEntry, werr uint32) []byte {
+
 	e := dcerpc.NewNdrEnc(binary.LittleEndian)
-	e.U32(level)
+	e.U32(level) // SHARE_ENUM_STRUCT.Level
+	e.U32(level) // 联合 switch 值
+
 	if werr == werrOK {
-		e.Ptr(func() {
+		e.Ptr(func() { // SHARE_INFO_x_CONTAINER
 			e.U32(uint32(len(entries))) // EntriesRead
-			e.Ptr(func() {
-				e.U32(uint32(len(entries))) // conformant 数组 max_count
-				for _, ent := range entries {
-					if level == 0 {
+			e.Ptr(func() {              // Buffer：conformant 数组
+				e.U32(uint32(len(entries))) // max_count
+				// 数组元素含指针：所有元素的固定部分先排完，
+				// 字符串 referent 统一跟在数组之后（C706 §14.3.12.3）。
+				e.Deferred(func() {
+					for _, ent := range entries {
+						ent := ent
 						e.Ptr(func() { e.WString(ent.Name) })
-					} else {
-						e.Ptr(func() { e.WString(ent.Name) })
-						e.U32(ent.Type)
-						e.Ptr(func() { e.WString(ent.Remark) })
+						if level != 0 {
+							e.U32(ent.Type)
+							e.Ptr(func() { e.WString(ent.Remark) })
+						}
 					}
-				}
+				})
 			})
 		})
 	} else {
-		e.Ptr(nil) // union 指针置空
+		e.Ptr(nil)
 	}
-	e.Ptr(func() { e.U32(uint32(len(entries))) }) // TotalEntries
-	e.Ptr(func() { e.U32(0) })                    // ResumeHandle（回显 0）
-	e.U32(werr)                                   // WERROR（NET_API_STATUS）
+
+	e.U32(uint32(len(entries))) // TotalEntries（ref 指针，直接给值）
+	if hasResume {
+		e.Ptr(func() { e.U32(0) }) // ResumeHandle：一次返回完，回显 0
+	} else {
+		e.Ptr(nil)
+	}
+	e.U32(werr) // NET_API_STATUS
 	return dcerpc.MarshalResponse(callID, e.Bytes())
 }
 
@@ -222,48 +260,48 @@ func (h *Handler) netShareGetInfo(pdu *dcerpc.PDU) ([]byte, error) {
 	return marshalGetInfoResp(pdu.CallID, req.Level, found, werrOK), nil
 }
 
-func decodeGetInfoReq(stub []byte) (struct {
+type getInfoReq struct {
 	ServerName string
 	NetName    string
 	Level      uint32
-}, error) {
-	type reqT struct {
-		ServerName string
-		NetName    string
-		Level      uint32
-	}
+}
+
+// decodeGetInfoReq 解析 NetrShareGetInfo 请求 stub（MS-SRVS §3.1.4.11）：
+// ServerName(unique) | NetName(unique) | Level。
+func decodeGetInfoReq(stub []byte) (getInfoReq, error) {
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
-	var r reqT
-	d.HeadPtr(func() { r.ServerName = d.WStringT() })
-	d.HeadPtr(func() { r.NetName = d.WStringT() })
+	var r getInfoReq
+	d.Ptr(func() { r.ServerName = d.WString() })
+	d.Ptr(func() { r.NetName = d.WString() })
 	r.Level = d.U32()
-	if err := d.Run(); err != nil {
+	if err := d.Err(); err != nil {
 		return r, err
 	}
 	return r, nil
 }
 
 // marshalGetInfoResp 构造 NetrShareGetInfo 响应 stub（MS-SRVS §3.1.4.11）。
-// 固定部分：Union ptr | WERror ptr。
+//
+// [out, switch_is(Level), ref] LPSHARE_INFO InfoStruct → 线格式是
+// switch 值(u32) + 分支的 unique 指针 → SHARE_INFO_x；最后是返回值 WERROR。
 func marshalGetInfoResp(callID, level uint32, entry *dcerpc.ShareEntry, werr uint32) []byte {
 	e := dcerpc.NewNdrEnc(binary.LittleEndian)
+	e.U32(level) // 联合 switch 值
 	if entry != nil {
 		e.Ptr(func() {
-			e.U32(1) // EntriesRead
-			e.Ptr(func() {
-				if level == 0 {
-					e.Ptr(func() { e.WString(entry.Name) })
-				} else {
-					e.Ptr(func() { e.WString(entry.Name) })
+			// SHARE_INFO_x 是结构体：内部指针延迟到结构体固定部分之后。
+			e.Deferred(func() {
+				e.Ptr(func() { e.WString(entry.Name) })
+				if level != 0 {
 					e.U32(entry.Type)
 					e.Ptr(func() { e.WString(entry.Remark) })
 				}
 			})
 		})
 	} else {
-		e.Ptr(nil) // union 指针置空（共享不存在或 level 不支持）
+		e.Ptr(nil) // 共享不存在或 level 不支持
 	}
-	e.Ptr(func() { e.U32(werr) }) // WERror
+	e.U32(werr)
 	return dcerpc.MarshalResponse(callID, e.Bytes())
 }
 
@@ -297,41 +335,45 @@ type serverInfo struct {
 	Comment       string
 }
 
-func decodeServerGetInfoReq(stub []byte) (struct {
+type serverGetInfoReq struct {
 	ServerName string
 	Level      uint32
-}, error) {
-	type reqT struct {
-		ServerName string
-		Level      uint32
-	}
+}
+
+// decodeServerGetInfoReq 解析 NetrServerGetInfo 请求 stub（MS-SRVS §3.1.4.17）：
+// ServerName(unique) | Level。
+func decodeServerGetInfoReq(stub []byte) (serverGetInfoReq, error) {
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
-	var r reqT
-	d.HeadPtr(func() { r.ServerName = d.WStringT() })
+	var r serverGetInfoReq
+	d.Ptr(func() { r.ServerName = d.WString() })
 	r.Level = d.U32()
-	if err := d.Run(); err != nil {
+	if err := d.Err(); err != nil {
 		return r, err
 	}
 	return r, nil
 }
 
-// marshalServerGetInfoResp 构造 NetrServerGetInfo 响应 stub（MS-SRVS §3.1.4.4，level 101）。
-// 固定部分：Union ptr | WERror ptr。
+// marshalServerGetInfoResp 构造 NetrServerGetInfo 响应 stub
+// （MS-SRVS §3.1.4.17，SERVER_INFO_101 见 §2.2.4.44）。
+// 与 NetrShareGetInfo 同形：switch 值 + 分支指针 + WERROR。
 func marshalServerGetInfoResp(callID, level uint32, info *serverInfo, werr uint32) []byte {
 	e := dcerpc.NewNdrEnc(binary.LittleEndian)
+	e.U32(level)
 	if info != nil && level == 101 {
 		e.Ptr(func() {
-			e.U32(info.PlatformID) // sv101_platform_id
-			e.Ptr(func() { e.WString(info.Name) })
-			e.U32(info.VersionMajor)
-			e.U32(info.VersionMinor)
-			e.U32(info.Type)
-			e.Ptr(func() { e.WString(info.Comment) })
+			e.Deferred(func() {
+				e.U32(info.PlatformID) // sv101_platform_id
+				e.Ptr(func() { e.WString(info.Name) })
+				e.U32(info.VersionMajor)
+				e.U32(info.VersionMinor)
+				e.U32(info.Type)
+				e.Ptr(func() { e.WString(info.Comment) })
+			})
 		})
 	} else {
 		e.Ptr(nil)
 	}
-	e.Ptr(func() { e.U32(werr) })
+	e.U32(werr)
 	return dcerpc.MarshalResponse(callID, e.Bytes())
 }
 

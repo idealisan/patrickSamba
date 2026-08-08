@@ -24,12 +24,19 @@ func sampleShares() []dcerpc.ShareEntry {
 
 // ---- 请求构造（测试用，与 dcerpc.MarshalRequest 配合） ----
 
+// buildEnumAllReq 复刻 smbclient 真实发出的 NetrShareEnum 请求布局
+// （见 TestDecodeEnumAllReqFromCapture 的抓包）。
 func buildEnumAllReq(callID, level uint32) []byte {
 	e := dcerpc.NewNdrEnc(binary.LittleEndian)
-	e.Ptr(func() { e.WString("") }) // ServerName
-	e.Ptr(func() { e.U32(level) }) // Level
-	e.U32(0)                        // PreferedMaximumLength
-	e.Ptr(func() { e.U32(0) })      // ResumeHandle
+	e.Ptr(func() { e.WString("127.0.0.1") }) // ServerName
+	e.U32(level)                             // SHARE_ENUM_STRUCT.Level
+	e.U32(level)                             // 联合 switch
+	e.Ptr(func() {                           // 容器：客户端传空
+		e.U32(0)
+		e.Ptr(nil)
+	})
+	e.U32(0xFFFFFFFF)          // PreferedMaximumLength
+	e.Ptr(func() { e.U32(0) }) // ResumeHandle
 	return dcerpc.MarshalRequest(callID, 0, opnumNetShareEnumAll, e.Bytes())
 }
 
@@ -54,26 +61,30 @@ func decodeEnumAllResp(t *testing.T, stub []byte) (level uint32, entries []dcerp
 	t.Helper()
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
 	level = d.U32()
-	d.HeadPtr(func() {
-		n := int(d.U32T())
-		d.TailPtr(func() {
-			mc := int(d.U32T())
+	if sw := d.U32(); sw != level {
+		t.Fatalf("联合 switch = %d, 应等于 Level %d", sw, level)
+	}
+	d.Ptr(func() { // 容器
+		_ = d.U32() // EntriesRead
+		d.Ptr(func() {
+			mc := int(d.U32())
 			entries = make([]dcerpc.ShareEntry, mc)
-			for i := 0; i < mc; i++ {
-				idx := i // 避免闭包捕获循环变量
-				d.TailPtr(func() { entries[idx].Name = d.WStringT() })
-				if level == 1 {
-					entries[idx].Type = d.U32T()
-					d.TailPtr(func() { entries[idx].Remark = d.WStringT() })
+			d.Deferred(func() {
+				for i := 0; i < mc; i++ {
+					idx := i // 避免闭包捕获循环变量
+					d.Ptr(func() { entries[idx].Name = d.WString() })
+					if level == 1 {
+						entries[idx].Type = d.U32()
+						d.Ptr(func() { entries[idx].Remark = d.WString() })
+					}
 				}
-			}
-			_ = n
+			})
 		})
 	})
-	d.HeadPtr(func() { d.U32T() }) // TotalEntries
-	d.HeadPtr(func() { d.U32T() }) // ResumeHandle
+	_ = d.U32() // TotalEntries（ref 指针，直接是值）
+	d.Ptr(func() { d.U32() })
 	werr = d.U32()
-	if err := d.Run(); err != nil {
+	if err := d.Err(); err != nil {
 		t.Fatalf("decode EnumAll: %v", err)
 	}
 	return
@@ -82,17 +93,19 @@ func decodeEnumAllResp(t *testing.T, stub []byte) (level uint32, entries []dcerp
 func decodeGetInfoResp(t *testing.T, stub []byte) (present bool, e dcerpc.ShareEntry, werr uint32) {
 	t.Helper()
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
-	d.HeadPtr(func() {
+	level := d.U32()
+	d.Ptr(func() {
 		present = true
-		_ = d.U32T() // EntriesRead
-		d.TailPtr(func() {
-			d.TailPtr(func() { e.Name = d.WStringT() })
-			e.Type = d.U32T()
-			d.TailPtr(func() { e.Remark = d.WStringT() })
+		d.Deferred(func() {
+			d.Ptr(func() { e.Name = d.WString() })
+			if level != 0 {
+				e.Type = d.U32()
+				d.Ptr(func() { e.Remark = d.WString() })
+			}
 		})
 	})
-	d.HeadPtr(func() { werr = d.U32T() })
-	if err := d.Run(); err != nil {
+	werr = d.U32()
+	if err := d.Err(); err != nil {
 		t.Fatalf("decode GetInfo: %v", err)
 	}
 	return
@@ -101,20 +114,61 @@ func decodeGetInfoResp(t *testing.T, stub []byte) (present bool, e dcerpc.ShareE
 func decodeServerGetInfoResp(t *testing.T, stub []byte) (present bool, name, comment string, svType uint32, werr uint32) {
 	t.Helper()
 	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
-	d.HeadPtr(func() {
+	_ = d.U32() // 联合 switch
+	d.Ptr(func() {
 		present = true
-		_ = d.U32T() // platform_id
-		d.TailPtr(func() { name = d.WStringT() })
-		_ = d.U32T() // version_major
-		_ = d.U32T() // version_minor
-		svType = d.U32T()
-		d.TailPtr(func() { comment = d.WStringT() })
+		d.Deferred(func() {
+			_ = d.U32() // platform_id
+			d.Ptr(func() { name = d.WString() })
+			_ = d.U32() // version_major
+			_ = d.U32() // version_minor
+			svType = d.U32()
+			d.Ptr(func() { comment = d.WString() })
+		})
 	})
-	d.HeadPtr(func() { werr = d.U32T() })
-	if err := d.Run(); err != nil {
+	werr = d.U32()
+	if err := d.Err(); err != nil {
 		t.Fatalf("decode ServerGetInfo: %v", err)
 	}
 	return
+}
+
+// realEnumAllReqStub 是 smbclient 4.22 发出的 NetrShareEnum(level=1) 请求 stub，
+// 由本服务端在管道入口抓下（AGENTS.md §3：字节向量取自真实抓包）。
+//
+// 它同时证明了 NDR 的一个关键点：**顶层参数的指针 referent 紧跟指针内联**，
+// 而不是延迟到整个 stub 末尾。
+var realEnumAllReqStub = []byte{
+	0x00, 0x00, 0x02, 0x00, // ServerName referent id
+	0x0a, 0x00, 0x00, 0x00, // max_count = 10
+	0x00, 0x00, 0x00, 0x00, // offset
+	0x0a, 0x00, 0x00, 0x00, // actual_count = 10
+	0x31, 0x00, 0x32, 0x00, 0x37, 0x00, 0x2e, 0x00, 0x30, 0x00,
+	0x2e, 0x00, 0x30, 0x00, 0x2e, 0x00, 0x31, 0x00, 0x00, 0x00, // "127.0.0.1\0"
+	0x01, 0x00, 0x00, 0x00, // SHARE_ENUM_STRUCT.Level = 1
+	0x01, 0x00, 0x00, 0x00, // 联合 switch = 1
+	0x04, 0x00, 0x02, 0x00, // Level1 容器 referent id
+	0x00, 0x00, 0x00, 0x00, // EntriesRead = 0
+	0x00, 0x00, 0x00, 0x00, // Buffer = NULL
+	0xff, 0xff, 0xff, 0xff, // PreferedMaximumLength = 0xFFFFFFFF
+	0x08, 0x00, 0x02, 0x00, // ResumeHandle referent id
+	0x00, 0x00, 0x00, 0x00, // *ResumeHandle = 0
+}
+
+func TestDecodeEnumAllReqFromCapture(t *testing.T) {
+	r, err := decodeEnumAllReq(realEnumAllReqStub)
+	if err != nil {
+		t.Fatalf("decodeEnumAllReq: %v", err)
+	}
+	if r.ServerName != "127.0.0.1" {
+		t.Errorf("ServerName = %q, want 127.0.0.1", r.ServerName)
+	}
+	if r.Level != 1 {
+		t.Errorf("Level = %d, want 1", r.Level)
+	}
+	if !r.HasResume || r.Resume != 0 {
+		t.Errorf("ResumeHandle: has=%v v=%d", r.HasResume, r.Resume)
+	}
 }
 
 // ---- 测试 ----
