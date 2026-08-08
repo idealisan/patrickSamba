@@ -1,0 +1,262 @@
+package srvsvc
+
+import (
+	"encoding/binary"
+	"testing"
+
+	"github.com/finalappstore/stupidsamba/internal/dcerpc"
+)
+
+type fakeLister struct{ shares []dcerpc.ShareEntry }
+
+func (f fakeLister) Shares() []dcerpc.ShareEntry { return f.shares }
+
+func sampleShares() []dcerpc.ShareEntry {
+	return []dcerpc.ShareEntry{
+		{Name: "public", Type: 0x00000000, Remark: "Public files"},
+		{Name: "IPC$", Type: 0x00000003 | 0x80000000, Remark: "IPC"},
+	}
+}
+
+// ---- 请求构造（测试用，与 dcerpc.MarshalRequest 配合） ----
+
+func buildEnumAllReq(callID, level uint32) []byte {
+	e := dcerpc.NewNdrEnc(binary.LittleEndian)
+	e.Ptr(func() { e.WString("") }) // ServerName
+	e.Ptr(func() { e.U32(level) }) // Level
+	e.U32(0)                        // PreferedMaximumLength
+	e.Ptr(func() { e.U32(0) })      // ResumeHandle
+	return dcerpc.MarshalRequest(callID, 0, opnumNetShareEnumAll, e.Bytes())
+}
+
+func buildGetInfoReq(callID uint32, netName string, level uint32) []byte {
+	e := dcerpc.NewNdrEnc(binary.LittleEndian)
+	e.Ptr(func() { e.WString("") })   // ServerName
+	e.Ptr(func() { e.WString(netName) }) // NetName
+	e.U32(level)
+	return dcerpc.MarshalRequest(callID, 0, opnumNetShareGetInfo, e.Bytes())
+}
+
+func buildServerGetInfoReq(callID, level uint32) []byte {
+	e := dcerpc.NewNdrEnc(binary.LittleEndian)
+	e.Ptr(func() { e.WString("") }) // ServerName
+	e.U32(level)
+	return dcerpc.MarshalRequest(callID, 0, opnumNetServerGetInfo, e.Bytes())
+}
+
+// ---- 响应解码（测试用，镜像 marshal 结构） ----
+
+func decodeEnumAllResp(t *testing.T, stub []byte) (level uint32, entries []dcerpc.ShareEntry, werr uint32) {
+	t.Helper()
+	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
+	level = d.U32()
+	d.HeadPtr(func() {
+		n := int(d.U32T())
+		d.TailPtr(func() {
+			mc := int(d.U32T())
+			entries = make([]dcerpc.ShareEntry, mc)
+			for i := 0; i < mc; i++ {
+				idx := i // 避免闭包捕获循环变量
+				d.TailPtr(func() { entries[idx].Name = d.WStringT() })
+				if level == 1 {
+					entries[idx].Type = d.U32T()
+					d.TailPtr(func() { entries[idx].Remark = d.WStringT() })
+				}
+			}
+			_ = n
+		})
+	})
+	d.HeadPtr(func() { d.U32T() }) // TotalEntries
+	d.HeadPtr(func() { d.U32T() }) // ResumeHandle
+	werr = d.U32()
+	if err := d.Run(); err != nil {
+		t.Fatalf("decode EnumAll: %v", err)
+	}
+	return
+}
+
+func decodeGetInfoResp(t *testing.T, stub []byte) (present bool, e dcerpc.ShareEntry, werr uint32) {
+	t.Helper()
+	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
+	d.HeadPtr(func() {
+		present = true
+		_ = d.U32T() // EntriesRead
+		d.TailPtr(func() {
+			d.TailPtr(func() { e.Name = d.WStringT() })
+			e.Type = d.U32T()
+			d.TailPtr(func() { e.Remark = d.WStringT() })
+		})
+	})
+	d.HeadPtr(func() { werr = d.U32T() })
+	if err := d.Run(); err != nil {
+		t.Fatalf("decode GetInfo: %v", err)
+	}
+	return
+}
+
+func decodeServerGetInfoResp(t *testing.T, stub []byte) (present bool, name, comment string, svType uint32, werr uint32) {
+	t.Helper()
+	d := dcerpc.NewNdrDec(stub, binary.LittleEndian)
+	d.HeadPtr(func() {
+		present = true
+		_ = d.U32T() // platform_id
+		d.TailPtr(func() { name = d.WStringT() })
+		_ = d.U32T() // version_major
+		_ = d.U32T() // version_minor
+		svType = d.U32T()
+		d.TailPtr(func() { comment = d.WStringT() })
+	})
+	d.HeadPtr(func() { werr = d.U32T() })
+	if err := d.Run(); err != nil {
+		t.Fatalf("decode ServerGetInfo: %v", err)
+	}
+	return
+}
+
+// ---- 测试 ----
+
+func TestNetShareEnumAllLevel1(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	resp, _ := h.Handle(buildEnumAllReq(1, 1))
+	pdu, err := dcerpc.ParsePDU(resp)
+	if err != nil {
+		t.Fatalf("ParsePDU: %v", err)
+	}
+	if pdu.PType != dcerpc.PTYPEResponse {
+		t.Fatalf("PType = %d, want response", pdu.PType)
+	}
+	level, entries, werr := decodeEnumAllResp(t, pdu.Stub)
+	if werr != werrOK {
+		t.Fatalf("WERROR = %#x, want OK", werr)
+	}
+	if level != 1 {
+		t.Fatalf("level = %d", level)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(entries))
+	}
+	if entries[0].Name != "public" || entries[0].Type != 0x00000000 || entries[0].Remark != "Public files" {
+		t.Errorf("entry[0] 不符: %+v", entries[0])
+	}
+	if entries[1].Name != "IPC$" || entries[1].Type != (0x00000003|0x80000000) || entries[1].Remark != "IPC" {
+		t.Errorf("entry[1] 不符: %+v", entries[1])
+	}
+}
+
+func TestNetShareEnumAllLevel0(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	resp, _ := h.Handle(buildEnumAllReq(2, 0))
+	pdu, _ := dcerpc.ParsePDU(resp)
+	level, entries, werr := decodeEnumAllResp(t, pdu.Stub)
+	if werr != werrOK || level != 0 || len(entries) != 2 {
+		t.Fatalf("level=%d werr=%#x entries=%d", level, werr, len(entries))
+	}
+	if entries[0].Name != "public" || entries[0].Type != 0 || entries[0].Remark != "" {
+		t.Errorf("level0 应只有名称: %+v", entries[0])
+	}
+}
+
+func TestNetShareEnumAllUnsupportedLevel(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	resp, _ := h.Handle(buildEnumAllReq(3, 2))
+	pdu, _ := dcerpc.ParsePDU(resp)
+	_, entries, werr := decodeEnumAllResp(t, pdu.Stub)
+	if werr != werrNotSupported {
+		t.Fatalf("WERROR = %#x, want WERR_NOT_SUPPORTED", werr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("不支持 level 时 union 应为空，得到 %d 项", len(entries))
+	}
+}
+
+func TestUnknownOpnumReturnsFault(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	req := dcerpc.MarshalRequest(9, 0, 99, []byte{0x01, 0x02})
+	resp, _ := h.Handle(req)
+	pdu, err := dcerpc.ParsePDU(resp)
+	if err != nil {
+		t.Fatalf("ParsePDU: %v", err)
+	}
+	if pdu.PType != dcerpc.PTYPEFault {
+		t.Fatalf("PType = %d, want fault", pdu.PType)
+	}
+	if pdu.Status != dcerpc.NCAStatusOpRangeError {
+		t.Errorf("status = %#x", pdu.Status)
+	}
+}
+
+func TestNetShareGetInfo(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+
+	// 找到存在的共享。
+	resp, _ := h.Handle(buildGetInfoReq(4, "public", 1))
+	pdu, _ := dcerpc.ParsePDU(resp)
+	present, e, werr := decodeGetInfoResp(t, pdu.Stub)
+	if !present || werr != werrOK {
+		t.Fatalf("present=%v werr=%#x", present, werr)
+	}
+	if e.Name != "public" || e.Remark != "Public files" {
+		t.Errorf("GetInfo 结果不符: %+v", e)
+	}
+
+	// 不存在的共享 → NERR_NetNameNotFound，union 为空。
+	resp2, _ := h.Handle(buildGetInfoReq(5, "nope", 1))
+	pdu2, _ := dcerpc.ParsePDU(resp2)
+	present2, _, werr2 := decodeGetInfoResp(t, pdu2.Stub)
+	if present2 || werr2 != nerrNetNameNotFound {
+		t.Errorf("不存在共享应回 NERR_NetNameNotFound: present=%v werr=%#x", present2, werr2)
+	}
+}
+
+func TestNetServerGetInfo101(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	h.ServerName = "STUPIDSAMBA"
+	h.ServerComment = "my server"
+	resp, _ := h.Handle(buildServerGetInfoReq(6, 101))
+	pdu, _ := dcerpc.ParsePDU(resp)
+	present, name, comment, svType, werr := decodeServerGetInfoResp(t, pdu.Stub)
+	if !present || werr != werrOK {
+		t.Fatalf("present=%v werr=%#x", present, werr)
+	}
+	if name != "STUPIDSAMBA" {
+		t.Errorf("name = %q", name)
+	}
+	if comment != "my server" {
+		t.Errorf("comment = %q", comment)
+	}
+	if svType != 0x00800002 {
+		t.Errorf("type = %#x", svType)
+	}
+}
+
+func TestPipeIntegration(t *testing.T) {
+	h := NewHandler(fakeLister{sampleShares()})
+	pipe, err := dcerpc.OpenPipe("srvsvc", h)
+	if err != nil {
+		t.Fatalf("OpenPipe: %v", err)
+	}
+	// 把完整请求写进管道，应能从 Read 拿到完整响应。
+	req := buildEnumAllReq(7, 1)
+	if _, err := pipe.Write(req); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	out := make([]byte, 4096)
+	n, err := pipe.Read(out)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("Read 返回 0 字节")
+	}
+	pdu, err := dcerpc.ParsePDU(out[:n])
+	if err != nil {
+		t.Fatalf("ParsePDU: %v", err)
+	}
+	if pdu.PType != dcerpc.PTYPEResponse {
+		t.Fatalf("PType = %d", pdu.PType)
+	}
+	_, entries, werr := decodeEnumAllResp(t, pdu.Stub)
+	if werr != werrOK || len(entries) != 2 {
+		t.Fatalf("经 Pipe 往返失败: werr=%#x entries=%d", werr, len(entries))
+	}
+}
