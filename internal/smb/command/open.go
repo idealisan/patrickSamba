@@ -174,6 +174,14 @@ func (o *Open) ReadDir(pattern string, restart bool, max int) ([]vfs.DirEntry, e
 	return h.ReadDir(pattern, restart, max)
 }
 
+// ResetDirScan 复位目录枚举状态，使下一次 QUERY_DIRECTORY 从头开始。
+func (o *Open) ResetDirScan() {
+	o.mu.Lock()
+	o.dirStarted = false
+	o.dirPending = nil
+	o.mu.Unlock()
+}
+
 // UnreadDir 把没能写进本次响应的目录项退回，下一轮 QUERY_DIRECTORY 先吐它们。
 func (o *Open) UnreadDir(entries []vfs.DirEntry) {
 	if len(entries) == 0 {
