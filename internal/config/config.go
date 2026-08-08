@@ -95,7 +95,23 @@ type Share struct {
 	// TimeMachine 把本共享宣告为 Time Machine 备份目标（阶段二）。
 	TimeMachine bool `yaml:"time_machine"`
 	// TimeMachineMaxSize 限制 Time Machine 可用容量（字节），0 表示不限。
+	//
+	// 这个值的用途是**广播**：写进 mDNS 的 _adisk._tcp TXT 记录
+	// （ADdF / disk size 字段，阶段二 Time Machine 磁盘宣告），让 Finder
+	// 在「选择备份磁盘」界面显示容量。它不改变向 SMB 客户端上报的卷大小。
 	TimeMachineMaxSize uint64 `yaml:"time_machine_max_size"`
+	// QuotaBytes 限制本共享**向客户端上报的卷容量**（字节），0 表示不限。
+	//
+	// 主要给 Time Machine 用：macOS 的 Time Machine 会一直备份到把整个卷吃满
+	// 为止，真实 NAS 都提供「给 TM 共享设配额」的能力。设了这个值以后，
+	// SMB 的 FileFsFullSizeInformation 会按 min(宿主真实剩余, 配额剩余) 上报。
+	//
+	// 注意这**不是**强制配额：它只影响向客户端上报的数字，不阻止本地写入。
+	// 真正的强制配额要靠宿主文件系统，不在本软件职责范围内。
+	//
+	// 与 TimeMachineMaxSize 的区别：后者只进 mDNS 广播、不参与 SMB 卷容量上报，
+	// 且只针对 TM；本字段对所有客户端（不止 TM）生效。两者语义不同、并存。
+	QuotaBytes uint64 `yaml:"quota_bytes"`
 	// MetadataPath 是 POSIX 元数据旁路存储（纯 Go 嵌入式 KV）的落盘路径。
 	//
 	// **仅 Windows 使用**（AGENTS.md §5 P7）：NTFS 表达不了 POSIX 的

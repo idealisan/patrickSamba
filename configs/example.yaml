@@ -60,7 +60,11 @@ shares:
     path: /srv/share/backup
     comment: "Time Machine"
     time_machine: true
-    time_machine_max_size: 0   # 0 表示不限制
+    time_machine_max_size: 0   # 0 表示不限制；仅用于 mDNS _adisk 广播，不影响 SMB 卷容量上报
+    # 向所有 SMB 客户端上报的卷容量上限（字节）。0 = 不限（按宿主真实剩余上报）。
+    # 主要影响 Time Machine：不设的话 TM 会一直写到把卷吃满。这不是强制配额，
+    # 只改上报数字，不阻止本地写入。例：2 TiB = 2199023255552
+    # quota_bytes: 2199023255552
     # POSIX 元数据（uid/gid/mode）旁路存储的落盘路径。
     # **仅 Windows 使用**：NTFS 表达不了 POSIX 属主与权限位，需要一个纯 Go 的
     # 嵌入式 KV 旁路保存；Linux/macOS 原生能力足够，留空即可（填了会被忽略）。

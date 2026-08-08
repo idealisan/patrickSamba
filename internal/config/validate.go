@@ -13,6 +13,11 @@ import (
 // 用 filepath 而非 path，以便 Windows 上 "C:\share" 也算绝对路径（AGENTS.md C7）。
 func isAbsPath(p string) bool { return filepath.IsAbs(p) }
 
+// quotaMinWarn 是 quota_bytes 的建议下限（1 GiB）。
+// 低于此值的卷容量上报对 Time Machine 不实用（会反复失败、空间抖动），
+// 但用户可能确有意图，所以只是 WARN，不报错。
+const quotaMinWarn = 1 << 30
+
 // FieldError 是单个字段的校验错误。
 //
 // Field 用 YAML 路径表示（如 "shares[1].path"），方便用户直接定位到配置行。
@@ -394,6 +399,11 @@ func Warnings(c *Config) []string {
 		s := &c.Shares[i]
 		if s.GuestOK && !c.Auth.AllowGuest {
 			w = append(w, fmt.Sprintf("shares[%d] %q 设置了 guest_ok 但 auth.allow_guest=false，该设置不会生效", i, s.Name))
+		}
+		// quota_bytes 太小（< 1 GiB）时 Time Machine 会反复备份失败、
+		// 空间抖动，真实 NAS 都设下限。这里只 WARN 不报错：用户可能有意为之。
+		if s.QuotaBytes != 0 && s.QuotaBytes < quotaMinWarn {
+			w = append(w, fmt.Sprintf("shares[%d] %q 的 quota_bytes=%d 小于 1 GiB，Time Machine 在过小的卷上会反复失败", i, s.Name, s.QuotaBytes))
 		}
 		if s.MetadataPath == "" {
 			continue
