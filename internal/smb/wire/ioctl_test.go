@@ -84,9 +84,14 @@ func TestIoctlResponseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	// 无 Input 时 InputOffset/InputCount 为 0，OutputOffset 指向固定部分之后。
-	if got := le.Uint32(msg[HeaderSize+24:]); got != 0 {
-		t.Errorf("InputOffset = %d, 期望 0", got)
+	// 只要有一个缓冲区非空，两个 offset 都指向可变部分起点，空的那个 count 填 0。
+	// 这是跟随真实 Samba 的行为，见 appendIoctlBuffers 的注释与
+	// testdata/capture/negotiate-smb202/010-s2c-IOCTL.bin。
+	if got := le.Uint32(msg[HeaderSize+24:]); got != HeaderSize+ioctlResponseFixed {
+		t.Errorf("InputOffset = %d, 期望 %d", got, HeaderSize+ioctlResponseFixed)
+	}
+	if got := le.Uint32(msg[HeaderSize+28:]); got != 0 {
+		t.Errorf("InputCount = %d, 期望 0", got)
 	}
 	if got := le.Uint32(msg[HeaderSize+32:]); got != HeaderSize+ioctlResponseFixed {
 		t.Errorf("OutputOffset = %d, 期望 %d", got, HeaderSize+ioctlResponseFixed)

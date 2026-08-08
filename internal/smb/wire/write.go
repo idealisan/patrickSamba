@@ -109,7 +109,7 @@ func (r *WriteRequest) Append(dst []byte) ([]byte, error) {
 //	 8 Remaining(4)
 //	12 WriteChannelInfoOffset(2)
 //	14 WriteChannelInfoLength(2)
-//	16 1 字节可变部分占位
+//	16 Buffer（RDMA 通道信息，本实现不支持，长度为 0）
 // ---------------------------------------------------------------------------
 
 // WriteResponse 是 SMB2 WRITE Response（MS-SMB2 §2.2.22）。
@@ -124,8 +124,10 @@ func (r *WriteResponse) Append(dst []byte) []byte {
 	le.PutUint16(f[0:], writeResponseStructureSize)
 	le.PutUint32(f[4:], r.Count)
 	le.PutUint32(f[8:], r.Remaining)
-	// StructureSize 17 = 固定 16 + 1 字节可变部分占位。
-	dst, _ = grow(dst, 1)
+	// 体就是 16 字节，比 StructureSize(17) 少 1，**不补占位字节**：
+	// 真实 Samba 4.22 的 WRITE Response 是 80 字节（64 头 + 16 体），
+	// 见 testdata/capture/create-read-write/018-s2c-WRITE.bin。
+	// 只有 ERROR Response 被 MS-SMB2 §2.2.2 明文要求补满 1 字节。
 	return dst
 }
 

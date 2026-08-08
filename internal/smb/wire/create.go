@@ -297,6 +297,12 @@ func (r *CreateRequest) Append(dst []byte) ([]byte, error) {
 		}
 		le.PutUint32(dst[bodyStart+48:], off)
 		le.PutUint32(dst[bodyStart+52:], n)
+	} else if nameLen == 0 {
+		// 文件名与 context 都为空（打开共享根目录就是这种情况）时补 1 字节占位，
+		// 使体长等于 StructureSize 57。真实客户端确实这么发：
+		// testdata/capture/*/019-c2s-CREATE.bin（smbclient）与
+		// testdata/capture/gosmb2/009-c2s-CREATE.bin（go-smb2）都是 57 字节体。
+		dst, _ = grow(dst, 1)
 	}
 	return dst, nil
 }
@@ -379,10 +385,13 @@ func (r *CreateResponse) Append(dst []byte) ([]byte, error) {
 		}
 		le.PutUint32(dst[bodyStart+80:], off)
 		le.PutUint32(dst[bodyStart+84:], n)
-	} else {
-		// 无 context 时补 1 字节可变部分占位（StructureSize 89 = 88 + 1）。
-		dst, _ = grow(dst, 1)
 	}
+	// 无 context 时**不补**占位字节：体就是 88 字节，比 StructureSize(89) 少 1。
+	// 这不是笔误 —— MS-SMB2 只在 §2.2.2 ERROR Response 里明文要求
+	// 「ByteCount 为 0 时 ErrorData 仍占 1 字节」，其余响应没有这条要求。
+	// 真实 Samba 4.22 的 CREATE Response 就是 152 字节（64 头 + 88 体），
+	// 见 testdata/capture/*/0??-s2c-CREATE.bin。既然 Windows 客户端天天连 Samba，
+	// 这个长度是被大规模验证过的（AGENTS.md §9：以真实实现行为为准）。
 	return dst, nil
 }
 

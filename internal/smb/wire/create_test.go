@@ -243,14 +243,16 @@ func TestCreateResponseRoundTrip(t *testing.T) {
 }
 
 func TestCreateResponseNoContextPadding(t *testing.T) {
-	// 无 context 时必须补 1 字节占位（StructureSize 89 = 88 + 1）。
+	// 无 context 时体就是 88 字节，比 StructureSize(89) 少 1，**不补**占位字节。
+	// 依据是真实 Samba 4.22 的 CREATE Response 长 152 字节（64 头 + 88 体），
+	// 见 testdata/capture/*/0??-s2c-CREATE.bin 与 capture_test.go。
 	r := &CreateResponse{CreateAction: FileCreated}
 	msg, err := r.Append(dummyHeader(CommandCreate))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(msg) - HeaderSize; n != 89 {
-		t.Errorf("体长度 = %d, want 89", n)
+	if n := len(msg) - HeaderSize; n != createResponseFixed {
+		t.Errorf("体长度 = %d, want %d", n, createResponseFixed)
 	}
 	if _, err := ParseCreateResponse(msg); err != nil {
 		t.Fatalf("Parse: %v", err)

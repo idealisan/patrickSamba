@@ -236,9 +236,36 @@ func ParseIoctlResponse(b []byte) (*IoctlResponse, error) {
 // appendIoctlBuffers 追加 Input/Output 并回填两组 offset/count。
 // inFieldOff / outFieldOff 是固定部分内 offset 字段的下标（count 紧随其后 4 字节）。
 //
-// 空缓冲区按 MS-SMB2 §2.2.31/§2.2.32 填 offset=0、count=0；两者都空时补
-// 1 字节可变部分占位（StructureSize 比固定部分大 1）。
+// 关于「空缓冲区的 offset 填什么」，MS-SMB2 §2.2.31/§2.2.32 的字面意思像是填 0，
+// 但真实 Samba 4.22 的行为分两种情况（抓包实测，见 testdata/capture/）：
+//
+//	至少有一个缓冲区非空 → 两个 offset 都指向**可变部分起点**（64 + 固定部分长度），
+//	                       空的那个 count 填 0 但 offset 照样非 0。
+//	    negotiate-smb202/009-c2s-IOCTL.bin：InputCount=26 InputOffset=0x78，
+//	                                        OutputCount=0  OutputOffset=0x78
+//	    negotiate-smb202/010-s2c-IOCTL.bin：InputCount=0  InputOffset=0x70，
+//	                                        OutputCount=24 OutputOffset=0x70
+//
+//	两个都空           → 两个 offset 都填 0，并补 1 字节占位（体长 = StructureSize）。
+//	    query-info/035-c2s-IOCTL.bin：体 57 字节，两个 offset 都是 0
+//
+// 按 AGENTS.md §9「以真实实现行为为准」跟随 Samba。解析侧对各种写法都兼容
+// （count 为 0 时根本不会去取字节）。
 func appendIoctlBuffers(dst []byte, bodyStart, fixed, inFieldOff, outFieldOff int, input, output []byte) ([]byte, error) {
+	if len(input) == 0 && len(output) == 0 {
+		// offset/count 保持 0，补 1 字节占位。
+		dst, _ = grow(dst, 1)
+		return dst, nil
+	}
+
+	// bufStart 是可变部分起点（相对本消息 SMB2 头），空的那一个填它。
+	bufStart, err := u32(HeaderSize+fixed, "IOCTL BufferOffset")
+	if err != nil {
+		return nil, err
+	}
+	le.PutUint32(dst[bodyStart+inFieldOff:], bufStart)
+	le.PutUint32(dst[bodyStart+outFieldOff:], bufStart)
+
 	if len(input) > 0 {
 		n, err := u32(len(input), "IOCTL InputCount")
 		if err != nil {
@@ -266,9 +293,6 @@ func appendIoctlBuffers(dst []byte, bodyStart, fixed, inFieldOff, outFieldOff in
 		le.PutUint32(dst[bodyStart+outFieldOff:], off)
 		le.PutUint32(dst[bodyStart+outFieldOff+4:], n)
 		dst = append(dst, output...)
-	}
-	if len(input) == 0 && len(output) == 0 {
-		dst, _ = grow(dst, 1) // 1 字节可变部分占位
 	}
 	return dst, nil
 }

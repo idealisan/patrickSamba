@@ -1,0 +1,37 @@
+# captureproxy 帧摘要
+# 每个 .bin 是去掉 4 字节 Direct TCP 长度前缀之后的 SMB 报文本体。
+# 列：序号 方向 连接 长度 命令 摘要
+001 c2s conn1    102B NEGOTIATE mid=0 credits=31
+002 s2c conn1    202B NEGOTIATE mid=0 credits=1 status=0x00000000
+003 c2s conn1    162B SESSION_SETUP mid=1 credits=8192
+004 s2c conn1    275B SESSION_SETUP mid=1 credits=1 sid=0x6846a0db status=0xc0000016
+005 c2s conn1    562B SESSION_SETUP mid=2 credits=8192 sid=0x6846a0db
+006 s2c conn1    101B SESSION_SETUP mid=2 credits=8192 sid=0x6846a0db status=0x00000000 SIGNED
+007 c2s conn1    104B TREE_CONNECT mid=3 credits=1 sid=0x6846a0db SIGNED
+008 s2c conn1     80B TREE_CONNECT mid=3 credits=1 sid=0x6846a0db tid=0x3a36a7fb status=0x00000000 SIGNED
+009 c2s conn1    146B IOCTL     mid=4 credits=1 sid=0x6846a0db tid=0x3a36a7fb SIGNED
+010 s2c conn1    136B IOCTL     mid=4 credits=1 sid=0x6846a0db tid=0x3a36a7fb status=0x00000000 SIGNED
+011 c2s conn1    160B IOCTL     mid=5 credits=1 sid=0x6846a0db tid=0x3a36a7fb
+012 s2c conn1     73B IOCTL     mid=5 credits=1 sid=0x6846a0db tid=0x3a36a7fb status=0xc0000225
+013 c2s conn1     68B TREE_DISCONNECT mid=6 credits=1 sid=0x6846a0db tid=0x3a36a7fb
+014 s2c conn1     68B TREE_DISCONNECT mid=6 credits=1 sid=0x6846a0db tid=0x3a36a7fb status=0x00000000
+015 c2s conn1    110B TREE_CONNECT mid=7 credits=1 sid=0x6846a0db SIGNED
+016 s2c conn1     80B TREE_CONNECT mid=7 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000 SIGNED
+017 c2s conn1    146B IOCTL     mid=8 credits=1 sid=0x6846a0db tid=0x59d090e5 SIGNED
+018 s2c conn1    136B IOCTL     mid=8 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000 SIGNED
+019 c2s conn1    121B CREATE    mid=9 credits=1 sid=0x6846a0db tid=0x59d090e5
+020 s2c conn1    152B CREATE    mid=9 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+021 c2s conn1     98B QUERY_DIRECTORY mid=10 credits=1 sid=0x6846a0db tid=0x59d090e5
+022 s2c conn1   1020B QUERY_DIRECTORY mid=10 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+023 c2s conn1     98B QUERY_DIRECTORY mid=11 credits=1 sid=0x6846a0db tid=0x59d090e5
+024 s2c conn1     73B QUERY_DIRECTORY mid=11 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x80000006
+025 c2s conn1     88B CLOSE     mid=12 credits=1 sid=0x6846a0db tid=0x59d090e5
+026 s2c conn1    124B CLOSE     mid=12 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+027 c2s conn1    121B CREATE    mid=13 credits=1 sid=0x6846a0db tid=0x59d090e5
+028 s2c conn1    152B CREATE    mid=13 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+029 c2s conn1    105B QUERY_INFO mid=14 credits=1 sid=0x6846a0db tid=0x59d090e5
+030 s2c conn1     96B QUERY_INFO mid=14 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+031 c2s conn1     88B CLOSE     mid=15 credits=1 sid=0x6846a0db tid=0x59d090e5
+032 s2c conn1    124B CLOSE     mid=15 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
+033 c2s conn1     68B TREE_DISCONNECT mid=16 credits=1 sid=0x6846a0db tid=0x59d090e5
+034 s2c conn1     68B TREE_DISCONNECT mid=16 credits=1 sid=0x6846a0db tid=0x59d090e5 status=0x00000000
