@@ -3,9 +3,11 @@ package mdns
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -54,12 +56,64 @@ type conn struct {
 	// ifaces 是成功加入了组播组的网卡（至少 v4/v6 之一成功）。
 	ifaces []net.Interface
 
+	// v6Capable 记录哪些网卡真的配了 IPv6 地址（按 Index 索引）。
+	// 加组播组成功不代表能发出去：只有 IPv4 地址的网卡上发 ff02::fb
+	// 会得到 ENETUNREACH，每次宣告刷一堆日志。
+	v6Capable map[int]bool
+
 	// sendMu 保护 SetMulticastInterface + WriteTo 这一对操作。
 	// 用 setsockopt 选出网卡再发送，比控制消息更可移植
 	// （Windows 上 x/net 的控制消息支持不完整）。
 	sendMu sync.Mutex
 
+	// 自发报文抑制（见 noteSent / isOwnPacket）。
+	sentMu sync.Mutex
+	sent   map[uint64]time.Time
+
 	closeOnce sync.Once
+}
+
+// selfSuppressWindow 是「刚发出去的报文」被认作自发回环的时间窗口。
+//
+// 组播回环是打开的（同机的其他进程也要能发现我们），代价是内核会把我们
+// 自己发出的每一个报文原样送回本 socket。RFC 6762 §11 要求响应者忽略
+// 自己的报文 —— 否则探测阶段会把自己的 probe 当成冲突，无限改名。
+//
+// 窗口取 2s：远大于回环延迟（微秒级），又远小于任何一次宣告间隔。
+const selfSuppressWindow = 2 * time.Second
+
+// noteSent 记下刚发出的报文指纹。
+//
+// 用报文字节的哈希而不是源地址来判定：源地址判定会把同一台机器上
+// 其他 mDNS 程序（例如调试用的 avahi-browse）的查询也一起误杀。
+func (c *conn) noteSent(b []byte) {
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	sum := h.Sum64()
+
+	now := time.Now()
+	c.sentMu.Lock()
+	defer c.sentMu.Unlock()
+	for k, t := range c.sent {
+		if now.Sub(t) > selfSuppressWindow {
+			delete(c.sent, k)
+		}
+	}
+	c.sent[sum] = now
+}
+
+// isOwnPacket 报告收到的字节是否是我们自己刚发出去的报文。
+//
+// 不做「命中即删除」：同一份报文会在每张网卡上各回环一次。
+func (c *conn) isOwnPacket(b []byte) bool {
+	h := fnv.New64a()
+	_, _ = h.Write(b)
+	sum := h.Sum64()
+
+	c.sentMu.Lock()
+	defer c.sentMu.Unlock()
+	t, ok := c.sent[sum]
+	return ok && time.Since(t) <= selfSuppressWindow
 }
 
 // openConn 创建 mDNS socket 并在指定网卡上加入组播组。
@@ -74,7 +128,11 @@ func openConn(ifaceNames []string, log *slog.Logger) (*conn, error) {
 		return nil, fmt.Errorf("mdns: 没有找到可用于组播的网卡（需要 UP 且支持 MULTICAST）")
 	}
 
-	c := &conn{log: log}
+	c := &conn{
+		log:       log,
+		v6Capable: make(map[int]bool, len(ifaces)),
+		sent:      make(map[uint64]time.Time),
+	}
 
 	joined := make(map[string]bool, len(ifaces))
 
@@ -105,9 +163,12 @@ func openConn(ifaceNames []string, log *slog.Logger) (*conn, error) {
 	}
 
 	for i := range ifaces {
-		if joined[ifaces[i].Name] {
-			c.ifaces = append(c.ifaces, ifaces[i])
+		if !joined[ifaces[i].Name] {
+			continue
 		}
+		c.ifaces = append(c.ifaces, ifaces[i])
+		_, v6addrs := interfaceIPs(&ifaces[i])
+		c.v6Capable[ifaces[i].Index] = len(v6addrs) > 0
 	}
 
 	if len(c.ifaces) == 0 {
@@ -314,6 +375,11 @@ func (c *conn) readIPv6(handle func(packet)) {
 }
 
 func (c *conn) dispatch(b []byte, p packet, handle func(packet)) {
+	// 组播回环把我们自己发的报文原样送了回来（RFC 6762 §11：忽略自己的报文）。
+	if c.isOwnPacket(b) {
+		return
+	}
+
 	msg, err := Unpack(b)
 	if err != nil {
 		// 畸形报文只记 debug：链路上什么设备都可能存在，不能因此吵闹或崩溃。
@@ -343,6 +409,8 @@ func (c *conn) sendMulticast(m *Message, ifIndex int) {
 }
 
 func (c *conn) writeMulticast(b []byte, ifi *net.Interface) {
+	c.noteSent(b)
+
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
@@ -353,7 +421,7 @@ func (c *conn) writeMulticast(b []byte, ifi *net.Interface) {
 			}
 		}
 	}
-	if c.v6 != nil {
+	if c.v6 != nil && c.v6Capable[ifi.Index] {
 		if err := c.v6.SetMulticastInterface(ifi); err == nil {
 			// IPv6 组播必须带 zone，否则内核不知道从哪张网卡出去。
 			dst := &net.UDPAddr{IP: mdnsGroupIPv6, Port: mdnsPort, Zone: ifi.Name}
@@ -371,6 +439,9 @@ func (c *conn) sendUnicast(m *Message, dst *net.UDPAddr, v6 bool) {
 		c.log.Error("mDNS: 报文编码失败", "err", err)
 		return
 	}
+	// 单播目标一般是别的主机，不会回环；但目标是本机地址时同样会回来。
+	c.noteSent(b)
+
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 
