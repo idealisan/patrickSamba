@@ -187,7 +187,9 @@ func buildSettings(cfg *config.Config, provider auth.Provider, shares []*command
 		EncryptionEnabled:  maxD.SupportsEncryption(),
 		EncryptionRequired: cfg.Server.EncryptionRequired,
 
-		AllowSMB1Negotiate: cfg.Server.SMB1,
+		// *bool 默认 true（ApplyDefaults 会填），nil 只可能出现在
+		// 绕过 ApplyDefaults 直接构造 Config 的场景，此时按默认值处理。
+		AllowSMB1Negotiate: cfg.Server.SMB1 == nil || *cfg.Server.SMB1,
 		AllowGuest:         cfg.Auth.AllowGuest,
 
 		Auth:   provider,

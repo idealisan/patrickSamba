@@ -29,8 +29,21 @@ type Server struct {
 	EncryptionRequired bool `yaml:"encryption_required"`
 	// MaxConnections 是并发连接数上限，0 表示不限。
 	MaxConnections int `yaml:"max_connections"`
-	// SMB1 控制是否响应 SMB1 多协议协商入口（用于升级到 SMB2）。
-	SMB1 bool `yaml:"smb1"`
+	// SMB1 控制是否响应 SMB1 多协议协商入口，**默认开启**。
+	//
+	// 这里说的"SMB1"只是 MS-SMB2 §3.3.5.3.1 的那个协商入口：客户端先发
+	// SMB1 `SMB_COM_NEGOTIATE`、方言列表里带 "SMB 2.???"，服务端直接用
+	// SMB2 NEGOTIATE Response 回应把它升上 SMB2。
+	// **本服务不提供任何 SMB1 文件操作**（没有 trans2、没有 SMB1 读写），
+	// 所以 EternalBlue 那一类针对 SMB1 文件操作实现的攻击面在这里为零。
+	//
+	// 默认开启是为了兼容性：impacket 的 SMBConnection 默认就走
+	// negotiateSessionWildcard（先发 SMB1 协商），而它是 AGENTS.md §3
+	// 必测客户端矩阵的第 3 项。关掉它这类客户端会直接连不上。
+	//
+	// 用 *bool 而非 bool：YAML 里分不清"未设置"与"显式 false"，
+	// 而本项默认值是 true（与 Share.Browseable 同理）。
+	SMB1 *bool `yaml:"smb1"`
 }
 
 // Listen 是监听设置。
@@ -139,4 +152,7 @@ const (
 	DefaultMaxDialect = "3.1.1"
 	DefaultMinDialect = "2.0.2"
 	DefaultAppleModel = "MacSamba"
+	// DefaultSMB1Negotiate 是 Server.SMB1 的默认值：开启 SMB1 多协议协商入口。
+	// 只是协商入口，不含任何 SMB1 文件操作，见 Server.SMB1 字段注释。
+	DefaultSMB1Negotiate = true
 )
