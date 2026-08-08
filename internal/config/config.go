@@ -89,7 +89,11 @@ type Share struct {
 	// uid/gid/mode，需要旁路存储；Linux/macOS 原生能力足够，该字段留空即可，
 	// 填了也会被忽略（会有一条启动 WARN）。
 	//
-	// 留空时由 vfs 层决定默认落点，config 不替它做决定。
+	// 留空时由 vfs 层的 defaultMetadataPath 决定默认落点，config 不替它做决定：
+	//   os.UserConfigDir()/stupidsamba/metadata-<fnv32a(root)>.db
+	// 即 Windows 上为 %AppData%\stupidsamba\metadata-xxxxxxxx.db
+	// （root 路径先 ToLower 再哈希，规避 Windows 路径大小写不敏感导致的重复库）。
+	// 默认落点刻意放在共享目录之外，避免客户端在共享里看到这个数据库文件。
 	MetadataPath string `yaml:"metadata_path"`
 }
 

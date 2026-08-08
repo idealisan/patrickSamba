@@ -41,7 +41,9 @@ func ApplyDefaults(c *Config) {
 			s.Browseable = &t
 		}
 		// Share.MetadataPath 故意不填默认值：它只在 Windows 生效，
-		// 落点由 vfs 层自己决定（AGENTS.md §5 P7），config 不替它做决定。
+		// 落点由 vfs 层的 defaultMetadataPath 自己决定（AGENTS.md §5 P7），
+		// config 不替它做决定。默认落点为
+		// %AppData%\stupidsamba\metadata-<fnv32a(root)>.db（见 config.go 该字段注释）。
 	}
 
 	if c.MDNS.Instance == "" {
