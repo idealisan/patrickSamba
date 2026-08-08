@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"os"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -111,3 +112,49 @@ func platformPreallocate(*os.File, int64, int64) error {
 // 共享内出现攻击者可控软链的前提本就不成立。
 // TODO: 若要在 Windows 上严格化，需绕开 os.OpenFile 直接调 CreateFileW。
 const openNoFollow = 0
+
+// platformSetCreateTime 用 SetFileTime 设置真实创建时间。
+// 这是 Windows 相对 POSIX 的**原生优势**：NTFS 真的存了创建时间，
+// 不需要旁路存储（AGENTS.md §5 P7）。
+func platformSetCreateTime(f *os.File, host string, t time.Time) error {
+	if f == nil {
+		// 没有句柄就没法设置；调用方会忽略这个错误。
+		return ErrNotSupported
+	}
+	ft := TimeToFiletime(t)
+	wft := windows.Filetime{
+		LowDateTime:  uint32(ft),
+		HighDateTime: uint32(ft >> 32),
+	}
+	if err := windows.SetFileTime(windows.Handle(f.Fd()), &wft, nil, nil); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// platformSetDOSAttributes 用 SetFileAttributes 落地 DOS 属性位。
+//
+// 只改**可设置**的那几位（settableDOSAttributes），
+// DIRECTORY / SPARSE / REPARSE 这些是文件系统的客观事实，必须原样保留 ——
+// 清掉 DIRECTORY 位会让 Windows 认为这不再是目录。
+func platformSetDOSAttributes(host string, attrs uint32) error {
+	p, err := windows.UTF16PtrFromString(host)
+	if err != nil {
+		return ErrInvalidPath
+	}
+	cur, err := windows.GetFileAttributes(p)
+	if err != nil {
+		return mapError(err)
+	}
+	next := (cur &^ settableDOSAttributes) | (attrs & settableDOSAttributes)
+	if next == 0 {
+		next = windows.FILE_ATTRIBUTE_NORMAL
+	}
+	if next == cur {
+		return nil
+	}
+	if err := windows.SetFileAttributes(p, next); err != nil {
+		return mapError(err)
+	}
+	return nil
+}

@@ -9,6 +9,7 @@ package vfs
 
 import (
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -65,3 +66,12 @@ func platformPreallocate(f *os.File, off, length int64) error {
 // openNoFollow 是 open(2) 的 O_NOFOLLOW 标志。
 // 见 path.go 的 TOCTOU 说明：本包**永远**带着它打开最后一跳。
 const openNoFollow = unix.O_NOFOLLOW
+
+// platformSetCreateTime：Linux 没有设置 btime 的接口（statx 只能读）。
+func platformSetCreateTime(*os.File, string, time.Time) error { return ErrNotSupported }
+
+// platformSetDOSAttributes：POSIX 没有 DOS 属性位，由调用方退化成 chmod。
+func platformSetDOSAttributes(string, uint32) error { return ErrNotSupported }
+
+// errnoNoAttr 是「扩展属性不存在」的 errno。Linux 用 ENODATA。
+const errnoNoAttr = unix.ENODATA
