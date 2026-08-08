@@ -1,0 +1,10 @@
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.pcap
+*.log
+.DS_Store
+/config.yaml
+/config.yml

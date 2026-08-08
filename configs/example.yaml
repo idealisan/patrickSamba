@@ -1,0 +1,75 @@
+# stupidSamba 配置示例
+#
+# 最小可用配置只需要 shares 一段，其余都有合理默认值。
+
+server:
+  # NetBIOS/主机名，留空则使用系统主机名
+  name: STUPIDSAMBA
+  domain: WORKGROUP
+  # 协商范围
+  min_dialect: "2.0.2"
+  max_dialect: "3.1.1"
+  # 是否响应 SMB1 多协议协商入口（仅用于让老客户端升级到 SMB2）
+  smb1: false
+  signing_required: false
+  encryption_required: false
+  max_connections: 0
+
+listen:
+  # 监听的 IP 列表，可以写多个；留空表示监听所有地址
+  addresses:
+    - 0.0.0.0
+    - "::"
+  # 端口只允许一个，默认 445
+  port: 445
+
+auth:
+  # 生产环境请设为 false
+  allow_guest: false
+  users:
+    - name: alice
+      password: "changeme"
+      uid: 1000
+      gid: 1000
+    # 也可以只提供 NT hash，避免明文口令落盘：
+    # - name: bob
+    #   nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
+
+# 共享目录列表 —— 支持共享多个目录
+shares:
+  - name: public
+    path: /srv/share/public
+    comment: "公共读写目录"
+    read_only: false
+    guest_ok: false
+
+  - name: docs
+    path: /srv/share/docs
+    comment: "只读文档"
+    read_only: true
+
+  # 阶段二：Time Machine 备份目标
+  - name: backup
+    path: /srv/share/backup
+    comment: "Time Machine"
+    time_machine: true
+    time_machine_max_size: 0   # 0 表示不限制
+
+mdns:
+  enabled: true
+  # 服务实例名，留空则用 server.name
+  instance: ""
+  # 限定广播网卡，留空表示所有网卡
+  interfaces: []
+  apple:
+    # 是否携带苹果生态对 SMB 的扩展字段
+    enabled: true
+    # 决定 Finder 侧边栏显示的图标
+    model: "MacSamba"
+    # 广播 _adisk._tcp，让 Time Machine 能发现本服务
+    advertise_time_machine: true
+
+log:
+  level: info
+  format: text
+  file: ""
