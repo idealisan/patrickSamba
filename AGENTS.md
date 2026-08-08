@@ -27,7 +27,38 @@
 | C4 | **禁止依赖系统网络服务做协议转换/广播** | mDNS 必须由本进程自己在 224.0.0.251:5353 / [ff02::fb]:5353 上收发报文实现，**不允许**调用 avahi/Bonjour/systemd-resolved 的 D-Bus 或 socket 接口。 |
 | C5 | **所有网络协议栈都在本仓库内** | SMB1/2/3、NTLM、SPNEGO/GSS-API、DCERPC(srvsvc)、mDNS/DNS-SD、NetBIOS 全部自实现或 vendor 进来。 |
 | C6 | **允许使用第三方社区库，但功能不足时必须改写或重写** | 见 §4 依赖政策。宁可 vendor 一份可控的代码，也不要迁就一个功能不够的库。 |
-| C7 | **跨平台** | 至少 linux/amd64、linux/arm64、darwin/arm64、windows/amd64 能交叉编译通过。平台相关代码用 build tag 隔离在 `internal/platform/`。 |
+| C7 | **跨平台** | 至少 linux/amd64、linux/arm64、darwin/arm64、windows/amd64 能交叉编译通过。平台相关代码用 build tag 隔离。 |
+| C8 | **认证与加密完全自成体系，与操作系统用户管理零关系** | 见下方 §1.1，这是一条独立的硬性约束。 |
+
+### 1.1 认证自成体系（C8 展开）
+
+**账户体系完全由本软件自己管理，与宿主操作系统的用户管理没有任何关系。**
+
+明确禁止：
+
+- ❌ PAM（`pam_authenticate` 等，无论通过 CGO 还是外部进程）
+- ❌ 读取 `/etc/passwd`、`/etc/shadow`、`/etc/group`
+- ❌ NSS / `getpwnam` / `getgrnam` / `os/user` 包的**查询系语义**
+      （`os/user.Lookup*` 在纯 Go 模式下会去读 `/etc/passwd`，同样禁止）
+- ❌ winbind、SSSD、nslcd 等名字服务守护进程
+- ❌ Windows 的 `LogonUser` / SSPI / LSA，macOS 的 OpenDirectory
+- ❌ 系统 keyring / Secret Service / DPAPI
+- ❌ 依赖系统的 Kerberos 配置（`/etc/krb5.conf`、系统 keytab、`KRB5CCNAME`）
+
+必须这样做：
+
+- ✅ 用户名与口令凭据**只来自本软件的 YAML 配置文件**（明文口令或 NT hash）。
+- ✅ 所有密码学原语（MD4/MD5/HMAC/RC4/AES-CMAC/AES-CCM/AES-GCM/SHA-512/SP800-108 KDF）
+      **在本仓库内用纯 Go 实现或来自 Go 标准库 / `golang.org/x/crypto`**，
+      不调用 OpenSSL、GnuTLS、CommonCrypto、CNG/BCrypt 等系统密码库。
+- ✅ 配置里的 `uid` / `gid` 只是**给 VFS 层用的数字标签**，用于文件属主展示与权限决策，
+      **不做系统用户解析**，也不要求宿主系统上真的存在这个用户。
+- ✅ 授权（谁能访问哪个 share、是否只读）完全由配置文件里的 `valid_users` / `read_only` /
+      `guest_ok` 决定，**不读取宿主文件系统的 ACL 来做访问判定**
+      （底层 IO 仍然受进程自身的操作系统权限约束，这是不可避免的，但不作为授权依据）。
+
+理由：本软件要能在任意环境（容器、只读根文件系统、嵌入式、Windows）以单个二进制开箱即用，
+不能要求管理员先在宿主机上建用户。同时这也让行为可预测、可测试、可移植。
 
 **自检命令**（提交前必须本地跑过）：
 
