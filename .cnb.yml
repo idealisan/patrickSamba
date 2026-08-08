@@ -1,0 +1,12 @@
+$:
+  vscode:
+    - runner:
+        cpus: 2   # 4 核 CPU，内存自动按 cpus × 2GiB 匹配为 8Gi
+      docker:
+        image: cnbcool/default-dev-env:latest   # 官方默认开发镜像
+      services:
+        - vscode
+        - docker
+      stages:
+        - name: ready
+          script: echo "云原生开发环境已就绪（默认镜像，4 核 CPU）"
