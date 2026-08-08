@@ -416,6 +416,22 @@ func (l *LocalFS) applyMetadata(host string, a *Attr) {
 	}
 	// 没有记录：用配置里的数字标签兜底，让客户端看到一个稳定的属主。
 	a.UID, a.GID = l.cfg.UID, l.cfg.GID
+
+	// NTFS 没有 POSIX 权限位，attrFromFileInfo 在 Windows 上给不出 Mode。
+	// 留 0 会让 macOS/Linux 客户端看到一个「谁都不能读写」的对象，
+	// Time Machine 会直接判定备份目标不可用，所以必须兜一个合理默认值。
+	if a.Mode == 0 {
+		mode := l.cfg.FileMode
+		if a.FileAttributes&FileAttributeDirectory != 0 {
+			mode = l.cfg.DirMode
+		}
+		// 与 DOS 的 READONLY 位（以及只读共享）保持一致，避免客户端
+		// 看到「权限位可写但一写就被拒」的矛盾状态。
+		if a.FileAttributes&FileAttributeReadonly != 0 {
+			mode &^= 0o222
+		}
+		a.Mode = uint32(mode.Perm())
+	}
 }
 
 // Remove 实现 FileSystem。文件与空目录都走这里。
