@@ -91,16 +91,14 @@ func (h *Handler) handleBind(pdu *dcerpc.PDU) []byte {
 	if len(pdu.ContextElems) == 0 {
 		return dcerpc.MarshalBindNak(pdu.CallID, 0x00000002) // provider reject
 	}
-	elem := pdu.ContextElems[0]
-	if !elem.AbstractSyntaxUUID.Equal(srvsvcUUID) {
-		return dcerpc.MarshalBindNak(pdu.CallID, 0x00000002)
+	// 逐个 context 给结果：smbclient 会同时提出 NDR32 与
+	// bind time feature negotiation 两个 context，p_result_list 必须一一对应，
+	// 少一项客户端就会按 frag_length 继续读、读不到而报 NT_STATUS_BUFFER_TOO_SMALL。
+	results, ok := dcerpc.NegotiateResults(pdu.ContextElems, srvsvcUUID)
+	if !ok {
+		return dcerpc.MarshalBindNak(pdu.CallID, 0x0002) // provider rejection
 	}
-	// 仅接受 NDR32 transfer syntax（MS-RPCE §2.2.2.5）。
-	xfer := dcerpc.TransferSyntax{
-		UUID:    dcerpc.NDR32TransferSyntax,
-		Version: dcerpc.NDR32TransferVersion,
-	}
-	return dcerpc.MarshalBindAck(pdu.CallID, secAddr, xfer)
+	return dcerpc.MarshalBindAck(pdu.CallID, secAddr, results)
 }
 
 func (h *Handler) handleRequest(pdu *dcerpc.PDU) ([]byte, error) {
