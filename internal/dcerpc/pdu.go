@@ -47,7 +47,32 @@ const (
 var NDR32TransferSyntax = mustParseUUID("8a885d04-1ceb-11c9-9fe8-08002b104860")
 
 // NDR32TransferVersion 是 NDR32 的 transfer syntax 版本号。
-const NDR32TransferVersion uint32 = 0x00020000
+//
+// p_syntax_id_t.if_version 是**一个 uint32**，低 16 位是 major、高 16 位是 minor
+// （C706 §12.6.3.1）。NDR32 是 v2.0，因此值是 2 而不是 0x00020000
+// ——真实抓包里 smbclient 发的就是 if_version = 0x00000002。
+const NDR32TransferVersion uint32 = 0x00000002
+
+// bindTimeFeaturePrefix 是「bind time feature negotiation」伪 transfer syntax
+// 的前 8 个线格式字节，对应 UUID 6cb71c2c-9812-4540-xxxx-000000000000
+// （MS-RPCE §3.3.1.5.3）。Data4 的前两字节携带客户端请求的特性位。
+var bindTimeFeaturePrefix = [8]byte{0x2c, 0x1c, 0xb7, 0x6c, 0x12, 0x98, 0x40, 0x45}
+
+// IsBindTimeFeature 报告该 transfer syntax 是否为 bind time feature negotiation，
+// 并返回客户端请求的特性位（MS-RPCE §2.2.2.14）。
+func IsBindTimeFeature(u UUID) (uint16, bool) {
+	for i, b := range bindTimeFeaturePrefix {
+		if u[i] != b {
+			return 0, false
+		}
+	}
+	for _, b := range u[10:16] {
+		if b != 0 {
+			return 0, false
+		}
+	}
+	return uint16(u[8]) | uint16(u[9])<<8, true
+}
 
 // Header 是 DCERPC 公共头（16 字节，MS-RPCE §2.2.2.1 / C706 §12.4）。
 type Header struct {
@@ -95,7 +120,11 @@ type PDU struct {
 }
 
 // ContextElem 是 bind 的 p_context_elem 项（C706 §12.6.3.2）。
+//
+// 线格式字段顺序是 p_cont_id(2) → n_transfer_syn(1) → reserved(1) →
+// abstract_syntax(20) → transfer_syntaxes[n]，**abstract_syntax 不在最前面**。
 type ContextElem struct {
+	ContextID          uint16
 	AbstractSyntaxUUID UUID
 	AbstractSyntaxVer  uint32
 	TransferSyntaxes   []TransferSyntax
@@ -114,12 +143,74 @@ type Result struct {
 	Syntax TransferSyntax
 }
 
-// p_result 接受码（MS-RPCE §2.2.2.4 P_RESULT）。
+// p_result 接受码（C706 §12.6.3.1 / MS-RPCE §2.2.2.4）。
 const (
 	ResultAcceptance     uint16 = 0
 	ResultUserReject     uint16 = 1
 	ResultProviderReject uint16 = 2
+	// ResultNegotiateAck 用于回应 bind time feature negotiation
+	// （MS-RPCE §3.3.1.5.3），此时 reason 字段承载服务端支持的特性位。
+	ResultNegotiateAck uint16 = 3
 )
+
+// p_provider_reason 拒绝原因（C706 §12.6.3.1）。
+const (
+	ReasonNotSpecified          uint16 = 0
+	ReasonAbstractSyntaxUnsup   uint16 = 1 // abstract_syntax_not_supported
+	ReasonTransferSyntaxesUnsup uint16 = 2 // proposed_transfer_syntaxes_not_supported
+)
+
+// NegotiateResults 按客户端提出的 context 列表逐项给出协商结果
+// （C706 §12.6.3.1：p_result_list 的项数必须与 p_context_elem 一一对应）。
+//
+// iface 是本端支持的抽象接口 UUID。规则：
+//   - transfer syntax 是 bind time feature negotiation → negotiate_ack，
+//     reason 回本端支持的特性位（我们两个都不支持，回 0）；
+//   - abstract syntax 不认识 → provider_rejection / abstract_syntax_not_supported；
+//   - 没有 NDR32 → provider_rejection / proposed_transfer_syntaxes_not_supported；
+//   - 否则 acceptance + NDR32。
+//
+// 第二个返回值表示是否至少有一个 context 被接受；全不接受时调用方应回 bind_nak。
+func NegotiateResults(elems []ContextElem, iface UUID) ([]Result, bool) {
+	ndr32 := TransferSyntax{UUID: NDR32TransferSyntax, Version: NDR32TransferVersion}
+	results := make([]Result, 0, len(elems))
+	accepted := false
+
+	for _, e := range elems {
+		// 特性协商上下文优先判断：它的 abstract syntax 仍然是目标接口，
+		// 区分点在 transfer syntax。
+		feature := false
+		hasNDR32 := false
+		for _, ts := range e.TransferSyntaxes {
+			if _, ok := IsBindTimeFeature(ts.UUID); ok {
+				feature = true
+			}
+			if ts.UUID.Equal(NDR32TransferSyntax) {
+				hasNDR32 = true
+			}
+		}
+
+		switch {
+		case feature:
+			// 本端不支持安全上下文复用与 orphan 保活，特性位回 0。
+			results = append(results, Result{Result: ResultNegotiateAck})
+		case !e.AbstractSyntaxUUID.Equal(iface):
+			results = append(results, Result{
+				Result: ResultProviderReject,
+				Reason: ReasonAbstractSyntaxUnsup,
+			})
+		case !hasNDR32:
+			results = append(results, Result{
+				Result: ResultProviderReject,
+				Reason: ReasonTransferSyntaxesUnsup,
+			})
+		default:
+			results = append(results, Result{Result: ResultAcceptance, Syntax: ndr32})
+			accepted = true
+		}
+	}
+	return results, accepted
+}
 
 // 公共头固定 16 字节（MS-RPCE §2.2.2.1）。
 const headerSize = 16
@@ -239,20 +330,17 @@ func parseBind(body []byte, order binary.ByteOrder) (*PDU, error) {
 	off := 12
 	elems := make([]ContextElem, 0, nCtx)
 	for i := 0; i < nCtx; i++ {
-		if off+20 > len(body) {
+		// p_cont_id(2) + n_transfer_syn(1) + reserved(1) + abstract_syntax(20)
+		if off+24 > len(body) {
 			return nil, fmt.Errorf("dcerpc: bind 第 %d 个 context_elem 越界", i)
 		}
 		elem := ContextElem{
-			AbstractSyntaxUUID: ParseUUIDBytes(body[off : off+16]),
-			AbstractSyntaxVer:  order.Uint32(body[off+16 : off+20]),
+			ContextID:          order.Uint16(body[off : off+2]),
+			AbstractSyntaxUUID: ParseUUIDBytes(body[off+4 : off+20]),
+			AbstractSyntaxVer:  order.Uint32(body[off+20 : off+24]),
 		}
-		off += 20
-		if off+1 > len(body) {
-			return nil, fmt.Errorf("dcerpc: bind 第 %d 个 transfer 计数越界", i)
-		}
-		nXfer := int(body[off])
-		off++ // n_transfer_syn
-		off++ // reserved
+		nXfer := int(body[off+2])
+		off += 24
 		for j := 0; j < nXfer; j++ {
 			if off+20 > len(body) {
 				return nil, fmt.Errorf("dcerpc: bind 第 %d 个 context 的 transfer[%d] 越界", i, j)
@@ -329,18 +417,24 @@ func NewHeader(ptype uint8, callID uint32) Header {
 	}
 }
 
-// MarshalBindAck 构造 bind_ack（MS-RPCE §2.2.2.4），secAddr 形如 "\PIPE\srvsvc"（含结尾 NUL）。
-func MarshalBindAck(callID uint32, secAddr string, xfer TransferSyntax) []byte {
-	if secAddr == "" {
-		secAddr = "\x00"
+// MarshalBindAck 构造 bind_ack（C706 §12.6.4.4 / MS-RPCE §2.2.2.4）。
+//
+// secAddr 形如 `\PIPE\srvsvc`，**不要**自带 NUL —— 本函数负责补上，
+// 且 p_len 计入这个 NUL（Samba 的 IDL 是 `[value(strlen(x)+1)] uint16 size`）。
+// results 必须与客户端 bind 的 p_context_elem 一一对应，见 NegotiateResults。
+func MarshalBindAck(callID uint32, secAddr string, results []Result) []byte {
+	// port_any_t：NUL 结尾的字符串，p_len 含 NUL（C706 §12.6.4.4）。
+	secBytes := append([]byte(secAddr), 0)
+
+	// p_result_list: n_results(1)+reserved(1)+reserved2(2)+n*[result(2)+reason(2)+syntax(20)]
+	resBlock := make([]byte, 0, 4+24*len(results))
+	resBlock = append(resBlock, byte(len(results)), 0, 0, 0)
+	for _, r := range results {
+		resBlock = append(resBlock, le16(r.Result)...)
+		resBlock = append(resBlock, le16(r.Reason)...)
+		resBlock = append(resBlock, r.Syntax.UUID[:]...)
+		resBlock = append(resBlock, le32(r.Syntax.Version)...)
 	}
-	secBytes := []byte(secAddr)
-	// p_result_list: n_results(1)+reserved(1)+reserved(2)+[result(2)+reason(2)+syntax(16+4)]
-	resBlock := []byte{1, 0, 0, 0}
-	resBlock = append(resBlock, 0, 0) // result = acceptance
-	resBlock = append(resBlock, 0, 0) // reason = 0
-	resBlock = append(resBlock, xfer.UUID[:]...)
-	resBlock = append(resBlock, le32(xfer.Version)...)
 
 	const maxFrag = 5840
 	body := make([]byte, 0, 64)
