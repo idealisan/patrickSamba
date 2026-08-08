@@ -1,12 +1,57 @@
 $:
   vscode:
     - runner:
-        cpus: 2   # 4 核 CPU，内存自动按 cpus × 2GiB 匹配为 8Gi
+        cpus: 2
       docker:
-        image: cnbcool/default-dev-env:latest   # 官方默认开发镜像
+        image: cnbcool/default-dev-env:latest
       services:
         - vscode
         - docker
       stages:
         - name: ready
-          script: echo "云原生开发环境已就绪（默认镜像，4 核 CPU）"
+          script: echo "云原生开发环境已就绪"
+
+  # 推送到 main 与 PR 时执行的校验
+  main:
+    - runner:
+        cpus: 4
+      docker:
+        image: golang:1.25
+      stages:
+        - name: 校验禁用 CGO 可构建 (AGENTS.md C1)
+          script: CGO_ENABLED=0 go build -v ./...
+        - name: go vet
+          script: CGO_ENABLED=0 go vet ./...
+        - name: gofmt 检查
+          script: |
+            out=$(gofmt -l .)
+            if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi
+        - name: 单元测试
+          script: CGO_ENABLED=0 go test -race -count=1 ./...
+        - name: 交叉编译校验 (AGENTS.md C7)
+          script: |
+            set -e
+            for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+              echo ">>> $t"
+              GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./...
+            done
+        - name: 校验产物为静态链接 (AGENTS.md C2)
+          script: |
+            CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
+            if ldd /tmp/stupidsamba 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "错误: 产物不是静态链接"; ldd /tmp/stupidsamba; exit 1
+            fi
+            echo "OK: 静态链接"
+
+  pull_request:
+    - runner:
+        cpus: 4
+      docker:
+        image: golang:1.25
+      stages:
+        - name: 校验禁用 CGO 可构建
+          script: CGO_ENABLED=0 go build -v ./...
+        - name: go vet
+          script: CGO_ENABLED=0 go vet ./...
+        - name: 单元测试
+          script: CGO_ENABLED=0 go test -race -count=1 ./...
