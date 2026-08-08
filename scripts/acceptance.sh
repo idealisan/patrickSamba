@@ -96,8 +96,8 @@ while [ $i -lt 50 ]; do
         sed 's/^/    /' "$LOG"
         exit 1
     fi
-    # 用 Go 探测端口，避免依赖 nc/ss
-    if go run "$ROOT/scripts/probe.go" "127.0.0.1:$PORT" 2>/dev/null; then
+    # 探测端口（python3 是测试环境已有的工具，非运行时依赖）
+    if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.5); sys.exit(s.connect_ex(('127.0.0.1',$PORT)))" 2>/dev/null; then
         break
     fi
     i=$((i + 1))
@@ -150,8 +150,9 @@ t_impacket() {
 # ---------------------------------------------------------------- 客户端 3: go-smb2 (Go 客户端库)
 
 t_gosmb2() {
-    go run "$ROOT/scripts/clients/gosmb2_test.go" \
-        "127.0.0.1:$PORT" "$USER" "$PASS" public
+    # 独立 Go module，避免把客户端库依赖污染主模块 go.mod
+    ( cd "$ROOT/scripts/clients/gosmb2" && \
+      go run . "127.0.0.1:$PORT" "$USER" "$PASS" public )
 }
 
 # ---------------------------------------------------------------- 客户端 4: mount.cifs (Linux 内核)
