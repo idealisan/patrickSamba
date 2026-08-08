@@ -2,13 +2,263 @@
 
 package vfs
 
-// Windows 上 NTFS 没有 POSIX 的 uid/gid/mode，需要旁路存储
-// （AGENTS.md §5 P7）。
+// metadata_windows.go —— Windows 上的 POSIX 元数据旁路存储（AGENTS.md §5 P7）。
 //
-// TODO(P1): 用纯 Go 的嵌入式 KV（go.etcd.io/bbolt，BSD 许可、无 CGO）实现，
-// 数据库路径取自 config 的 metadata_path。在它落地之前先返回 nil ——
-// 效果是 Windows 上属主固定显示为配置里的 UID/GID 标签、权限位为 0，
-// 文件共享本身完全可用（授权由配置决定，不依赖这些字段，见 AGENTS.md §1.1）。
+// NTFS 表达不了 POSIX 的 uid/gid/mode，而 macOS 的 Time Machine 会通过 SMB
+// 设置并回读这些字段，所以在 Windows 上必须旁路存一份。
+//
+// 用 go.etcd.io/bbolt：纯 Go、MIT 许可、无 CGO、单文件、并发安全，
+// 满足 AGENTS.md C1/C2/C6 与 §4 的依赖政策。
+// **禁止**换成 mattn/go-sqlite3 这类需要 CGO 的方案。
+//
+// 本文件只在 Windows 编译进来，其余平台走 metadata_other.go 的 nil 实现，
+// 连 bbolt 都不会被链接进二进制。
+
+import (
+	"encoding/binary"
+	"fmt"
+	"hash/fnv"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+// metadataBucket 是存放 POSIX 属主/权限位的 bucket 名。
+var metadataBucket = []byte("posix")
+
+// metadataRecordLen 是一条记录的字节数：uid(4) + gid(4) + mode(4)。
+//
+// 编码显式使用**小端**（AGENTS.md §5「所有涉及网络字节的代码必须显式写明字节序」；
+// 这里虽是本地存储，同样明确写死，避免跨架构读库时行为漂移）。
+const metadataRecordLen = 12
+
+// openFlockTimeout 限制等待 bbolt 文件锁的时间。
+//
+// 不能无限等：同一个数据库被另一个 stupidsamba 实例占用时应当**快速失败**
+// 并给出人话错误，而不是让服务卡在启动阶段。
+const openFlockTimeout = 5 * time.Second
+
+// boltMetadataStore 是 MetadataStore 的 bbolt 实现。
+//
+// bbolt 自身的 API 就是并发安全的（单写多读 + 内部锁），
+// 这里不需要再加一层 mutex。
+type boltMetadataStore struct {
+	db   *bolt.DB
+	path string
+}
+
+// openMetadataStore 打开（必要时创建）旁路存储。
+//
+// metadataPath 来自配置的 share.metadata_path；config 层已校验它是绝对路径
+// 且父目录存在。留空时由本层决定默认落点 —— 与 mdns agent 约定好的分工。
 func openMetadataStore(root, metadataPath string) (MetadataStore, error) {
-	return nil, nil
+	p := metadataPath
+	if p == "" {
+		var err error
+		if p, err = defaultMetadataPath(root); err != nil {
+			return nil, err
+		}
+	}
+
+	// 只有默认落点才由我们建目录；配置显式指定时 config 已经校验过父目录存在，
+	// 这里再 MkdirAll 一次是幂等的，成本可忽略。
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, mapError(err)
+	}
+
+	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout})
+	if err != nil {
+		return nil, fmt.Errorf("vfs: 打开元数据存储 %s 失败（是否已被另一个实例占用？）: %w", p, err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, e := tx.CreateBucketIfNotExists(metadataBucket)
+		return e
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("vfs: 初始化元数据存储 %s 失败: %w", p, err)
+	}
+	return &boltMetadataStore{db: db, path: p}, nil
+}
+
+// defaultMetadataPath 给出未配置 metadata_path 时的默认落点。
+//
+// 刻意**不放在共享目录内部** —— 否则客户端会看见这个 DB 文件，
+// 甚至可能把它删掉或备份走（mdns agent 的 Warnings() 也会对此告警）。
+//
+// 落点取 os.UserConfigDir()（Windows 上是 %AppData%）下的
+// stupidsamba\metadata-<root 哈希>.db，用哈希区分多个共享，避免互相覆盖。
+//
+// 注意这里读的是 APPDATA 环境变量，不是系统用户数据库查询，不违反 C8。
+func defaultMetadataPath(root string) (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("vfs: 无法确定元数据存储的默认落点，请在配置里显式设置 metadata_path: %w", err)
+	}
+	h := fnv.New32a()
+	// 用小写形式做哈希：Windows 路径大小写不敏感，
+	// 同一个共享写成不同大小写不应该产生两个库。
+	_, _ = h.Write([]byte(strings.ToLower(filepath.Clean(root))))
+	name := fmt.Sprintf("metadata-%08x.db", h.Sum32())
+	return filepath.Join(dir, "stupidsamba", name), nil
+}
+
+// Get 实现 MetadataStore。
+//
+// 查不到、记录损坏、事务出错一律返回 ok=false —— 调用方（LocalFS.applyMetadata）
+// 此时退回到配置里的 UID/GID 默认标签。旁路存储不可用**绝不能**导致文件共享不可用。
+func (s *boltMetadataStore) Get(key string) (Metadata, bool) {
+	var (
+		md Metadata
+		ok bool
+	)
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return nil
+		}
+		md, ok = decodeMetadata(b.Get([]byte(key)))
+		return nil
+	})
+	return md, ok
+}
+
+// Put 实现 MetadataStore。
+func (s *boltMetadataStore) Put(key string, md Metadata) error {
+	if key == "" {
+		return ErrInvalidArg
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(metadataBucket)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(key), encodeMetadata(md))
+	})
+}
+
+// Delete 实现 MetadataStore，同时清理 key 的整棵子树。
+//
+// 删目录时必须把子树一起清掉，否则后续在同名路径下新建文件会读到
+// 上一个对象的属主 —— 这是个真实会踩到的信息泄露/行为诡异问题。
+func (s *boltMetadataStore) Delete(key string) error {
+	if key == "" {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return nil
+		}
+		if err := b.Delete([]byte(key)); err != nil {
+			return err
+		}
+		for _, k := range subtreeKeys(b, key) {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Rename 实现 MetadataStore，把 oldKey 及其子树整体迁到 newKey 下。
+func (s *boltMetadataStore) Rename(oldKey, newKey string) error {
+	if oldKey == "" || newKey == "" || oldKey == newKey {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(metadataBucket)
+		if b == nil {
+			return nil
+		}
+		// 先把要搬的记录收集出来再改动 bucket：
+		// bbolt 明确不允许在游标遍历过程中做写操作。
+		moves := make(map[string][]byte)
+		if v := b.Get([]byte(oldKey)); v != nil {
+			moves[newKey] = append([]byte(nil), v...)
+		}
+		prefix := oldKey + "/"
+		for _, k := range subtreeKeys(b, oldKey) {
+			v := b.Get(k)
+			if v == nil {
+				continue
+			}
+			dst := newKey + "/" + strings.TrimPrefix(string(k), prefix)
+			moves[dst] = append([]byte(nil), v...)
+		}
+		if len(moves) == 0 {
+			return nil
+		}
+		// 目标可能是被覆盖的旧对象，连同它的子树一起清掉。
+		if err := b.Delete([]byte(newKey)); err != nil {
+			return err
+		}
+		for _, k := range subtreeKeys(b, newKey) {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		if err := b.Delete([]byte(oldKey)); err != nil {
+			return err
+		}
+		for _, k := range subtreeKeys(b, oldKey) {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		for k, v := range moves {
+			if err := b.Put([]byte(k), v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Close 实现 MetadataStore。
+func (s *boltMetadataStore) Close() error {
+	return s.db.Close()
+}
+
+// subtreeKeys 返回 key 的所有后代键（不含 key 自身）的**副本**。
+//
+// 必须复制：bbolt 游标返回的字节切片只在事务内有效，
+// 而且我们随后要在同一个事务里改动 bucket。
+func subtreeKeys(b *bolt.Bucket, key string) [][]byte {
+	prefix := []byte(key + "/")
+	var out [][]byte
+	c := b.Cursor()
+	for k, _ := c.Seek(prefix); k != nil && hasBytePrefix(k, prefix); k, _ = c.Next() {
+		out = append(out, append([]byte(nil), k...))
+	}
+	return out
+}
+
+func hasBytePrefix(b, prefix []byte) bool {
+	return len(b) >= len(prefix) && string(b[:len(prefix)]) == string(prefix)
+}
+
+// encodeMetadata 把记录编成定长 12 字节（小端）。
+func encodeMetadata(md Metadata) []byte {
+	buf := make([]byte, metadataRecordLen)
+	binary.LittleEndian.PutUint32(buf[0:4], md.UID)
+	binary.LittleEndian.PutUint32(buf[4:8], md.GID)
+	binary.LittleEndian.PutUint32(buf[8:12], md.Mode)
+	return buf
+}
+
+// decodeMetadata 解析记录。长度不足一律当作「没有记录」而不是 panic
+// （AGENTS.md §5「二进制解析必须先校验长度再切片」）。
+func decodeMetadata(buf []byte) (Metadata, bool) {
+	if len(buf) < metadataRecordLen {
+		return Metadata{}, false
+	}
+	return Metadata{
+		UID:  binary.LittleEndian.Uint32(buf[0:4]),
+		GID:  binary.LittleEndian.Uint32(buf[4:8]),
+		Mode: binary.LittleEndian.Uint32(buf[8:12]),
+	}, true
 }
