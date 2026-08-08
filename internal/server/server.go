@@ -127,6 +127,12 @@ func New(opts Options) (*Server, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	// IPC$ 上的 srvsvc 不是可选项：没有它客户端无法枚举共享
+	// （`smbclient -L`、Finder 的 smb://host、资源管理器都靠它）。
+	// 装配层没有显式提供后端时在这里补上默认实现。
+	if opts.Settings.Pipes == nil {
+		opts.Settings.Pipes = NewPipeOpener(opts.Settings)
+	}
 	return &Server{
 		opts:   opts,
 		log:    log,
