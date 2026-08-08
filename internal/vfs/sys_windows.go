@@ -102,3 +102,12 @@ func platformPunchHole(f *os.File, off, length int64) error {
 func platformPreallocate(*os.File, int64, int64) error {
 	return ErrNotSupported
 }
+
+// openNoFollow：Windows 的 CreateFile 没有 O_NOFOLLOW 对应物。
+// NTFS 的重解析点（junction / symlink）需要 FILE_FLAG_OPEN_REPARSE_POINT，
+// 而 Go 的 os.OpenFile 不暴露它，故这里为 0。
+//
+// 影响面有限：Windows 上创建符号链接默认需要管理员权限或开发者模式，
+// 共享内出现攻击者可控软链的前提本就不成立。
+// TODO: 若要在 Windows 上严格化，需绕开 os.OpenFile 直接调 CreateFileW。
+const openNoFollow = 0

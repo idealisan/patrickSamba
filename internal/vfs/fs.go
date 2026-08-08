@@ -272,4 +272,9 @@ var (
 	ErrNoSpace      = errors.New("vfs: no space left")
 	ErrTooLarge     = errors.New("vfs: file too large")
 	ErrClosed       = errors.New("vfs: handle closed")
+
+	// ErrInvalidArg 表示**参数**非法（而不是路径非法）：
+	// 负的 offset/length、offset+length 溢出、对目录做 Truncate 等。
+	// SMB 层应映射为 STATUS_INVALID_PARAMETER (0xC000000D)。
+	ErrInvalidArg = errors.New("vfs: invalid argument")
 )

@@ -217,6 +217,31 @@ func Encrypt(c Cipher, key, nonce []byte, sessionID uint64, plaintext []byte) ([
 	return append(out, ct...), nil
 }
 
+// NonceCounter 生成 TRANSFORM 加密用的**单调递增** nonce。
+//
+// MS-SMB2 §3.1.4.3 要求同一密钥下 nonce 绝不重复。随机 nonce 在 CCM 的
+// 11 字节空间里有现实可行的生日碰撞风险，一旦重用会直接泄露明文异或值，
+// 因此这里用计数器而不是随机数。
+//
+// 每个 Session 的每个加密方向应各持有一个 NonceCounter。非并发安全，
+// 调用方需自行加锁（Session 通常已有锁）。
+type NonceCounter struct {
+	low  uint64
+	high uint64
+}
+
+// Next 返回下一个 16 字节 nonce（低 64 位在前，**小端**）。
+func (n *NonceCounter) Next() [16]byte {
+	n.low++
+	if n.low == 0 {
+		n.high++
+	}
+	var out [16]byte
+	binary.LittleEndian.PutUint64(out[0:], n.low)
+	binary.LittleEndian.PutUint64(out[8:], n.high)
+	return out
+}
+
 // Decrypt 解密一条 TRANSFORM 报文，返回内部的明文 SMB2 消息。
 //
 // msg 必须是完整的 TRANSFORM 报文（含 52 字节头，不含 Direct TCP 长度前缀）。

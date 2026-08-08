@@ -274,6 +274,34 @@ func (r *Resolver) ResolveParent(rel string) (dir string, name string, err error
 	return dir, name, nil
 }
 
+// EvalFinal 把一个**已经过 Resolve 校验**的宿主机路径的最后一跳软链求值成实路径。
+//
+// 为什么需要它：Resolve 有意不做软链替换（好让调用方能 lstat 到软链自身），
+// 但真正 open 的时候我们必须带 O_NOFOLLOW —— 否则「校验通过之后、open 之前」
+// 这一段时间里最后一级可以被换成指向共享外的软链（TOCTOU）。
+// 两个需求的调和办法就是：先把软链求值成**实路径**（求值过程中再确认一次
+// 仍在根内），再对这个不含软链的实路径带 O_NOFOLLOW 打开。
+// 这样既支持共享内的软链，最后一跳又不可能被偷换。
+//
+// 非软链路径原样返回。目标不存在（悬空软链）返回 ErrNotFound。
+func (r *Resolver) EvalFinal(host string) (string, error) {
+	fi, err := os.Lstat(host)
+	if err != nil {
+		return "", mapError(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		return host, nil
+	}
+	real, err := filepath.EvalSymlinks(host)
+	if err != nil {
+		return "", mapError(err)
+	}
+	if !r.contains(real) {
+		return "", fmt.Errorf("%w: 符号链接 %q 指向共享外", ErrPermission, host)
+	}
+	return real, nil
+}
+
 // resolveComponents 是逐级下降的核心。
 func (r *Resolver) resolveComponents(comps []string) (string, error) {
 	cur := r.root

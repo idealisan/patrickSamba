@@ -14,3 +14,6 @@ func platformFullSync(f *os.File) error { return f.Sync() }
 func platformPunchHole(*os.File, int64, int64) error { return ErrNotSupported }
 
 func platformPreallocate(*os.File, int64, int64) error { return ErrNotSupported }
+
+// openNoFollow：非目标平台不做软链防护，见 sys_windows.go 的说明。
+const openNoFollow = 0

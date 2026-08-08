@@ -21,6 +21,8 @@ const (
 	errFilenameTooLong  syscall.Errno = 206 // ERROR_FILENAME_EXCED_RANGE
 	errDirectory        syscall.Errno = 267 // ERROR_DIRECTORY
 	errNotSupported     syscall.Errno = 50  // ERROR_NOT_SUPPORTED
+	errInvalidParam     syscall.Errno = 87  // ERROR_INVALID_PARAMETER
+	errNegativeSeek     syscall.Errno = 131 // ERROR_NEGATIVE_SEEK
 )
 
 func mapErrno(errno syscall.Errno) error {
@@ -45,6 +47,8 @@ func mapErrno(errno syscall.Errno) error {
 		return ErrNotDir
 	case errNotSupported:
 		return ErrNotSupported
+	case errInvalidParam, errNegativeSeek:
+		return ErrInvalidArg
 	}
 	return nil
 }
