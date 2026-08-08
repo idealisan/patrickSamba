@@ -1,0 +1,12 @@
+# 拼错的配置项必须报错，不能静默忽略。
+server:
+  naem: TYPO
+
+auth:
+  users:
+    - name: alice
+      password: "changeme"
+
+shares:
+  - name: public
+    path: __SHARE_DIR__

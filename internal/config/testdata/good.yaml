@@ -1,0 +1,52 @@
+# 完整的合法配置，用于测试所有字段都能正确解析。
+# 其中的 __SHARE_DIR__ 会在测试里被替换成临时目录。
+server:
+  name: TESTSRV
+  domain: WORKGROUP
+  min_dialect: "2.0.2"
+  max_dialect: "3.1.1"
+  smb1: false
+  signing_required: true
+  encryption_required: false
+  max_connections: 64
+
+listen:
+  addresses:
+    - 127.0.0.1
+    - "::1"
+  port: 4445
+
+auth:
+  allow_guest: false
+  users:
+    - name: alice
+      password: "changeme"
+      uid: 1000
+      gid: 1000
+    - name: bob
+      nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
+
+shares:
+  - name: public
+    path: __SHARE_DIR__
+    comment: "公共读写目录"
+    read_only: false
+    valid_users:
+      - alice
+
+  - name: backup
+    path: __SHARE_DIR__
+    time_machine: true
+
+mdns:
+  enabled: true
+  instance: ""
+  interfaces: []
+  apple:
+    enabled: true
+    model: "MacSamba"
+    advertise_time_machine: true
+
+log:
+  level: debug
+  format: json
