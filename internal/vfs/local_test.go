@@ -816,11 +816,19 @@ func TestStreams(t *testing.T) {
 		t.Errorf("主数据流大小 = %d, want 5", streams[0].Size)
 	}
 
-	// ADS 尚未实现，必须明确返回不支持而不是打开主数据流
+	// 还没写过资源派生时，打开它应报「不存在」而不是打开主数据流 ——
+	// 后者会让客户端把资源派生的内容写进文件本体，造成数据损坏。
 	if _, _, err := fs.Open(&OpenRequest{
-		Path: "f.txt", Stream: "AFP_Resource", Flags: OpenRead, Disposition: OpenExisting,
+		Path: "f.txt", Stream: StreamAFPResource, Flags: OpenRead, Disposition: OpenExisting,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("不存在的资源派生应返回 ErrNotFound，得到 %v", err)
+	}
+
+	// AFP 之外的通用 ADS 仍然明确不支持（见 stream_store.go 的说明）。
+	if _, _, err := fs.Open(&OpenRequest{
+		Path: "f.txt", Stream: "SomeOtherStream", Flags: OpenRead, Disposition: OpenExisting,
 	}); !errors.Is(err, ErrNotSupported) {
-		t.Errorf("ADS 应返回 ErrNotSupported，得到 %v", err)
+		t.Errorf("通用 ADS 应返回 ErrNotSupported，得到 %v", err)
 	}
 }
 

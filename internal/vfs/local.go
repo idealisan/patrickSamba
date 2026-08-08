@@ -148,23 +148,34 @@ func (l *LocalFS) Open(req *OpenRequest) (Handle, Action, error) {
 	if req == nil {
 		return nil, 0, ErrInvalidArg
 	}
-	// Alternate data stream 尚未实现（阶段二的 AFP_Resource 等）。
-	// 明确返回不支持，而不是悄悄打开主数据流 —— 后者会让客户端
-	// 把资源叉的内容写进文件本体，造成数据损坏。
-	if req.Stream != "" {
-		return nil, 0, ErrNotSupported
-	}
 	if l.cfg.ReadOnly && dispositionWrites(req.Disposition, req.Flags) {
 		return nil, 0, ErrReadOnly
 	}
 
-	host, err := l.res.Resolve(req.Path)
+	// 流名有两个来源：显式的 req.Stream，以及路径里的 "file:stream:$DATA"
+	// 语法。后者是 macOS 客户端常用的写法，必须在 Resolve **之前**剥掉，
+	// 否则冒号会被当成非法文件名字符而拒绝掉一个合法请求。
+	reqPath, stream := req.Path, req.Stream
+	if stream == "" {
+		var err error
+		if reqPath, stream, err = SplitStreamPath(req.Path); err != nil {
+			return nil, 0, err
+		}
+	} else if err := ValidateStreamName(stream); err != nil {
+		return nil, 0, err
+	}
+
+	host, err := l.res.Resolve(reqPath)
 	if err != nil {
 		return nil, 0, err
 	}
-	name := path.Base("/" + req.Path) // 根目录时得到 "/"，下面会归一
-	if req.Path == "" {
+	name := path.Base("/" + reqPath) // 根目录时得到 "/"，下面会归一
+	if reqPath == "" {
 		name = "."
+	}
+
+	if stream != "" {
+		return l.openStream(req, host, name, stream)
 	}
 
 	fi, statErr := os.Lstat(host)
@@ -549,20 +560,29 @@ func (l *LocalFS) StatFS() (*FSInfo, error) {
 	return info, nil
 }
 
-// Streams 实现 FileSystem，列出 alternate data stream。
+// Streams 实现 FileSystem，列出 alternate data stream
+//（对应 SMB2 QUERY_INFO 的 FileStreamInformation）。
 //
-// 当前只报告主数据流 —— 这已经足够让 Windows 属性页与 macOS Finder 工作。
-// 真正的 ADS（AFP_Resource / AFP_AfpInfo）是阶段二的事。
+// 除主数据流外，还会报告存在的 AFP_AfpInfo / AFP_Resource ——
+// macOS Finder 靠这个判断文件有没有资源派生与 FinderInfo。
 func (l *LocalFS) Streams(p string) ([]StreamInfo, error) {
-	a, err := l.Stat(p)
+	base, stream, err := SplitStreamPath(p)
 	if err != nil {
 		return nil, err
 	}
-	if a.FileAttributes&FileAttributeDirectory != 0 {
-		// 目录没有主数据流。
-		return nil, nil
+	if stream != "" {
+		// 对一个流本身查询流列表是没有意义的请求。
+		return nil, ErrInvalidPath
 	}
-	return []StreamInfo{{Name: "::$DATA", Size: a.Size, Alloc: a.Alloc}}, nil
+	host, err := l.res.Resolve(base)
+	if err != nil {
+		return nil, err
+	}
+	a, err := l.statHost(host, baseName(base))
+	if err != nil {
+		return nil, err
+	}
+	return l.streamsOf(host, a), nil
 }
 
 // ---------------------------------------------------------------- 小工具
