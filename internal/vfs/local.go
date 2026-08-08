@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -471,27 +472,35 @@ func (l *LocalFS) Rename(oldPath, newPath string, replace bool) error {
 	src := filepath.Join(oldDir, oldName)
 	dst := filepath.Join(newDir, newName)
 
+	// 大小写不敏感时 ResolveParent 会把 newName 折叠成磁盘上已存在的写法，
+	// 于是 "a.txt" → "A.TXT" 这种**纯改大小写**的重命名会被当成同名 no-op 丢掉。
+	// 用客户端原始路径的最后一个分量还原它真正想要的写法。
+	//
+	// 只在「同一父目录 + 仅大小写不同 + 折叠确实发生了」时才还原，
+	// 此时目标必然就是 src 自己（sameObject），不能走下面的「目标已存在」分支：
+	// 否则 replace=false 会误报 ErrExist，replace=true 会先把源文件删掉丢数据。
+	sameObject := false
+	if l.cfg.CaseInsensitive && oldDir == newDir && strings.EqualFold(oldName, newName) {
+		if want := lastComponent(newPath); want != "" && want != newName {
+			dst = filepath.Join(newDir, want)
+			sameObject = true
+		}
+	}
+
 	if src == dst {
 		return nil
 	}
 
-	// 大小写不敏感时 ResolveParent 会把 newName 换成磁盘上已存在的写法，
-	// 于是 "a.txt" → "A.TXT" 这种**纯改大小写**的重命名会被当成同名而丢失。
-	// 这里用词法比较还原客户端真正想要的名字。
-	if l.cfg.CaseInsensitive && oldDir == newDir {
-		if want := lastComponent(newPath); want != "" && want != newName {
-			dst = filepath.Join(newDir, want)
-		}
-	}
-
 	if _, err := os.Lstat(dst); err == nil {
-		if !replace {
-			return ErrExist
-		}
-		// os.Rename 在 Windows 上不会覆盖已存在的目标，在 Unix 上会。
-		// 统一先删再改名，保证行为一致。
-		if err := os.Remove(dst); err != nil {
-			return mapError(err)
+		if !sameObject {
+			if !replace {
+				return ErrExist
+			}
+			// os.Rename 在 Windows 上不会覆盖已存在的目标，在 Unix 上会。
+			// 统一先删再改名，保证行为一致。
+			if err := os.Remove(dst); err != nil {
+				return mapError(err)
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return mapError(err)
