@@ -212,29 +212,30 @@ func (rs *recordSet) addressRecords(ifi *net.Interface) []Record {
 	return out
 }
 
-// nsecRecords 返回否定回答记录（RFC 6762 §6.1）：
-// 明确告诉对方"这些名字上只有这些类型"，避免客户端为不存在的类型反复重试。
-func (rs *recordSet) nsecRecords(ifi *net.Interface) []Record {
-	out := make([]Record, 0, len(rs.defs)+1)
-
+// hostNSEC 返回主机名的否定回答记录（RFC 6762 §6.1）：
+// 明确告诉对方"这个名字上只有这些类型"，省掉客户端对不存在类型的重试
+// （典型场景：只有 IPv4 的机器，让 macOS 别再等 AAAA）。
+func (rs *recordSet) hostNSEC(hasV4, hasV6 bool) (Record, bool) {
+	var types []Type
+	if hasV4 {
+		types = append(types, TypeA)
+	}
+	if hasV6 {
+		types = append(types, TypeAAAA)
+	}
+	if len(types) == 0 {
+		return Record{}, false
+	}
 	host := rs.hostname()
-	var hostTypes []Type
-	if ifi != nil {
-		v4, v6 := interfaceIPs(ifi)
-		if len(v4) > 0 {
-			hostTypes = append(hostTypes, TypeA)
-		}
-		if len(v6) > 0 {
-			hostTypes = append(hostTypes, TypeAAAA)
-		}
-	}
-	if len(hostTypes) > 0 {
-		out = append(out, Record{
-			Name: host, Class: ClassIN, CacheFlush: true, TTL: ttlHost,
-			Data: NSEC{NextDomain: host, Types: hostTypes},
-		})
-	}
+	return Record{
+		Name: host, Class: ClassIN, CacheFlush: true, TTL: ttlHost,
+		Data: NSEC{NextDomain: host, Types: types},
+	}, true
+}
 
+// instanceNSECs 返回各服务实例名的否定回答记录：实例名上只有 TXT 与 SRV。
+func (rs *recordSet) instanceNSECs() []Record {
+	out := make([]Record, 0, len(rs.defs))
 	for _, d := range rs.defs {
 		inst := rs.instanceName(d)
 		out = append(out, Record{
@@ -242,14 +243,6 @@ func (rs *recordSet) nsecRecords(ifi *net.Interface) []Record {
 			Data: NSEC{NextDomain: inst, Types: []Type{TypeTXT, TypeSRV}},
 		})
 	}
-	return out
-}
-
-// allRecords 返回宣告（announcing）与告别（goodbye）时要发的全部记录。
-func (rs *recordSet) allRecords(ifi *net.Interface) []Record {
-	out := rs.serviceRecords()
-	out = append(out, rs.addressRecords(ifi)...)
-	out = append(out, rs.nsecRecords(ifi)...)
 	return out
 }
 
