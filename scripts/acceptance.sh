@@ -181,8 +181,20 @@ t_mountcifs() {
     rc=0
     ls -la "$MNT" || rc=1
     grep -q "hello from stupidsamba" "$MNT/hello.txt" || rc=1
+    # 写 + 大文件（put）
     echo "kernel client write" > "$MNT/kernel.txt" || rc=1
     dd if=/dev/zero of="$MNT/dd.bin" bs=64k count=16 2>/dev/null || rc=1
+    # 创建目录（mkdir）
+    mkdir "$MNT/mntdir" || rc=1
+    [ -d "$MNT/mntdir" ] || rc=1
+    # 重命名（rename）：写一个文件再通过 POSIX rename 触发 SMB2 重命名
+    echo "to be renamed" > "$MNT/mntdir/f.txt" || rc=1
+    mv "$MNT/mntdir/f.txt" "$MNT/mntdir/f_renamed.txt" || rc=1
+    [ -f "$MNT/mntdir/f_renamed.txt" ] || rc=1
+    [ ! -e "$MNT/mntdir/f.txt" ] || rc=1
+    # 清理（rm）
+    rm -f "$MNT/mntdir/f_renamed.txt" || rc=1
+    rmdir "$MNT/mntdir" || rc=1
     rm -f "$MNT/kernel.txt" "$MNT/dd.bin" || rc=1
     umount "$MNT" || rc=1
     return $rc
