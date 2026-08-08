@@ -4,6 +4,7 @@ package vfs
 
 import (
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -83,3 +84,16 @@ func platformPreallocate(f *os.File, off, length int64) error {
 
 // openNoFollow 是 open(2) 的 O_NOFOLLOW 标志。
 const openNoFollow = unix.O_NOFOLLOW
+
+// platformSetCreateTime：macOS 可以用 setattrlist(ATTR_CMN_CRTIME) 设置
+// 创建时间，但 x/sys/unix 没有导出对应封装，硬拼要用 unsafe。
+// 服务端主力平台是 Linux，这里先如实返回不支持。
+// TODO: 需要时用 unix.Setattrlist 补齐。
+func platformSetCreateTime(*os.File, string, time.Time) error { return ErrNotSupported }
+
+// platformSetDOSAttributes：macOS 有 UF_HIDDEN 等 BSD 文件标志可以对应
+// FILE_ATTRIBUTE_HIDDEN，但语义并不完全一致，先由调用方退化成 chmod。
+func platformSetDOSAttributes(string, uint32) error { return ErrNotSupported }
+
+// errnoNoAttr 是「扩展属性不存在」的 errno。macOS 用 ENOATTR。
+const errnoNoAttr = unix.ENOATTR
