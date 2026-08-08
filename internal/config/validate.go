@@ -375,7 +375,10 @@ func Warnings(c *Config) []string {
 
 	// 445 是特权端口，非 root 且无 CAP_NET_BIND_SERVICE 时 bind 会失败，
 	// 这是最常见的启动失败原因，提前提示。
-	if c.Listen.Port < 1024 && os.Geteuid() != 0 {
+	//
+	// Windows 没有特权端口的概念（也没有 euid，os.Geteuid 恒返回 -1），
+	// 在那里提示会是纯噪音，因此跳过。
+	if c.Listen.Port < 1024 && runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		w = append(w, fmt.Sprintf(
 			"listen.port=%d 是特权端口（<1024），当前不是 root。"+
 				"请以 root 运行，或执行 setcap 'cap_net_bind_service=+ep' <二进制>，"+
