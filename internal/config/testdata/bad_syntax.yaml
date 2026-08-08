@@ -1,0 +1,5 @@
+# 缩进错误：shares 的第二项少了一级缩进，YAML 解析应报错并给出行号。
+shares:
+  - name: public
+    path: /tmp
+   comment: "缩进错了"

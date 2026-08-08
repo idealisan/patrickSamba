@@ -1,0 +1,9 @@
+# 最小可用配置：只有 shares 与一个用户，其余全部走默认值。
+auth:
+  users:
+    - name: alice
+      password: "changeme"
+
+shares:
+  - name: public
+    path: __SHARE_DIR__

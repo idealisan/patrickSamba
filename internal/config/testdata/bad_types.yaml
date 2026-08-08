@@ -1,0 +1,8 @@
+# 类型错误：port 写成了字符串（而且不是数字），listen.addresses 写成了标量。
+listen:
+  addresses: 127.0.0.1
+  port: "四四五"
+
+shares:
+  - name: public
+    path: /tmp
