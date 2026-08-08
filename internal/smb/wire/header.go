@@ -41,6 +41,10 @@ var ProtocolID = [4]byte{0xFE, 'S', 'M', 'B'}
 // 只用于识别 SMB1 多协议协商入口，本包不实现 SMB1 报文体。
 var SMB1ProtocolID = [4]byte{0xFF, 'S', 'M', 'B'}
 
+// TransformProtocolID 是 SMB2 TRANSFORM_HEADER 的魔数 0xFD 'S' 'M' 'B'
+// （MS-SMB2 §2.2.41），出现在 SMB3 加密报文的最前面。
+var TransformProtocolID = [4]byte{0xFD, 'S', 'M', 'B'}
+
 // Header 是解析后的 SMB2 报文头。
 //
 // Status 字段是偏移 0x08 处 4 字节的**原始值**：
@@ -183,4 +187,21 @@ func IsSMB2(b []byte) bool {
 func IsSMB1(b []byte) bool {
 	return len(b) >= 4 && b[0] == SMB1ProtocolID[0] && b[1] == SMB1ProtocolID[1] &&
 		b[2] == SMB1ProtocolID[2] && b[3] == SMB1ProtocolID[3]
+}
+
+// IsTransform 报告 b 是否以 SMB2 TRANSFORM_HEADER 魔数开头（加密报文，§2.2.41）。
+// 只做魔数探测，TRANSFORM 头的解析与解密属于 internal/smb/crypto。
+func IsTransform(b []byte) bool {
+	return len(b) >= 4 && b[0] == TransformProtocolID[0] && b[1] == TransformProtocolID[1] &&
+		b[2] == TransformProtocolID[2] && b[3] == TransformProtocolID[3]
+}
+
+// PutAt 把头就地写入 b[:64]，用于复合链回填（例如先占位、算出
+// NextCommand 后再重写头）。b 短于 64 字节时返回 ErrTruncated。
+func (h Header) PutAt(b []byte) error {
+	if err := need(b, HeaderSize); err != nil {
+		return fmt.Errorf("SMB2 Header: %w", err)
+	}
+	h.Append(b[:0:HeaderSize])
+	return nil
 }
