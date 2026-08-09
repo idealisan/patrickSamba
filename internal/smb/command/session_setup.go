@@ -141,7 +141,22 @@ func handleSessionSetup(ctx *Context) error {
 	signing := conn.SigningRequired && !id.Guest && !id.Anonymous
 	sess.SetSigningRequired(signing)
 
-	if conn.Settings.EncryptionRequired && conn.Cipher != 0 {
+	// 加密强制的**兜底**（backstop）。
+	//
+	// 正常流程下这条 `Cipher == 0` 分支不可达：协商层（handleNegotiate 与
+	// AppendSMB1NegotiateReply 两个出口）已经在 EncryptionRequired 且协商不出
+	// 算法时返回 ACCESS_DENIED。留这道兜底是因为这里曾经写的是
+	// `EncryptionRequired && Cipher != 0` —— 那个 `&& Cipher != 0` 把一条安全
+	// 要求变成了空操作：低方言下 Cipher 恒为 0，于是 SetEncryptData 被静默跳过，
+	// 会话以明文继续。安全要求不满足时必须**失败**，绝不能降级成明文放行。
+	// 将来若再新增第三条协商出口而忘了同样 fail closed，会在这里被挡下。
+	if conn.Settings.EncryptionRequired {
+		if conn.Cipher == 0 {
+			ctx.Log.Error("协商层未能拦住无加密连接，会话建立阶段兜底拒绝（这是 BUG，请报告）",
+				"dialect", conn.Dialect,
+				"remote", conn.RemoteAddr)
+			return status.AccessDenied
+		}
 		sess.SetEncryptData(true)
 		resp.SessionFlags |= wire.SessionFlagEncryptData
 	}

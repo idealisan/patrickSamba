@@ -207,6 +207,15 @@ func (c *Connection) handleSMB1(frame []byte) ([]byte, error) {
 
 	out, err := command.AppendSMB1NegotiateReply(c.state, dialects, nil)
 	if err != nil {
+		if errors.Is(err, command.ErrSMB1EncryptionRequired) {
+			// 措辞与 negotiate.go 的 fail-closed 保持一致，方便运维一把搜出
+			// 所有因 encryption_required 被拒的连接。
+			c.log.Warn("配置要求加密但本连接协商不出加密算法，拒绝协商",
+				"dialect", "2.0.2",
+				"dialect_supports_encryption", false,
+				"entry", "smb1_negotiate",
+				"client_dialects", dialects)
+		}
 		return nil, fmt.Errorf("%w: %v", errSMB1Refused, err)
 	}
 	c.log.Debug("以 SMB2 应答 SMB1 多协议协商", "dialects", dialects)

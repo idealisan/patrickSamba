@@ -188,23 +188,57 @@ func TestValidateLogFileDirMissing(t *testing.T) {
 	}
 }
 
-// 要求加密时 min_dialect 低于 3.0 是"配了不生效"：2.0.2/2.1 没有加密能力，
-// 会在协商阶段被 fail closed 拒掉，min_dialect 写的值实际不可达。
-func TestWarningsEncryptionRequiredWithLowMinDialect(t *testing.T) {
+// 要求加密时 min_dialect 低于 3.0 必须**启动报错**（不是告警、更不是悄悄抬高）。
+//
+// 2.0.2/2.1 没有加密能力，协商阶段会被 fail closed 拒掉，
+// 用户在运行期只看到"连不上"，猜不到是这个组合导致的。
+func TestEncryptionRequiredRejectsLowMinDialect(t *testing.T) {
 	c := baseConfig(t)
 	c.Server.EncryptionRequired = true
 	c.Server.MinDialect = "2.0.2"
+	c.Server.MaxDialect = "3.1.1"
+	// 错误里必须带字段路径，并直接告诉用户改成什么。
+	assertInvalid(t, c, "server.min_dialect", "不能低于 3.0")
 
-	ws := strings.Join(Warnings(c), "\n")
-	if !strings.Contains(ws, "min_dialect") || !strings.Contains(ws, "不可达") {
-		t.Errorf("要求加密且 min_dialect<3.0 时必须告警，实际:\n%s", ws)
+	c = baseConfig(t)
+	c.Server.EncryptionRequired = true
+	c.Server.MinDialect = "2.1"
+	c.Server.MaxDialect = "3.1.1"
+	assertInvalid(t, c, "server.min_dialect", "encryption_required")
+
+	// 抬到 3.0 之后就合法了。
+	c = baseConfig(t)
+	c.Server.EncryptionRequired = true
+	c.Server.MinDialect = "3.0"
+	c.Server.MaxDialect = "3.1.1"
+	if err := Validate(c); err != nil {
+		t.Fatalf("min_dialect=3.0 + 要求加密应当合法，实际: %v", err)
 	}
 
-	// 抬到 3.0 之后就不该再唠叨。
-	c.Server.MinDialect = "3.0"
-	for _, line := range Warnings(c) {
-		if strings.Contains(line, "min_dialect") {
-			t.Errorf("min_dialect=3.0 时不应再告警: %s", line)
+	// 不要求加密时，低 min_dialect 一切照旧。
+	c = baseConfig(t)
+	c.Server.MinDialect = "2.0.2"
+	if err := Validate(c); err != nil {
+		t.Fatalf("不要求加密时 min_dialect=2.0.2 应当合法，实际: %v", err)
+	}
+}
+
+// 默认 min_dialect 是 2.0.2，所以「只写 encryption_required: true」会直接
+// 启动失败 —— 这是有意为之的 fail fast，但错误必须让人一眼知道怎么办。
+func TestEncryptionRequiredWithDefaultMinDialectFailsLoudly(t *testing.T) {
+	c := baseConfig(t)
+	c.Server.MinDialect = DefaultMinDialect
+	c.Server.MaxDialect = DefaultMaxDialect
+	c.Server.EncryptionRequired = true
+
+	err := Validate(c)
+	if err == nil {
+		t.Fatal("默认 min_dialect 低于 3.0，只开 encryption_required 应当启动失败")
+	}
+	msg := err.Error()
+	for _, want := range []string{"server.min_dialect", "3.0", "encryption_required"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误信息缺少 %q，无法指导用户修改:\n%s", want, msg)
 		}
 	}
 }

@@ -41,6 +41,9 @@ func newEncTestConn(t *testing.T, required bool) *Connection {
 		MaxDialect:         dialect.SMB311,
 		EncryptionEnabled:  true,
 		EncryptionRequired: required,
+		// SMB1 多协议协商入口是**第二个**协商出口，加密强制必须一起覆盖，
+		// 所以这里默认打开（与默认配置一致）。
+		AllowSMB1Negotiate: true,
 		Auth: auth.NewNTLMProvider(auth.Options{
 			Store: store, ServerName: "TESTSRV", DomainName: "WORKGROUP",
 		}),
