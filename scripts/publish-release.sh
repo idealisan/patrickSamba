@@ -27,6 +27,17 @@
 #   POST   <verify_url>                                        确认上传（不确认则附件不落地）
 #   DELETE /{repo}/-/git/tags/{tag}                            删除标签
 #
+# 下载地址的坑（已实测，记这里免得下次再踩一遍）：
+#   每个附件对象里有三个 URL 字段，只有第一个脚本能用：
+#     - .url                   = https://api.cnb.cool/.../download/{tag}/{file}
+#                                脚本/CI 可用，但必须带 'Authorization: Bearer' 且 curl -L
+#                                （PUT 完会 302 跳到 asset.cnb.cool 的公开 CDN 取字节）。
+#     - .browser_download_url  = https://cnb.cool/.../download/{tag}/{file}
+#                                是网页入口，只有带 web 会话的浏览器点按才下得动；
+#                                脚本/CI 直连（即便带 token）拿不到文件（实测 404 / 报错）。
+#     - .brower_download_url（少个 w）= swagger 里的脏数据字段，忽略，不是什么特殊字段。
+#   所以复核打印、给 docs/用户的下载链接一律用 .url（api.cnb.cool），别给 browser_download_url。
+#
 # 注意：创建版本时若 tag 不存在，CNB 会基于 target_commitish 自动建 tag。
 #       也就是说跑一次试验会在仓库里留下一个真 tag，清理时要带 --delete-tag。
 set -e
@@ -296,7 +307,14 @@ code=$(api GET "/$SLUG/-/releases/tags/$TAG")
 
 info "Release $TAG 复核结果"
 jq -r '"  prerelease=\(.prerelease)  draft=\(.draft)  is_latest=\(.is_latest)
-  附件 \(.assets | length) 个:", (.assets[]? | "    - \(.name)  \(.size) 字节  \(.browser_download_url // .brower_download_url // "")")' "$RESP"
+  附件 \(.assets | length) 个:"' "$RESP"
+# 每个附件打印两条 URL（见顶部"下载地址的坑"注释）：
+#   .url                   —— api.cnb.cool，脚本/CI 可用（需 Bearer + curl -L）
+#   .browser_download_url  —— cnb.cool，仅网页入口，脚本直连下不下来
+#   .brower_download_url（少个 w）—— swagger 脏数据字段，忽略，不要打印
+jq -r '.assets[]? | "    - \(.name)  \(.size) 字节\n      下载(可用): \(.url)\n      web入口(脚本不可用): \(.browser_download_url)"' "$RESP"
+info "下载附件请用上面『下载(可用)』那行（.url / api.cnb.cool）：需 'Authorization: Bearer \$CNB_TOKEN' 且 'curl -L'（302 跳到 asset.cnb.cool 公开 CDN）。"
+info "'web入口' 那行（.browser_download_url / cnb.cool）仅供网页点击，脚本直连无效；brower_download_url（拼写错）是脏数据，忽略。"
 
 got=$(jq -r '.assets | length' "$RESP")
 if [ "$got" != "$count" ]; then
