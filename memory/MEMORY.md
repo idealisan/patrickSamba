@@ -15,5 +15,7 @@
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
 - [CNB PR API 的调用方式与四个坑](reference_cnb_pr_api.md) — 合并须 PUT 非 POST、参数 merge_style 非 merge_method、commit_title 必填、GET/PUT 都要 Accept: application/json
-- [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — isAbsPath=filepath.IsAbs 致 example.yaml 在 Windows 跑不起来；metadata_path「会被忽略」却硬拦启动
+- [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — metadata_path 那条已修（跳过+平台形参+平台化判定函数三件套）；example.yaml 在 Windows 上仍跑不起来
 - [查 CNB 流水线状态的正确姿势与「假红」陷阱](reference_cnb_ci_status.md) — 没有 statuses API 用 /-/build/logs?sourceRef=；push 与 pull_request 事件跑不同 .cnb.yml，结论可相反
+- [metadata 存储双实现冲突的定夺](project_metadata_store_consolidation.md) — vfs 与 internal/meta 撞同一文件/bucket 静默吐垃圾；定夺由 internal/meta 单一化（posix2 桶+迁移），并暴露 -tags metabolt 的 CI 假绿洞
+- [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
