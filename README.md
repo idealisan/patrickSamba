@@ -124,6 +124,13 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 
 ### 方式一：下载预编译二进制（推荐）
 
+> **本仓库为私有仓库**：下载需要 **仓库访问权限** 与 **个人访问令牌（PAT）**。
+> 匿名访问 Release 页或附件会返回 **404**（平台对无权限者隐藏仓库存在性，不是链接错误）。
+> 先生成令牌并导出：
+> ```sh
+> export CNB_TOKEN=<你的个人访问令牌>
+> ```
+
 v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 
 - **Release 页（推荐，普通用户点这里下载）**：
@@ -149,13 +156,17 @@ v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-# 普通用户：直接去上面的 Release 页点「下载」即可，无需命令行。
-# 下面给需要脚本 / CI 自动下载的场景（需 Bearer token 并跟随重定向）：
-curl -L -H "Authorization: Bearer <你的 token>" \
-  -O https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_linux_amd64.tar.gz
-curl -L -H "Authorization: Bearer <你的 token>" \
-  -O https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/SHA256SUMS
-sha256sum -c SHA256SUMS
+BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0
+
+# 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
+curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
+  -o stupidsamba_v0.1.0_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_v0.1.0_linux_amd64.tar.gz"
+
+# 校验完整性
+curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
+sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
+
 tar -xzf stupidsamba_v0.1.0_linux_amd64.tar.gz
 ./stupidsamba_v0.1.0_linux_amd64/stupidsamba -config stupidsamba_v0.1.0_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
@@ -209,7 +220,7 @@ done
 | `min_dialect` / `max_dialect` | 方言协商范围，取值 `2.0.2` / `2.1` / `3.0` / `3.0.2` / `3.1.1` | `2.0.2` / `3.1.1` |
 | `smb1` | 是否响应 SMB1 多协议协商入口（见[支持能力](#capabilities)），默认 `true` | `true` |
 | `signing_required` | 强制 SMB 签名（防中间人篡改） | `false` |
-| `encryption_required` | 强制 SMB3 加密：3.0/3.0.2 用 AES-128-CCM，3.1.1 用协商出的算法。开启时 `min_dialect` 与 `max_dialect` 都必须 ≥ 3.0（否则启动直接报错）；SMB 2.0.2/2.1 无加密能力，开启后这类客户端会被拒绝连接（协商阶段无共同方言，fail-closed 兜底返回 `STATUS_ACCESS_DENIED`），而非降级为明文 | `false` |
+| `encryption_required` | 强制 SMB3 加密：3.0/3.0.2 用 AES-128-CCM，3.1.1 用协商出的算法。开启时 `min_dialect` 与 `max_dialect` **都必须 ≥ 3.0，否则启动直接报错**（SMB 2.x 没有加密能力，这类客户端会被拒绝连接，是预期行为而非 bug）；开启后协商到 2.0.2/2.1 的客户端会在协商阶段被拒绝，而非降级为明文 | `false` |
 | `max_connections` | 并发连接数上限。**`0` 或不填 = 默认上限 256，本项不支持「不限」**；超过上限的新连接会被直接关闭 | `256` |
 
 ### `listen`
