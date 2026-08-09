@@ -182,25 +182,56 @@ docker buildx build \
 info "构建后自检"
 
 want_count=$(echo "$PLATFORMS" | tr ',' '\n' | grep -c .)
-if [ "$PUSH" = "1" ]; then
-    got=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}' 2>/dev/null || true)
-else
-    got=$(docker image inspect "$IMAGE:$VERSION" --format '{{.Os}}/{{.Architecture}}' 2>/dev/null || true)
-fi
-
-for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
-    case " $got " in
-        *" $platform "*|*"$platform"*) pass "manifest 含 $platform" ;;
-        *)
-            if [ "$PUSH" = "1" ]; then
-                die "manifest 里没有 $platform（实际: $got）"
-            else
-                printf '  \033[1;33m--\033[0m  本地镜像存储只记录单一平台，跳过 %s 的 manifest 核对（推送后才验得了）\n' "$platform"
-            fi
-            ;;
-    esac
-done
 [ "$want_count" -gt 0 ] || die "没有目标平台"
+
+if [ "$PUSH" = "1" ]; then
+    # 推送后 registry 上就有完整的 manifest list，直接问它。
+    got=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}' 2>/dev/null || true)
+    for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
+        case " $got " in
+            *"$platform"*) pass "manifest 含 $platform" ;;
+            *) die "manifest 里没有 $platform（实际: $got）" ;;
+        esac
+    done
+else
+    # ------------------------------------------------------------------
+    # 不推送时怎么验多架构：用 `docker create --platform` 做解析探针。
+    #
+    # 这里原先是"跳过核对"，那是个**假阳性温床**：buildx 只出了 host 架构
+    # 时命令照样返回 0，而本地这一关又主动放行，于是"多架构"这件事在推送前
+    # 从来没有被验证过 —— 等 arm64 用户拉下来报 exec format error 才发现。
+    #
+    # `docker image inspect --format '{{.Os}}/{{.Architecture}}'` 救不了场：
+    # 面对 manifest list 它只回落到 host 那一份，天生看不见另一个架构。
+    #
+    # `docker create --platform <p>` 则必须**在本地 manifest 里解析出 <p>**
+    # 才能建出容器；解析不到就会去 registry 找，进而失败。它只创建不启动，
+    # 所以非本机架构不需要 QEMU 也能验。反向对照见下面的 s390x 探针 ——
+    # 一个永远为真的检查等于没有检查。
+    # ------------------------------------------------------------------
+    probe() { # probe <platform>；0=本地 manifest 里有这个架构
+        _cid=$(docker create --platform "$1" "$IMAGE:$VERSION" 2>/dev/null) || return 1
+        docker rm -f "$_cid" >/dev/null 2>&1
+        return 0
+    }
+
+    for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
+        probe "$platform" \
+            && pass "manifest 含 $platform（docker create 解析探针）" \
+            || die "本地镜像 $IMAGE:$VERSION 的 manifest 里没有 $platform"
+    done
+
+    # 反向对照：一个我们**没有**构建的架构必须探测失败。
+    # 若它也"成功"，说明探针根本没在鉴别架构，上面那几个 OK 全部不可信。
+    absent=linux/s390x
+    case ",$PLATFORMS," in
+        *",$absent,"*) absent=linux/riscv64 ;;   # 万一真有人指定了 s390x
+    esac
+    if probe "$absent"; then
+        die "反向对照失败：未构建的 $absent 竟然也探测成功，架构探针不可信"
+    fi
+    pass "反向对照通过：未构建的 $absent 探测失败（探针确实在鉴别架构）"
+fi
 
 host_arch=$(docker version --format '{{.Server.Arch}}')
 case "$PLATFORMS" in
@@ -218,4 +249,4 @@ esac
 
 info "完成：$IMAGE:$VERSION"
 [ "$PUSH" = "1" ] && info "已推送到 registry" || info "未推送（加 --push 推送）"
-printf '下一步可跑 scripts/verify-image.sh --image %s:%s 做真实 SMB 端到端验证\n' "$IMAGE" "$VERSION"
+printf '下一步跑 scripts/verify-image.sh --image %s:%s 做真实 SMB 端到端验证\n' "$IMAGE" "$VERSION"
