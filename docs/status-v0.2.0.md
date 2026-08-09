@@ -530,6 +530,7 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 由 `openhost_window
 | **R11** | **🔴 新增·双 bbolt 实现撞车**：`internal/meta`（PR #26）与 `internal/vfs/metadata_windows.go` 同写 bucket `posix`、记录布局不同 → 静默数据损坏（见 §4.1） | 🟢 **已决（第 11 轮）**：vfs 依赖 meta、删 vfs bbolt、bucket 改名为不同于 `posix` 的新名（**实装 `posix.v2`，带点**）、不迁移；PR #26 待合（现 conflict 非 CI，见 §11） | 处置：rename posix→posix.v2、不迁移、CI 实装随 #26 合入（今后归 qa-e2e） |
 | **R12** | **🔴 新增·durable handle 端到端是坏的**：重连「成功」但拿回的句柄一用就 `STATUS_INVALID_PARAMETER`——`reconnect()` 只改 `open.Session` 不改 `open.Tree`，被 `close.go:42` 跨树防护挡掉，READ/WRITE/CLOSE 全废、连关都关不掉 | 🔴 **头号技术风险（第 11 轮立）**：PR #20 已合入 main → **主干上该特性完成度实际 0%**；Time Machine 强依赖它。修复归 `qa-proto`；team-lead 裁决 Persistent 用**进程级全局计数器**，原「SessionId 入键」方案被 qa-proto 实测推翻（durable 的存在意义即跨会话重连，塞 SessionId 等于结构性废掉）。见 §11 | 单独立项跟踪；修完前 Time Machine 验收判据不可标 ✅ |
 | **R13** | **🟠 新增·`test/integration` 在 main 上是红的**：qa-e2e 实测 3 个失败，但都是测试侧问题、产品没坏 | 🟠 **已定位（第 11 轮）**：该目录从未在 CI 运行（CI 只编译不执行），红了无人知。是「build tag 后代码从未真校验」洞的又一例 | 见 §11；纳入 CI 实际运行（归 qa-e2e） |
+| **R16**（🔽 17:35 降级 → 🔁 **17:45 改写为「两档共享状态」**） | **🟡 已观测到的危险（不是已证实的成因）：一个 session 可被多个进程同时挂载**。`codebuddy -c`（--continue）与 `--resume=<uuid>` **都不检查**该 session 是否已有活进程占着，会再挂一份上去。**一句话结论：双进程弄脏的是工具的记账，不是仓库里的代码。** | 🟡 **已证实 3 条**：① 两个 codebuddy 进程（**2710370 / 3923374**）`sessions/*.json` 里是**同一个** sessionId `2d8786c5`；② **codebuddy 自己的记账坏了** —— `file-history/2d8786c5…` 共 **158** 处 ENOENT（log line 12916 起）；③ **`/work/*` 没有被跨 owner 写入** —— 事故窗口内 9 个并发 agent 共 **362 次**确认落盘写入，按「树的真实归属」判定**跨 owner = 0**（17:39–17:40 实跑，见 §18.9）。**已撤回 1 条**：「双挂载造成了那四起写入冲突」—— 0/362 + 影子进程工具类日志 **24 vs 6627** 行全程空转 + UUID 级窗口内每角色恰好 1 实例；四起各有机制级自伤证据（§18.3） | 自查命令**保留**：`grep -h sessionId /root/.codebuddy/sessions/*.json \| sort \| uniq -c`，计数 ≥2 = 有重影，**先确认旧进程是死的/空转的再 resume**。已落 **PR #140**（AGENTS.md §10.1），措辞钉死为「已观测到的危险，不是已证实的成因」 |
 
 ---
 
@@ -1672,3 +1673,325 @@ qa-verify 这次做对的正是这一点——他没直接用我给的 sha，而
 不允许「批量时简化一下」。这与 §10.3 的老教训同源（`save.sh` 的门禁不许顺手简化）。
 配套：批量结论出来后，**随机抽 1 个样本用精确方法验一遍**——
 这次只要抽任意一个分支跑 `git rev-list --count <mb>..<br> -- .cnb.yml`，当场就会看到 0。
+
+---
+
+## 18. 第 18 轮（PM 崩溃复盘：双进程同挂一个 session，2026-08-09 ~17:10Z）
+
+team-lead 已拿到决定性证据，pm 不再独立推导死因，只负责**记录证据 + 防再发 + 进度盘点**。
+结论四件事（team-lead 16:58 来报，pm 已逐条独立复验）。
+
+### 18.1 结论一：这次**不是**容器崩溃/重启
+
+- `uptime` 现 **up 9:10**（pm 17:05 实测：`17:05:44 up 9:10`），机器从 07:55 起连续运行。
+- `/work` 下 **50 个 worktree 全在**，`/workspace` 全在，git 对象库全在，
+  连 `~/.codebuddy/projects/workspace/` 下的会话 jsonl 与 subagent jsonl 都在。
+- **推论**：本看板 §10.1 / §10.3「崩溃清空一切」的既有认知，**本次不成立**。
+  必须加反例限定（见 §18.5 + 草案三），否则会误导后续盘点「默认全丢了」而漏掉其实还在的成果。
+
+### 18.2 结论二：真正死掉的是一个 codebuddy 进程，且当时**有两个进程同挂一个 session**
+
+决定性证据在 `/root/.codebuddy/logs/2026-08-09/workspace__eab0d61a99b6696edb3d2aff87b585e8.log`（103 MB）。
+
+按分钟统计日志里出现过的 pid（pm 17:06–17:07 实跑）：
+
+```
+15:54 ~ 16:40   pid=2710370  pid=2732263      ← 两个进程并存 47 分钟（2710370 窗口内 273 行，2732263 窗口内 57447 行）
+16:41 ~ 16:43   pid=2710370                   ← 2732263 消失
+16:44 ~         pid=2710370  pid=3923374      ← team-lead（新进程）接上
+```
+
+`/root/.codebuddy/sessions/*.json` 的 `sessionId`（pm 17:05 实跑，现仅剩 1 条因为 2710370 已被 kill）：
+
+```
+2710370.json → sessionId 2d8786c5-5251-4e43-9fd4-6d9ec5a77103
+3923374.json → sessionId 2d8786c5-5251-4e43-9fd4-6d9ec5a77103   ← 同一个！
+```
+
+即：**`codebuddy -c`（--continue）与 `--resume=<uuid>` 都不检查该 session 是否已有活进程占着，
+会直接再挂一份。** log 中可直接看到两进程共写 file-history 的破坏
+（pm 17:06 定位，line 12916，该碰撞模式共 **158** 处）：
+
+```
+[2026/8/9 08:37:23.949] [Error] [pid=20451] [FileVersionStore]
+  Failed to file: 5c63c92aac136c99@v1, error=ENOENT: no such file or directory,
+  open '/root/.codebuddy/file-history/2d8786c5-5251-4e43-9fd4-6d9ec5a77103/5c63c92aac136c99@v1'
+```
+（同一 session 的 file-history 被另一方清掉/覆盖过。）
+
+**⚠️ 17:35 降级 / 17:45 改写：R16 曾被写成「两套同名 agent 共写工作树」，该因果已被三级证据推翻**——
+双挂载是**已观测到的危险**，不是四起冲突的成因，也不是进程死亡的原因。
+按「两档共享状态」重新表述后详见 **§18.9**：**双进程弄脏的是工具的记账，不是仓库里的代码。**
+现象部分（同挂发生过、158 处 ENOENT、自查命令）全部保留。
+
+### 18.3 结论三：四起「写入冲突」全部是**自伤**，无一起跨 agent
+
+（本节 17:11 曾被改写成 phantom twin 版，17:35 **改回**原结论。改判过程本身记在 §18.9。）
+
+四起报告，四起都是举报人自己造成的，**跨 agent 写入冲突 0 起**：
+
+| 报告 | 真相 | 决定性证据 |
+|---|---|---|
+| oscap-native 工作树出现「非自己写的」Windows 文件 | **自己 10 秒前写的**。`meta_windows.go` 与 `fileid_windows.go` 是他自己分两步拆文件时没先删旧的，即 §10.3 第 6 条的**单人版本** | `agent-caac3eb2.jsonl`：16:36:07 写 `meta_windows.go` → 16:36:17 写 `fileid_windows.go` → 16:36:18 报 `winIDs redeclared (meta_windows.go:22 vs fileid_windows.go:18)`。**编译错误的行号精确指向他自己前 10 秒写的两个文件**。git 侧三文件同属一个提交 `44d9910`，闭合 |
+| win-meta「有别人在我树里跑 C9 探针」 | **自己被自动后台化的任务 `0OGWya`** 在循环改写同名文件 `zz_c9_probe_scratch.go`，前台第二轮读到的内容不断变化 | 他自己 16:37:50 扫进程，结果**只有一个 pid=2948668**，输出里那段 `probe()` **正是他自己的脚本**；16:38:11 `0OGWya` 被 TaskStop（`Runtime: 3m 20s, killed`）；16:38:22 他清残留时「别人的（不动）」一栏**是空的** |
+| release 分支里的「外来提交」`60620c3` | **自己 `pull --rebase` 前的旧 SHA**，内容原封不动在 `rel/v020` 的 `497fa03` 里且已推送 | `git branch --contains` 为空 = 孤儿；reflog 显示 16:28:43 rebase 时被 pick 成 `6a65e64` → `7395943` |
+| team-lead 的 `/tmp/lead-native` | **指认不成立，team-lead 清白** | 全部文件 mtime 都是检出那一刻 16:32:43，此后零写入；树里**根本不存在**那三个 Windows 文件 |
+
+**为什么不采用 twin 解释**：它更整齐，但没有证据；而上面四条每一条都有**机制级**证据
+（行号、pid、reflog、mtime），不是相关性。整齐不是证据。
+
+**误报本身的代价**：两条广播发生在 16:38:48 与 16:38:52，相隔 4 秒，各 fan-out 9 人 = **18 条入站消息**，
+此后全队掉头查一个不存在的问题，**3 分 36 秒后进程死亡**。
+（这只是时序，**不主张因果** —— 拿不到 OOM 时间戳。）
+→ 已落 **PR #140** 的 AGENTS.md §7.3.4「指控前先自证」与 §10.3 第 11 条「自动后台化自伤」。
+
+### 18.4 结论四：死因本身 pm **只给排除法，不许编**
+
+team-lead 用排除法给出、pm 已独立复验：
+
+- **排除容器重启**：`uptime` 9:10（§18.1）。
+- **排除 cgroup OOM**：`memory.failcnt = 0`（pm 17:05 实读 `/sys/fs/cgroup/memory/memory.failcnt`），
+  上限 `memory.limit_in_bytes = 4294967296`（4 GiB），峰值 `max_usage_in_bytes = 3.54 GiB` = 上限 88.5%，
+  很险但**没爆**。
+- **排除 node 堆溢出**：2732263 死前最后探针 `rss=769.6MB`、`heap=363.8/522.6MB`，
+  log 里**没有** `JavaScript heap out of memory`。
+- **无法确定的部分（写「查不到」，不编造）**：2732263 最后一行日志是正常的流式输出
+  （pm 17:06 取最后一行时间戳落在 16:40:50 附近，形态为正常流），**之后无任何错误、无退出日志**——
+  符合被外部信号突然打断（控制终端消失的 SIGHUP，或 SIGKILL）。容器里 `dmesg` 不可读、无 audit 日志，
+  **拿不到直接证据**。是否「双挂载本身导致 2732263 死亡」还是「2732263 因独立原因死亡、双挂载是并存的前置条件」，
+  **均无法定论**，进度板上只写已证实的事实。
+
+### 18.5 处置与防再发（pm 执行项）
+
+1. **R16 已登记**（§6 表，17:35 降级为「已观测到的危险」）。证据带文件路径与行内容（§18.2）。
+2. **§7.3.4 / §10 三处修订已落 PR #140**（pm 直接改 `AGENTS.md`，未转交 oscap-rules）：
+   - 新增 §7.3.4「指控别人动了你的工作树之前，必须先排除你自己」——开工前三级自证 + 三类误报形态表。
+   - §10 开篇加「容器重启 vs 单个 node 进程死亡」反例限定（对照表）。
+   - §10.1「关键事实」补：`--resume` / `-c` **都不检查** session 是否被占用，附 `grep -h sessionId ... | sort | uniq -c` 自查命令，措辞钉死为「已观测到的危险，不是已证实的成因」（有 24:6627 与 UUID 两级证据支撑）。
+   - 新增 §10.3 第 11 条「自动后台化会让你误以为别人在动你的树」（win-meta `0OGWya` 案，唯一临时文件名防重）。
+   - §7.5 刻意未动（确认无行被改），D-新9 结论见下。
+3. **进度盘点（Task B）照常做**，其中「查 phantom twin 残留改动」**已降级**为「查未提交/意外的孤儿改动」——
+   §18.3 已证四起均为自伤，twin 不存在，逐项按 §7.3.4 自证即可，不必再按角色名搜第二套实例。
+4. **已执行的处置（team-lead 报）**：旧进程 2710370 已 SIGTERM 结束（项目所有者授权），
+   结束前确认无子进程、未持工作树文件、CPU 近乎静止；现系统仅 1 个 codebuddy（pid 3923374）。
+
+### 18.6 待 team-lead 拍板（17:40 全部结案）
+
+| # | 事项 | 结论 |
+|---|---|---|
+| D-新7 | §7.3.1 修订草案是否采纳？落笔交谁？ | ✅ **采纳草案 A/B/C，pm 直接改 `AGENTS.md`**（未转交 oscap-rules），已落 **PR #140**：§7.3.4 + §10 开篇反例 + §10.1 自查命令 + §10.3 第 11 条 |
+| D-新8 | §10.1/§10.3 反例限定是否落地？ | ✅ 同 PR #140（`docs/agents-md-r16-draft.md` 已不再作为载体，留作记录） |
+| D-新9 | 是否把「开工前查 sessionId 重影」写进 §7.6「每条命令前先 date」同级的强制动作？ | ❌ **不升级到 §7.6 级别**：只在 §10.1 给「开工前/恢复前」的自查命令作为软约束，不变成每条命令的硬动作（避免 §7.6 噪声膨胀）；§7.5 未动 |
+
+### 18.7 Task B：全 worktree 进度盘点（17:13–17:15 实跑）
+
+对 `/work/*` 全部 44 个 agent 工作树跑了 `git status --short` + `origin/main..HEAD` +
+`origin/<分支>..HEAD`，并对三个 twin 标记树做了 `merge-base` 溯源。
+
+**A. 需要关注的（uncommitted>0 或 unpushed>0）**
+
+| 工作树 | 分支 | ahead_main | unpushed | uncommitted | 判定 |
+|---|---|---|---|---|---|
+| `/work/qa-e2e` | qa-e2e/ci | 2 | 0 | 2 | 🟡 **R7 假阳性（17:41 复核）**：`origin/main..HEAD` 的 2 提交 `265bcaf`/`ad27691` 经 `git patch-id` 比对**已在 main 内**（squash 合入，SHA 漂移），「孤儿 rescue」前提不成立，无需代开 PR。真正未合入的是 **2 个未提交 CI 文件**：`test/ci/reverse-tag-verify.sh`（main 缺失）+ `test/ci/check-test-compile.sh`（qa-e2e 188 行 vs main 112 行，+76 未合）。但 **PR #135「portable 模式 CI 门禁」已合并**（新增 `portable-mode.sh` 411 行），qa-e2e 这版可能与之冗余/冲突 → **处置待 team-lead 拍板**（提交 qa-e2e/ci 开 draft PR，还是并入 #135 体系） |
+| `/work/oscap-native` | oscap/native | 6 | 0 | 1（`sparse_linux_test.go` 未跟踪） | 🟠 自伤残留（非 twin）：6 提交全已推；`44d9910`/`b9704dd` 确认是 HEAD 祖先，即 §18.3 他自己两步拆文件没先删旧的自伤，twin 不存在；owner 按 §7.3.4 自证后逐文件重审；工作树仅 1 个未跟踪测试，疑似良性（team-lead 另处处理） |
+| `/work/win-meta` | win-meta/c9-negative-control | 0 | 0 | 1（`M test/ci/negative-verify.sh`） | 🟠 自伤残留（非 twin）：无未推提交；未提交的 `negative-verify.sh` 是其被自动后台化的任务 `0OGWya` 的残留（§10.3 第 11 条）；**同一文件也被 `/work/oscap-gate` 改**（所有权重叠，见下） |
+| `/work/oscap-gate` | oscap-gate/c9-constraint | 0 | 0 | 1（`M test/ci/negative-verify.sh`） | 🟠 与 win-meta 改同一 CI 文件，潜在合并冲突/所有权重叠 |
+| `/work/oscap-config` | oscap/config | 2 | 0 | 2（`.cnb.yml` + `??portable-mode.sh`） | 🟡 进行中，未提交 |
+| `/work/rel-docker` | rel-docker/image | 1 | 0 | 1（`??verify-image.sh`） | 🟡 进行中 |
+| `/work/rel-v010` | rel-v010/cnb-image | 4 | 0 | 1（`M scripts/publish-image.sh`） | 🟡 进行中 |
+| `/work/tm-dev` | tm-dev/timemachine | 2 | 0 | 2（`??create_context_lease*.go`） | 🟡 进行中 |
+| `/work/win-backend-l2` | win-backend/final-path-verify | 0 | 0 | 5（vfs 5 文件） | 🟡 进行中，改动量较大 |
+| `/work/tm-vfs` | tm-vfs/stream-sync | 0 | 无远端分支 | 1（`M stream_handle.go`） | 🟡 无远端、无提交，仅未提交改动 |
+| `/work/tui-diag` | tui-diag/tui-hang | 0 | 0 | 1（`M docs/troubleshooting-codebuddy.md`） | 🟡 收尾文档 |
+| `/work/fix-ci` | fix-ci/c9-gate-name | 0 | 0 | 1（`??pr-c9-gatename-body.md`） | ⚪ 草稿 PR body，良性 |
+
+**B. 原「三个 twin 标记树」的孤儿/意外改动结论（17:40 降级：twin 不存在，按 §7.3.4 自证即可）**
+- `/work/oscap-native`：工作树干净（仅 1 个未跟踪测试 `sparse_linux_test.go`，疑似良性）；6 个领先提交**全部已推**；标记的 Windows 提交 `44d9910`/`b9704dd` 确认在 HEAD 历史内，且 §18.3 已证是 owner 自己两步拆文件没先删旧的自伤（编译错误行号 `meta_windows.go:22 vs fileid_windows.go:18` 指向他自己的两个文件），**非外来实例写入**。**无未提交的外来 Windows 文件残留。**
+- `/work/win-meta`：领先 main 为 0、**无未推提交**；仅 1 个未提交改动 `test/ci/negative-verify.sh`，是其被自动后台化的任务 `0OGWya` 的残留（§10.3 第 11 条），非他人写入。另：该文件与 `/work/oscap-gate` 的未提交改动**撞同一文件**——属「两 agent 共碰一个 CI 文件」的所有权重叠，需合并前协调（win-meta 那份已导出为 patch 仅留底，不提交；owner 归 oscap-gate）。
+- `/work/release-v020`：工作树**完全干净**（0 未提交），5 个领先提交全已推。**标记的 `60620c3` 经 `merge-base --is-ancestor` 验证 NOT 是 rel/v020 的祖先** → 它是 rebase 产生的 dangling orphan（与 team-lead 此前判断一致），**不在当前树内、无活动残留**。`rel/v020` 现 5 笔全是 CHANGELOG/Docker 文档订正。
+
+**C. 空分支（无远端、ahead=0、无未提交）：无成果丢失风险**
+`/work/oscap-gate-c3`、`/work/qa`、`/work/tm-vfs`（注：tm-vfs 有 1 未提交但 0 提交）等空壳分支，本次盘点无原创成果损失。「数量减少 ≠ 丢失」已逐树核验。
+
+**D. 全队提交纪律复核**：在册 agent 全部已建远端分支（§7.3.1「开工先推空分支」有效）；未提交改动集中在「进行中」的正常状态，未见 §10.3 第 6 条那种「别人未提交中间态砸到他人导致 `undefined`」的串扰（本轮双进程已结束，仅残留上表少量未提交）。
+
+### 18.8 方法论：成员在 lead 给出倾向后翻转结论，而新证据并不比原证据强
+
+> team-lead 17:38 原话，写入看板：**「我要的是证伪，不是同意。」**
+
+本次复盘本身贡献一条比四起冲突更值得记的方法论——冲突是一次性的，这条会反复发生：
+
+1. **第一版（pm 自判）**：四起「写入冲突」全部是各 agent 的**自伤**，跨 owner 写入 = 0（§18.3 v1，基于编译错误行号 `meta_windows.go:22 vs fileid_windows.go:18` / pid / reflog / mtime 四级机制证据）。
+2. **翻转（17:11）**：team-lead 给 twin 理论（两进程同挂一 session → 两套同名 agent 共写），pm 据此把 §18.3 整体改写为 phantom twin 归因。
+3. **再翻转（17:35）**：team-lead 用 **24 vs 6627** 工具类日志行 + UUID 级「每角色恰好 1 实例」两级证据指出「你第一版是对的，这次改判是错的」，pm 改回自伤结论（§18.3 现版）。
+
+**教训**：第 2 步翻转的「新证据」其实只有一条——两个进程同 sessionId（§18.9 第一档①已证实，但它只证明**工具记账坏了**，推不出「造成了四起冲突」）。而第 1 步的自伤结论有**四级独立机制证据**。pm 在 lead 表达倾向后，把「更整齐的解释」当成了「更强的证据」，是典型的**同意偏差**，不是证伪。
+
+**落地规则（已写进 §7.3.4 第三条误报形态「按上级倾向翻转」）**：lead 给出倾向性判断时，pm 的职责是**拿证据去证伪它**，不是顺着改结论；只有当新证据在**强度**上超过原证据（同级或多级、且机制级而非相关性）时才允许改判。本看板 §18.3 / §18.9 的一切结论，均须能经 `git merge-base --is-ancestor` / `git patch-id` / 日志行计数 等**可复跑判据**复核，不接受「整齐」作为证据。
+
+（本条与 §18.9 方法论 A「跨 owner 不能用角色名比目录名」互补：前者管**判断者心态**，后者管**判据构造**。）
+
+### 18.8 Task D：Issue 清理（重复项映射表 + 完成判据）
+
+> team-lead 17:46 定夺。**关闭是可逆的**（可 reopen），真正不可逆的损失是真需求被关掉后没人再想起来，
+> 所以本节按「误关可恢复、漏记不可恢复」权衡。
+
+#### 18.8.0 两个先决事实（会影响今后所有 Issue 操作）
+
+1. **本仓库 Issue 与 PR 共用同一个编号空间。** open Issue 的真实编号是
+   `39 43 45..88 90..102 104..118`（共 **75** 个），缺的 `44` / `89` / `103` **不是被关了，
+   而是它们根本不是 Issue** —— 都是已合并的 PR（`cnb issues get-issue --number 44` 回 **404**）。
+   **今后凡是范围表达式（`#A–#B`）一律先 `list-issues` 分页拉真实编号，不要靠推断。**
+2. **批量操作前先用实测数据对账 brief。** 本轮 brief 写「21 个重复」却要求关 32 个，
+   实测精确重复只有 **15** 个 —— **数字对不上就是前提过期的信号**，停手核对比照做完再回滚便宜得多。
+
+#### 18.8.1 A 类：15 个精确重复（副本 → 原件）
+
+| 关闭（副本） | 保留（原件） | 主题 |
+|---|---|---|
+| #71 | #50 | vfs 修复 Windows junction/符号链接越权读写 |
+| #73 | #51 | junction 逃逸第二层（句柄反查 TOCTOU） |
+| #75 | #52 | 写 open_windows.go（Windows 后端消费方） |
+| #77 | #53 | 合 PR #26（internal/meta bbolt/noop） |
+| #79 | #54 | 合 PR #27（抽取 IsWindowsSlash） |
+| #81 | #55 | ValidateComponent 绕过检查 |
+| #83 | #56 | 收口 openNoFollow 到 openHostFile |
+| #85 | #57 | 授予 oplock/lease break |
+| #87 | #58 | 验证 durable handle |
+| #91 | #60 | G3 修 QUERY_DIRECTORY 全量枚举 O(N²) |
+| #93 | #62 | G4 F_FULLFSYNC Reserved1 死字段 |
+| #95 | #64 | G5 AAPL ModelString vs mdns.model |
+| #98 | #66 | G6 adVF 魔数引证 |
+| #100 | #68 | B 块 Time Machine 兼容性 + `_adisk._tcp` |
+| #102 | #70 | Apple 6 步目的地验证集成测试 |
+
+#### 18.8.2 B 类：基准集 #45–#70 内部自重的 5 个
+
+| 关闭（副本） | 保留（原件） |
+|---|---|
+| #61 | #45 |
+| #63 | #46 |
+| #65 | #47 |
+| #67 | #48 |
+| #69 | #49 |
+
+**「有讨论的留下」例外未触发**：全部 20 个副本 `comment_count = 0`、`assignees` 为空，
+原件同样为空（唯一有评论的是总览 #39，不在关闭名单里）。因此一律关副本、留原件。
+
+#### 18.8.3 C 类：16 个真需求，**一个都不关**，打 `keep` 标签
+
+`#72 #74 #76 #78 #80 #82 #84 #86 #88 #90 #92 #94 #96 #97 #99 #101`
+
+其中在 v0.2.0 / v0.3.0 关键路径上的：#78（≥3 客户端实测）、#84（CI 红绿按事件类型）、
+#86（C9 可机检子集）、#90（长度校验/资源限制）、#92（SMB1 协商入口）、#94（常量时间比较）、
+#101（durable 后台回收者）。打 `keep` 是为了防止下一轮有人拿同一份过期 brief 再关一遍。
+
+#### 18.8.4 完成判据：**落在行为/产物上，不落在「PR 合了」上**
+
+> 判据纪律（team-lead）：① sha 必须 `git merge-base --is-ancestor <sha> origin/main` 验过，
+> **不信 CNB 的 `merged` 字段**（squash 合并回 `null`）；② **不用「PR 已合并」当判据**——
+> 本仓库有前科（`-tags metabolt` 代码合进来后 CI 一行都没编译过）；③ **凑不满就不凑。**
+
+| Issue | 可机器验证的判据（在 `origin/main` 上实跑） | 结果 | 合入 sha（已验祖先） |
+|---|---|---|---|
+| #43 | `grep -c gate_metabolt .cnb.yml` | **3** | `18d8d2b` |
+| #104 | `grep -E '^TAGS=' test/ci/check-test-compile.sh` | `integration,smoke,metabolt,qadefect` | `959265a` |
+| #107 | `grep -c C9 scripts/check-constraints.sh` | **6** | `8ed6594` |
+| #108 | `grep -c C9 AGENTS.md` | **14** | `1244836` |
+| #117 | `.cnb.yml:62` 关卡名 | `校验硬性约束 C1/C3/C4/C8/C9 (AGENTS.md)` | `f870f1f` |
+| #109 + #50 | `go test ./internal/vfs -run TestWinRedirectClosesLegacyGap` | **PASS** | `2b16d61` |
+| #111 | `git ls-tree origin/main -- test/e2e/` 含 `smoke.sh` + `reverse-control.sh` | 两个文件都在主干 | `a8db071` / `09107e2` |
+| #45 | `docs/status-v0.2.0.md` 在 main | 存在 | — |
+| #46 | `grep -c '^### 7.5' AGENTS.md` | **1** | — |
+| #47 | `docs/troubleshooting-codebuddy.md` + `scripts/diag/risk-replica.js` | 两个都在 | — |
+| #52 | `CGO_ENABLED=0 GOOS=windows go build ./internal/vfs/` + `openhost_windows.go` 存在 | 构建通过 | — |
+| #53 | `internal/meta/{store,bolt,noop}.go` 均在 + `gate_metabolt` 真跑 | 齐全 | `18d8d2b` |
+| #54 | `grep -rc 'func IsWindowsSlash' internal/vfs/` | 单一定义 `winpath.go:65` | — |
+| #56 | `grep -c 'func openNoFollow' internal/vfs/` = **0**，且 `openHostFile` 在 unix/windows 各一份 | 已收口 | — |
+
+#### 18.8.5 判据跑不通、**保持打开**的（负向结果同样是产出）
+
+| Issue | 判据 | 实测 | 结论 |
+|---|---|---|---|
+| #49 | 「`internal/meta` 单一真相源」→ `grep -c bbolt internal/vfs/metadata_windows.go` | **8**（vfs 侧 bbolt 还在） | 🔴 **R11 未闭环**，不能关 |
+| #105 | `docs/os-capabilities.md` 存在 | **不存在** | 未开工 |
+| #110 | `GetFinalPathNameByHandleW` 有真实调用 | 只在**注释**里出现（`winreparse.go:7/132`） | 第二层未实现 |
+| #66 | adVF 魔数已引证 | `mdns/apple.go:51` 仍是 `TODO: 待真实抓包验证` | 未完成 |
+| #62 | F_FULLFSYNC Reserved1 已接线 | `wire/flush.go:11` 只有注释 | 未完成 |
+| #112 | `test/e2e/smoke.sh` 接进 CI | ⚠️ **名字撞车陷阱**：`.cnb.yml` 里确有 `&gate_smoke`，但它跑的是 `go test -tags smoke ./cmd/stupidsamba/`（**优雅退出冒烟**），**不是** `test/e2e/smoke.sh` | 未接线，必须留 |
+| #82 / #118 | `negative-verify.sh` 接进 CI 做独立 stage | `grep -c negative-verify .cnb.yml` = **1**，但那 1 处在 `gate_test_compile` 上方的**注释**（第 57 行），stage 列表里没有 | **两条都留**，且都注明「当前仅注释引用，未接成 stage」。与 oscap-gate 手上那份未提交的 `negative-verify.sh` 改动对得上 |
+
+> **#112 那条值得单拎出来**：`gate_smoke` 这个名字让人一眼以为「冒烟测试已进 CI」，
+> 实际跑的是完全不同的东西。这是本仓库「**名字像 ≠ 事情做了**」的又一例
+> （前几例：`-tags metabolt` 合了但没编译、`negative-verify.sh` 写了但只在注释里）。
+> **判据必须打开文件看它到底执行什么命令，不能看 stage 名。**
+
+### 18.9 R16 按「两档共享状态」改写：**已证实**与**已撤回**分开摆
+
+> team-lead 17:42 定的口径。写成两档是因为 R16 的价值全在第一档，
+> 而第一档差点被第二档一句站不住的因果结论拖下水。
+
+**一句话结论：双进程弄脏的是工具的记账，不是仓库里的代码。**
+
+#### 第一档 · 已证实（3 条，每条都有可复跑的判据）
+
+| # | 事实 | 判据（pm 实跑，命令可复现） |
+|---|---|---|
+| ① | **两个 codebuddy 进程挂着同一个 sessionId** | `grep -h sessionId /root/.codebuddy/sessions/*.json`：`2710370.json` 与 `3923374.json` 同为 `2d8786c5-5251-4e43-9fd4-6d9ec5a77103` |
+| ② | **codebuddy 自己的记账坏了** | `file-history/2d8786c5…/<hash>@v1` 报 ENOENT 共 **158** 处（log line 12916 起）。这是**工具侧**的版本库，不是 git |
+| ③ | **`/work/*` 没有被跨 owner 写入** | 窗口内 9 个并发 agent 的 `agent-*.jsonl`，按 Write/Edit 成功回执统计 **362 次**确认落盘写入，逐条判「目标树的真实归属」后**跨 owner = 0** |
+
+#### 第二档 · 已撤回（1 条，证据不足以支撑）
+
+**「双进程造成了那四起写入冲突」—— 撤回。** 三路证据都指向否：
+
+1. **写入侧**：362 次写入，跨 owner **0** 次（上表 ③）。
+2. **活跃度侧**：影子进程 2710370 的工具类日志 **24 行**，对照 2732263 的 **6627 行** —— 全程空转，
+   日志构成全是 `[Startup]` / `[MCP]` / `[PluginManager]` 启动期噪声。**空转的进程写不出冲突。**
+3. **UUID 侧**：68 个 `agent-*.jsonl` 按**首行「Initial task assignment for &lt;role&gt;」**归并角色名，
+   取生命期与事故窗口 15:54–16:40 有交集的，得 **9 个并发实例、9 个不同角色、每角色恰好 1 个**
+   （`oscap-builtin` / `oscap-config` / `oscap-native` / `oscap-port` / `pm` / `qa-proto` /
+   `qa-verify` / `release` / `win-meta`）。**「第二套同名 agent」在 UUID 级不存在。**
+
+那四起的真实成因逐条在 §18.3：rebase 悬空 SHA、未跟踪的自己的 WIP、自动后台化任务改自己的树、
+team-lead 的只读副本（指认不成立）。
+
+> **⚠️ 对 team-lead 口径的一处如实修正**：17:42 的口径里，第一档 ② 写的是
+> 「file-history 158 ENOENT **+ subagents 里两套同名混在一起**」。**后半句实测不成立**：
+> subagents 目录里角色名确实重复（`pm` 5 份、`qa` 4 份、`win-meta` 3 份…），
+> 但那是**跨轮次重生**，时间上互不重叠 —— 例如 `oscap-gate` 是 14:36–15:27 与 16:50–17:38 两段，
+> `release` 是 15:55–16:42 与 16:50–17:38 两段，后一段都是崩溃后重建团队产生的。
+> 因此 ② 只保留 file-history 这一条有直接证据的记账损坏。
+> （顺带订正 PR #140 正文里的「73 个 `agent-*.jsonl`」：实为 **68** 个，结论不变。）
+
+#### 方法论 A：**「跨 owner 写入」不能用角色名去比目录名**
+
+朴素做法是把 `role` 和 `/work/<dir>` 的字符串直接比，一比就得出 **362 次里 134 次跨 owner**——
+**全是假阳性**，因为多个 agent 的工作树目录名和自己的角色名根本不一样：
+
+| 角色 | 它自己的树 | 朴素比法的误判 |
+|---|---|---|
+| `oscap-port` | `/work/oscap-impl` | 66 次「跨 owner」 |
+| `release` | `/work/release-v020` | 48 次 |
+| `qa-proto` | `/work/qa-proto-mem` | 12 次 |
+| `oscap-config` | `/work/oscap-config` + `/work/oscap-portable-gate` | 8 次 |
+
+最后那条最像真跨界：`oscap-portable-gate` 听着是 `oscap-gate` 的树。**逐个查过才敢下结论**：
+该目录在全 68 个 jsonl 里首次出现就在 `oscap-config`（agent-f2b03fb7）名下、由它 16:37–16:38 创建并写入，
+分支 `oscap/portable-gate`；而 `oscap-gate` 的两个实例分别是 14:36–15:27（早于创建）与
+16:50–17:38（崩溃后接手）—— **是先后交接，不是同时争用**。
+**判据必须落在「这棵树是谁建的」，不是「名字像谁的」。**
+
+（唯二的跨树接触是 `qa-proto` 对 `/work/oscap-native`、`/work/tm-dev` 各 1 次 **Read**，只读，不产生冲突。）
+
+#### 方法论 B：**改判过程本身要留痕**（17:11 改判 → 17:35 改回）
+
+本轮 pm 犯过一次值得记下来的错：team-lead 提出 phantom twin 假说后，pm 在**没有拿到更强证据**的情况下
+把 §18.3 从「四起自伤」改写成了 twin 版。team-lead 当场驳回（「别改判，你第一版是对的」），pm 改回。
+
+- **错在哪**：改判的触发因素是**对方的倾向性表达**，不是新证据。twin 版更整齐、能一次性解释四起，
+  但整齐不是证据；原版四条各自带机制级证据（编译错误行号、pid、reflog、mtime）。
+- **纪律**：**改判只能由新证据触发。** 上级提出新假说时，正确动作是**去测**（本轮的测法就是上面的
+  UUID 归并 + 写入归属统计），不是先改结论再补理由。
+- **为什么把这段写进看板**：改判过程如果不留痕，后来者只会看到「结论变过一次」，
+  既不知道被什么推翻，也学不到证伪的做法 —— 下一轮换个人还会再来一遍。
