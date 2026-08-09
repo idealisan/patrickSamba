@@ -67,11 +67,15 @@ shares:
 stupidsamba -config stupidsamba.yaml
 ```
 
-启动后日志会打印监听地址与协商到的方言范围，例如：
+启动后日志会打印监听地址与协商到的方言范围。上面这份最小配置没写
+`listen.addresses`，等于监听全部地址，实际输出是：
 
 ```
-SMB 服务已监听 addrs=127.0.0.1:445 dialects=2.0.2..3.1.1 shares="public"
+time=2026-08-09T12:28:25.777+08:00 level=INFO msg="SMB 服务已监听" addrs=[::]:445 dialects=2.0.2..3.1.1 shares=public
 ```
+
+（`addrs` 是双栈通配地址 `[::]`，IPv4 一并覆盖；显式写了 `listen.addresses` 时
+会逐个列出，如 `addrs="127.0.0.1:445, [::1]:445"`。）
 
 想先只校验配置、不真正起服务，用 `-check`：
 
@@ -251,7 +255,7 @@ done
 | 字段 | 含义 | 默认值 |
 |---|---|---|
 | `name` | 共享名（客户端看到的名字，如 `\\server\public`） | — |
-| `path` | 本地目录**绝对路径，必须已存在** | — |
+| `path` | 本地目录绝对路径，**必须已存在**。「绝对」按**运行平台**判定：Windows 上 `/srv/share` 不算绝对路径，要写 `C:\srv\share` | — |
 | `comment` | 共享描述 | 空 |
 | `read_only` | 只读共享（写操作会被拒绝） | `false` |
 | `browseable` | 是否出现在共享枚举（`smbclient -L`、Finder）中；`false` 只是不列出，知道名字照样能连 | `true` |
@@ -259,7 +263,7 @@ done
 | `valid_users` | 限定可访问用户，留空表示所有已认证用户；名字必须在 `auth.users` 里定义过 | 所有已认证用户 |
 | `time_machine` | 把本共享宣告为 Time Machine 备份目标（阶段二） | `false` |
 | `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)）。⚠️ 上报的**可用空间 = `quota_bytes` − 宿主卷已用空间**（出于性能不递归统计本共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，否则即使共享是空的，客户端也会看到可用空间为 0 而拒绝开始备份 | `0` |
-| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS 留空即可 | 空 |
+| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS **留空**即可。⚠️「非 Windows 会忽略它」是**运行时**行为，但**校验在所有平台都做**：填的必须是当前运行平台意义上的绝对路径，否则启动直接失败。所以在 Linux 上填 `C:\...` 会起不来 —— 跨平台复用同一份配置时这项要么留空、要么按平台分开写 | 空（落在 `%AppData%\stupidsamba\` 下，按共享根路径哈希命名） |
 
 ### `mdns`
 
@@ -476,3 +480,4 @@ CGO_ENABLED=0 go test ./...
 - [`CHANGELOG.md`](CHANGELOG.md) —— 各版本变更记录
 - [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md) —— v0.1.0 多客户端验收报告（smbclient / impacket / go-smb2 实测矩阵、加密 fail-closed 验证方法）
 - [`docs/protocol-notes.md`](docs/protocol-notes.md) —— 协议研究笔记（实现依据）
+- [`docs/dev-workflow.md`](docs/dev-workflow.md) —— 开发工作流 SOP（独立 worktree + 独立分支 + PR），参与开发前必读
