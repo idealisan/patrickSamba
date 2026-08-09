@@ -1,6 +1,6 @@
 ---
-name: CNB PR API 的调用方式与五个坑
-description: cnb.cool 创建/更新/合并 PR 的写法，以及 merge 用 PUT、更新用 PATCH（PUT 会 404）、参数名是 merge_style、commit_title 必填、GET/PUT 都要求 Accept: application/json 这些会直接报错的坑
+name: CNB PR API 的调用方式与六个坑
+description: cnb.cool 创建/更新/合并 PR 的写法，以及 merge 用 PUT、更新用 PATCH（PUT 会 404）、参数名是 merge_style、commit_title 必填、GET/PUT 都要求 Accept: application/json、以及已合并的 PR 仍回 merged=null（判合并要用 git 祖先关系）
 type: reference
 ---
 
@@ -57,7 +57,23 @@ cnb pulls patch-pull --repo finalappstore/stupidSamba --number 35 \
 | `400` | 漏了 `commit_title`；它是必填不是可选 | 必填 `commit_title` |
 | `406` `{"errcode":406,"errmsg":"either of 'application/json' or 'application/vnd.cnb.api+json' content type supported"}` | **GET 和 PUT 都要求 `Accept: application/json`**，缺了就报 406。报错文案说的是 content type，极易误导你去查 `Content-Type` 头——但 `Content-Type: application/json` 明明已经带了，真正缺的是 `Accept` | 请求务必带 `-H "Accept: application/json"`（上面两段 curl 已经带了，照抄即可，别漏） |
 
-**Why**：这四条每一条都有人真的踩过并浪费时间排查，团队要求写进
+**⚠️ 判断 PR 是否已合并：不要信 `.merged` / `.merged_at` / `.merge_commit_sha`。**
+CNB 的 `GET /-/pulls/<号>` 对**已经合并**的 PR 依然返回
+`state=closed, merged=null, merged_at=null, merge_commit_sha=null` ——
+三个字段全空，看起来就像「被关掉但没合」。实测：PR #120 已合进 main
+（main HEAD 就是 `Merge pull request #120`），API 照样报 null。
+照这个字段判会得出**完全相反**的结论，属于本项目「成功回显 ≠ 事情真的发生」的镜像版
+（这次是「事情发生了但回显说没有」）。**一律用 git 祖先关系判**：
+
+```sh
+git fetch -q origin && git merge-base --is-ancestor <你的提交> origin/main \
+  && echo "已合并" || echo "未合并"
+```
+
+顺带：拿文件内容判「改动是否进了 main」时，grep 的字符串要从**文件正文**里取，
+别顺手抄 PR 标题——标题和正文常常差几个字，grep 落空会让你误判成没合。
+
+**Why**：这些坑每一条都有人真的踩过并浪费时间排查，团队要求写进
 `docs/dev-workflow.md` 免得下一个人再试一遍。
 
 **How to apply**：任何时候要在本仓库开/合 PR 直接抄上面两段；发现 4xx 先对照这张表，
