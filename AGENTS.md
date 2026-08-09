@@ -167,12 +167,23 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 某个策略开关只测了「允许」这条路径，全绿，而「拒绝」那条路径压根没接线，
 测试从头到尾都在验证同一条路。
 
-**实现排期：v0.3.0。** 本期只定规矩，不动代码结构 ——
-现在改会和正在收尾的 Time Machine 工作抢文件。
-所以上面那张三态表描述的是**将要建成的东西**：截至本节写就，
-`internal/oscap` 与配置项 `filesystem_mode` **都还不存在**，别照着去找代码。
+**实现进度（2026-08-09 更新，原文写的「都还不存在」已过时）**：
+本节最初写就时，`internal/oscap` 与 `filesystem_mode` 都只是规划，排期 v0.3.0。
+**v0.2.0 期间提前落地了，现在它们是真代码，可以照着去找**：
 
-**v0.3.0 落地时的前置要求（现在就写下来，免得到时忘）**：
+| 部件 | 位置 | 状态 |
+|---|---|---|
+| port 层（6 接口 + 逐能力矩阵 + 三态 Mode + 平台探测） | `internal/oscap/*.go` | 已在 main（PR #123），31 个单测 |
+| `filesystem_mode` 三态配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126），取值判定委托 `oscap.ParseMode` 保持单一真源 |
+| native 适配器 | `internal/oscap/native/` | 开发中（分支 `oscap/native`） |
+| builtin 适配器 | `internal/oscap/builtin/` | 开发中（分支 `oscap/builtin`，bbolt 旁路存储） |
+| portable 模式 CI 门禁 | `test/ci/` | **未完成**，见下方前置要求 |
+
+上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
+但**双适配器与 CI 门禁尚未完工**，在它们合入之前，
+`filesystem_mode` 三个取值在运行期的实际差异仍然有限 —— 别把「配置项存在」当成「能力矩阵已生效」。
+
+**落地时的前置要求（尚未满足，仍然有效）**：
 `portable` 模式必须**在 CI 里真跑一遍**，不能只是配置项里多一个取值。
 理由：builtin 是「将来移植到未知系统」的唯一底座，而一条在 CI 里从未被执行过的路径，
 到需要它的那天一定是坏的 —— 那时既没有原始作者在场，也没有可对照的正确行为。
@@ -297,7 +308,7 @@ internal/auth            SPNEGO / NTLM / 账户后端（接口化）
     ↓
 internal/vfs             可写虚拟文件系统抽象（接口 + 本地磁盘实现）
     ↓
-internal/oscap           OS 能力抽象（port + 双适配器，见 §1.2 C9 / §5 P7，v0.3.0 落地）
+internal/oscap           OS 能力抽象（port + 双适配器，见 §1.2 C9 / §5 P7；port 层已落地）
       ├── native/        借助 OS 能力：xattr / 稀疏文件 / NTFS ADS / 平台 stat 扩展
       └── builtin/       只用「普通文件 + 套接字」自实现同一份语义
     ↓
