@@ -11,6 +11,22 @@ type Config struct {
 	Shares []Share `yaml:"shares"`
 	MDNS   MDNS    `yaml:"mdns"`
 	Log    Log     `yaml:"log"`
+
+	// FilesystemMode 决定 OS 能力（扩展属性、稀疏文件、命名流、稳定 FileID、
+	// 创建时间、DOS 属性）走原生实现还是本项目自带实现（AGENTS.md §1.2 C9）。
+	//
+	// 三态，默认 auto：
+	//   auto     —— 逐项探测宿主能力，能 native 就 native，不能就落到 builtin
+	//   native   —— 强制全部走 native；探测到某项不支持就**启动即报错**，不静默降级
+	//   portable —— 强制全部走 builtin，完全不碰 OS 的可选能力
+	//
+	// 是**全局策略**而非逐共享设置：它表达的是"这台机器上我们信不信任宿主能力"。
+	// 各共享的落点仍然逐个决定 —— 同一次运行里 /srv/ext4 可以走 native、
+	// /mnt/exfat 落到 builtin，因为探测是按共享根目录做的（oscap.SelectMatrix）。
+	//
+	// native 为什么要报错而不是降级：它的用途是在测试里**钉死走的是哪条路**，
+	// 一个会偷偷降级的 native 等于没有。
+	FilesystemMode string `yaml:"filesystem_mode"`
 }
 
 // Server 是服务器级设置。
@@ -169,4 +185,10 @@ const (
 	// DefaultSMB1Negotiate 是 Server.SMB1 的默认值：开启 SMB1 多协议协商入口。
 	// 只是协商入口，不含任何 SMB1 文件操作，见 Server.SMB1 字段注释。
 	DefaultSMB1Negotiate = true
+	// DefaultFilesystemMode 是 Config.FilesystemMode 的默认值。
+	//
+	// 这里写字面量而不是 oscap.DefaultMode.String()，是为了让它保持 const
+	// （配置默认值被谁在运行期改掉是很难查的一类 bug）。两处不漂移由
+	// TestDefaultFilesystemModeMatchesOscap 这条测试兜住。
+	DefaultFilesystemMode = "auto"
 )
