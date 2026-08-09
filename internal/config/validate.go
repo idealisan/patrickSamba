@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
 
@@ -146,6 +147,7 @@ func validateOn(c *Config, hostOS string) error {
 	var errs ValidationErrors
 
 	validateServer(c, &errs)
+	validateFilesystemMode(c, &errs)
 	validateListen(c, &errs)
 	validateShares(c, hostOS, &errs)
 	validateAuth(c, &errs)
@@ -221,6 +223,25 @@ func validateServer(c *Config, errs *ValidationErrors) {
 
 	if c.Server.MaxConnections < 0 {
 		errs.add("server.max_connections", "不能为负数（0 表示使用默认上限 256），当前 %d", c.Server.MaxConnections)
+	}
+}
+
+// validateFilesystemMode 校验 OS 能力抽象的三态开关（AGENTS.md §1.2 C9）。
+//
+// 判定**直接委托给 oscap.ParseMode**，不在这里另抄一份取值表：
+// 合法取值只能有一个真源。两处各写一份 switch 的下场是新增取值时改了一边、
+// 另一边静默拒绝（或静默放行），而这类漂移只有用户在现场才发现。
+//
+// oscap.ParseMode 刻意严格 —— 不 ToLower、不 trim、不认空串。空串在这里
+// 到不了：ApplyDefaults 会先填成 "auto"。真到了说明调用方跳过了 ApplyDefaults，
+// 那就该报错，而不是替它猜一个默认值（Validate 的契约就是"调用前先 ApplyDefaults"）。
+func validateFilesystemMode(c *Config, errs *ValidationErrors) {
+	if _, err := oscap.ParseMode(c.FilesystemMode); err != nil {
+		errs.add("filesystem_mode",
+			"非法取值 %q，可选值: %s"+
+				"（auto=逐项探测自动降级；native=强制原生、不支持则启动报错；"+
+				"portable=全部使用本项目自带实现，可移植性最高）",
+			c.FilesystemMode, strings.Join(oscap.ModeNames(), ", "))
 	}
 }
 
