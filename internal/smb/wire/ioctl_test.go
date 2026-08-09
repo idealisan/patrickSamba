@@ -273,3 +273,118 @@ func TestCtlCodeString(t *testing.T) {
 		t.Errorf("未知码 String = %q", got)
 	}
 }
+
+// TestSetSparseInput 覆盖 MS-FSCC §2.3.69 FILE_SET_SPARSE_BUFFER。
+//
+// 最关键的一条：**空输入等价于 TRUE**。macOS/Windows 都会发不带输入缓冲区的
+// FSCTL_SET_SPARSE，若默认按 false 处理，Time Machine 的 band 文件不会稀疏化。
+func TestSetSparseInput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want bool
+	}{
+		{"空输入视为 TRUE", nil, true},
+		{"零长切片视为 TRUE", []byte{}, true},
+		{"0x01 → TRUE", []byte{0x01}, true},
+		{"0xFF → TRUE（非 0 即真）", []byte{0xFF}, true},
+		{"0x00 → FALSE", []byte{0x00}, false},
+		{"多余字节忽略", []byte{0x01, 0xAA, 0xBB}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ParseSetSparseInput(c.in)
+			if err != nil {
+				t.Fatalf("ParseSetSparseInput: %v", err)
+			}
+			if got != c.want {
+				t.Errorf("= %v, 期望 %v", got, c.want)
+			}
+		})
+	}
+
+	// 编码侧固定 1 字节。
+	if b := EncodeSetSparseInput(true); len(b) != FileSetSparseBufferSize || b[0] != 1 {
+		t.Errorf("EncodeSetSparseInput(true) = % X", b)
+	}
+	if b := EncodeSetSparseInput(false); len(b) != FileSetSparseBufferSize || b[0] != 0 {
+		t.Errorf("EncodeSetSparseInput(false) = % X", b)
+	}
+	// 往返。
+	for _, want := range []bool{true, false} {
+		got, err := ParseSetSparseInput(EncodeSetSparseInput(want))
+		if err != nil || got != want {
+			t.Errorf("round-trip %v = %v, %v", want, got, err)
+		}
+	}
+	if FSCTLSetSparse != 0x000900C4 {
+		t.Errorf("FSCTL_SET_SPARSE = %#08x, 期望 0x000900C4", uint32(FSCTLSetSparse))
+	}
+}
+
+// TestAllocatedRangesArray 覆盖 MS-FSCC §2.3.20/§2.3.21 的数组语义与字节布局。
+func TestAllocatedRangesArray(t *testing.T) {
+	if FSCTLQueryAllocatedRanges != 0x000940CF {
+		t.Errorf("FSCTL_QUERY_ALLOCATED_RANGES = %#08x, 期望 0x000940CF", uint32(FSCTLQueryAllocatedRanges))
+	}
+
+	// 固定字节向量：两个区间，全部小端。
+	//   [0]  FileOffset = 0x0000000000002000 (8192)
+	//   [8]  Length     = 0x0000000000001000 (4096)
+	//   [16] FileOffset = 0x0000000100000000 (4 GiB，验证高 32 位不被截断)
+	//   [24] Length     = 0x0000000000000200 (512)
+	golden := []byte{
+		0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+	want := []FileAllocatedRangeBuffer{
+		{FileOffset: 8192, Length: 4096},
+		{FileOffset: 1 << 32, Length: 512},
+	}
+	if got := AppendAllocatedRanges(nil, want); !bytes.Equal(got, golden) {
+		t.Errorf("编码 = % X\n期望   = % X", got, golden)
+	}
+	got, err := ParseAllocatedRanges(golden)
+	if err != nil {
+		t.Fatalf("ParseAllocatedRanges: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("区间数 = %d, 期望 %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] = %+v, 期望 %+v", i, got[i], want[i])
+		}
+	}
+
+	// 空数组是合法应答（整段都是洞）。
+	if b := AppendAllocatedRanges(nil, nil); len(b) != 0 {
+		t.Errorf("空区间列表应编码为 0 字节, 实际 %d", len(b))
+	}
+	if r, err := ParseAllocatedRanges(nil); err != nil || r != nil {
+		t.Errorf("空输出应解析为 nil, 得到 %v, %v", r, err)
+	}
+	// 非 16 整数倍必须报错，不能越界读。
+	if _, err := ParseAllocatedRanges(golden[:20]); err == nil {
+		t.Error("长度非 16 整数倍应报错")
+	}
+
+	// 输入侧：负值与溢出都要拒绝（§2.3.20 处理规则）。
+	bad := make([]byte, FileAllocatedRangeBufferSize)
+	le.PutUint64(bad[0:], 1<<63) // FileOffset 解释为 INT64 是负数
+	if _, err := ParseAllocatedRangesInput(bad); err == nil {
+		t.Error("负 FileOffset 应报错")
+	}
+	le.PutUint64(bad[0:], 0)
+	le.PutUint64(bad[8:], 1<<63) // Length 为负
+	if _, err := ParseAllocatedRangesInput(bad); err == nil {
+		t.Error("负 Length 应报错")
+	}
+	le.PutUint64(bad[0:], 1<<62)
+	le.PutUint64(bad[8:], 1<<62+1) // 相加溢出 INT64
+	if _, err := ParseAllocatedRangesInput(bad); err == nil {
+		t.Error("offset+length 溢出应报错")
+	}
+}
