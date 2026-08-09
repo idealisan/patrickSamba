@@ -50,6 +50,12 @@ type Open struct {
 	// FileAttributes 是打开时的文件属性快照。
 	FileAttributes wire.FileAttributes
 
+	// shareModeKey / shareModeOn 记录本句柄在共享模式表里的登记位置
+	// （见 share_access.go）。只在 shareModeTable.add 里写一次，
+	// 此时句柄尚未进会话表、对其它 goroutine 不可见，之后只读。
+	shareModeKey shareModeKey
+	shareModeOn  bool
+
 	mu sync.Mutex
 
 	// deleteOnClose 表示关闭时删除目标（FILE_DELETE_ON_CLOSE 或
@@ -227,6 +233,16 @@ func (o *Open) close() {
 	o.Pipe = nil
 	o.pipeOut = nil
 	o.mu.Unlock()
+
+	// 摘除共享模式登记。这里是所有句柄消失路径的唯一汇合处
+	// （CLOSE / 连接断开 / TREE_DISCONNECT / LOGOFF / CREATE 回滚），
+	// 放在别处一定会漏掉某一条，那个文件就被永久锁死了。
+	//
+	// 必须在 o.mu 之外调用：判定路径是「表锁 → 读快照」，这里若反过来
+	// 持 o.mu 再取表锁，就凑齐了一个加锁顺序反转。
+	if o.shareModeOn && o.Tree != nil && o.Tree.Share != nil {
+		o.Tree.Share.shareModes.remove(o)
+	}
 
 	if h != nil {
 		_ = h.Close()

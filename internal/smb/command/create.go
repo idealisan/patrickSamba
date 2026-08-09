@@ -83,6 +83,24 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		}
 	}
 
+	// 共享模式预检（MS-SMB2 §3.3.5.9，算法见 share_access.go）。
+	//
+	// **必须在 fs.Open 之前**：FILE_SUPERSEDE / FILE_OVERWRITE* 会在 Open
+	// 内部就把文件截断，等打开成功再判定冲突时别人的数据已经没了。
+	// 目标不存在时 Stat 失败，此时不可能有已存在句柄，跳过即可 ——
+	// 真正权威的判定是下面 shareModes.add 里那次原子检查。
+	if access&conflictingAccess != 0 {
+		if a, serr := fs.Stat(path); serr == nil {
+			key := shareModeKey{fileID: a.FileID, stream: stream}
+			if st := ctx.Tree.Share.shareModes.check(key, access, req.ShareAccess); st != status.Success {
+				ctx.Log.Debug("CREATE 被共享模式拒绝（预检）",
+					"path", path, "stream", stream,
+					"access", uint32(access), "share", uint32(req.ShareAccess))
+				return st
+			}
+		}
+	}
+
 	openReq := &vfs.OpenRequest{
 		Path:           path,
 		Stream:         stream,
@@ -134,9 +152,24 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		CreateOptions:  req.CreateOptions,
 		FileAttributes: wire.FileAttributes(attr.FileAttributes),
 	}
+	// 权威的共享模式判定：判定与登记在同一次持锁内完成，收口并发竞态
+	// （两个 CREATE 同时通过预检的情形）。文件身份取自**已打开句柄**的
+	// Stat，而不是上面预检用的路径 Stat —— 两者之间目标可能被换掉。
+	if st := ctx.Tree.Share.shareModes.add(
+		shareModeKey{fileID: attr.FileID, stream: stream}, open); st != status.Success {
+		ctx.Log.Debug("CREATE 被共享模式拒绝",
+			"path", path, "stream", stream,
+			"access", uint32(access), "share", uint32(req.ShareAccess))
+		_ = h.Close()
+		return st
+	}
+
+	// ⚠️ 从这里往下的失败路径一律用 open.close() 而不是 h.Close()：
+	// 句柄已经登记进共享模式表，只关底层文件会把登记留在表里，
+	// 那个文件从此谁也打不开。
 	if req.CreateOptions&wire.FileDeleteOnClose != 0 {
 		if err := ctx.RequireWritable(); err != nil {
-			_ = h.Close()
+			open.close()
 			return err
 		}
 		open.SetDeleteOnClose(true)
@@ -146,7 +179,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	}
 
 	if st := ctx.Session.AddOpen(open); st != status.Success {
-		_ = h.Close()
+		open.close()
 		return st
 	}
 	ctx.Chain.LastOpen = open
