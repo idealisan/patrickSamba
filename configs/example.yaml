@@ -1,12 +1,25 @@
 # stupidSamba 配置示例
 #
-# 最小可用配置只需要 shares 一段，其余都有合理默认值。
+# 最小可用配置只需要 shares 一段，其余都有合理默认值：
+#
+#   shares:
+#     - name: public
+#       path: /srv/share/public
+#   auth:
+#     users:
+#       - name: alice
+#         password: "changeme"
+#
+# 本文件把每个可用字段都写了出来并逐条注释，按需删减即可。
+# 改完用 `stupidsamba -config <本文件> -check` 校验，它会一次性报出全部问题。
 
 server:
-  # NetBIOS/主机名，留空则使用系统主机名
+  # NetBIOS/主机名，出现在 NTLM TargetInfo 与 mDNS 里；留空则用系统主机名。
+  # 上限 15 字节，不能有空格和点。
   name: STUPIDSAMBA
+  # 工作组名，默认 WORKGROUP。本服务不做域控，这里只是个显示用的标签。
   domain: WORKGROUP
-  # 协商范围
+  # 方言协商范围，可选 2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1。
   min_dialect: "2.0.2"
   max_dialect: "3.1.1"
   # 是否响应 SMB1 多协议协商入口，**留空即默认 true**。
@@ -18,33 +31,52 @@ server:
   # 默认开启是为了兼容：impacket 等客户端默认先发 SMB1 协商，关掉就连不上。
   # 只有在你确信所有客户端都直接发 SMB2 时才需要设成 false。
   # smb1: true
+  # 强制 SMB 签名（防中间人篡改）。不强制时会有一条启动 WARN。
   signing_required: false
+  # 强制 SMB3 加密。需要 max_dialect >= 3.0。
   encryption_required: false
+  # 并发连接数上限，0 表示不限。
   max_connections: 0
 
 listen:
-  # 监听的 IP 列表，可以写多个；留空表示监听所有地址
+  # 监听的 IP 列表，可以写多个。
+  #
+  # 注意：**要监听全部地址就把整个 addresses 留空**（或整段删掉），
+  # 不要写 0.0.0.0 —— Go 的 tcp 监听是双栈的，通配地址已经把 IPv4 和 IPv6
+  # 一起占了，再并列任何地址（包括 "::"）都会 bind 失败。
+  # 配置校验会在启动前拦下这种写法。
   addresses:
-    - 0.0.0.0
-    - "::"
-  # 端口只允许一个，默认 445
+    - 127.0.0.1
+    - "::1"
+  # 端口只允许一个，默认 445。
+  # 445 是特权端口：非 root 需要 setcap 'cap_net_bind_service=+ep'，
+  # 或者改用 >=1024 的端口（客户端要显式指定，如 smbclient -p 4445）。
   port: 445
 
 auth:
-  # 生产环境请设为 false
+  # 允许匿名 / guest 登录。默认 false；开启会有一条启动 WARN。
+  # 注意 Windows 10/11 默认拒绝不安全的 guest 登录。
   allow_guest: false
+  # 静态用户表。账户完全由本软件管理，与宿主系统用户无关：
+  # 不读 /etc/passwd、不走 PAM/NSS，也不要求宿主上真的存在这些用户。
   users:
     - name: alice
+      # 明文口令与 nt_hash 二选一。用明文会有一条启动 WARN。
       password: "changeme"
+      # uid/gid 只是给 VFS 层用的数字标签，用于文件属主展示，不做系统用户解析。
       uid: 1000
       gid: 1000
-    # 也可以只提供 NT hash，避免明文口令落盘：
-    # - name: bob
-    #   nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
+    - name: bob
+      # nt_hash = MD4(UTF-16LE(口令))，32 位十六进制。推荐用它避免口令落盘。
+      # 下面这个是空口令的 hash，换成你自己的。
+      nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
+      uid: 1001
+      gid: 1001
 
-# 共享目录列表 —— 支持共享多个目录
+# 共享目录列表 —— 支持共享多个目录。
 shares:
   - name: public
+    # 必须是已存在的目录的绝对路径。
     path: /srv/share/public
     comment: "公共读写目录"
     read_only: false
@@ -54,38 +86,64 @@ shares:
     path: /srv/share/docs
     comment: "只读文档"
     read_only: true
+    # 限定可访问的用户；留空表示所有已认证用户。
+    # 这里列的名字必须在 auth.users 里定义过，否则校验不通过。
+    valid_users:
+      - alice
+      - bob
+
+  - name: private
+    path: /srv/share/private
+    comment: "不出现在共享列表里"
+    # 是否出现在共享枚举（smbclient -L、Finder 的 smb://host）中，默认 true。
+    # 设为 false 只是不列出来，知道名字的人照样连得上，不是访问控制。
+    browseable: false
+    valid_users:
+      - alice
 
   # 阶段二：Time Machine 备份目标
   - name: backup
     path: /srv/share/backup
     comment: "Time Machine"
+    # 宣告为 Time Machine 目标（进 mDNS 的 _adisk._tcp）。不能同时是只读。
     time_machine: true
-    time_machine_max_size: 0   # 0 表示不限制；仅用于 mDNS _adisk 广播，不影响 SMB 卷容量上报
+    # 只写进 mDNS _adisk 的 TXT，让 Finder 的「选择备份磁盘」界面显示容量；
+    # 不影响 SMB 卷容量上报。0 = 不填这个字段。
+    time_machine_max_size: 0
     # 向所有 SMB 客户端上报的卷容量上限（字节）。0 = 不限（按宿主真实剩余上报）。
-    # 主要影响 Time Machine：不设的话 TM 会一直写到把卷吃满。这不是强制配额，
-    # 只改上报数字，不阻止本地写入。例：2 TiB = 2199023255552
-    # quota_bytes: 2199023255552
+    # 主要影响 Time Machine：不设的话 TM 会一直写到把卷吃满。
+    # 这不是强制配额，只改上报的数字，不阻止本地写入。低于 1 GiB 会有 WARN。
+    # 例：2 TiB = 2199023255552
+    quota_bytes: 2199023255552
     # POSIX 元数据（uid/gid/mode）旁路存储的落盘路径。
     # **仅 Windows 使用**：NTFS 表达不了 POSIX 属主与权限位，需要一个纯 Go 的
     # 嵌入式 KV 旁路保存；Linux/macOS 原生能力足够，留空即可（填了会被忽略）。
-    # 建议放在共享目录之外，否则客户端会看到这个数据库文件。
+    # 建议放在共享目录之外，否则客户端会在共享里看到这个数据库文件。
     # metadata_path: "C:\\ProgramData\\stupidsamba\\backup-meta.db"
 
 mdns:
+  # 进程内 mDNS/DNS-SD 广播总开关。关掉服务照样能用，只是不会被自动发现。
+  # 本进程自己在 224.0.0.251:5353 / [ff02::fb]:5353 收发报文，
+  # 不依赖 avahi / Bonjour / systemd-resolved。
   enabled: true
-  # 服务实例名，留空则用 server.name
+  # 服务实例名（Finder 里显示的名字），留空则用 server.name。上限 63 字节，不能含点号。
   instance: ""
-  # 限定广播网卡，留空表示所有网卡
+  # 限定广播网卡名（如 ["eth0"]），留空表示所有可用网卡。
+  # 写了不存在的网卡名会在启动校验时报错。
   interfaces: []
   apple:
-    # 是否携带苹果生态对 SMB 的扩展字段
+    # 是否携带苹果生态对 SMB 的扩展记录（_device-info._tcp 等）。
     enabled: true
-    # 决定 Finder 侧边栏显示的图标
+    # 决定 Finder 侧边栏显示的图标，例如 MacSamba / Xserve / TimeCapsule8,119。
     model: "MacSamba"
-    # 广播 _adisk._tcp，让 Time Machine 能发现本服务
+    # 广播 _adisk._tcp，让 Time Machine 能发现本服务。
+    # 需要 apple.enabled: true，且至少有一个共享设了 time_machine: true。
     advertise_time_machine: true
 
 log:
+  # debug / info / warn / error
   level: info
+  # text / json
   format: text
+  # 日志文件绝对路径，留空输出到 stderr。所在目录必须已存在。
   file: ""
