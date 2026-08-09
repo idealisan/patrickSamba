@@ -665,8 +665,37 @@ func (i FsSectorSizeInfo) Encode() []byte {
 	return b
 }
 
-// FsObjectIDInfoSize 是 FileFsObjectIdInformation（MS-FSCC §2.5.6）的字节数。
+// FsObjectIDInfoSize 是 FileFsObjectIdInformation（MS-FSCC §2.5.6）的字节数：
+// ObjectId(16) + ExtendedInfo(48)。
 const FsObjectIDInfoSize = 64
+
+// FsObjectIDInfo 是 FileFsObjectIdInformation（MS-FSCC §2.5.6），固定 64 字节。
+//
+// ExtendedInfo 是 48 字节不透明数据，规范明确说明「客户端不得解释其内容」，
+// 全零是合法取值（Samba 在这里塞自己的版本号，我们不跟）。
+type FsObjectIDInfo struct {
+	ObjectID     [16]byte
+	ExtendedInfo [48]byte
+}
+
+// Encode 编码为 64 字节。
+func (i FsObjectIDInfo) Encode() []byte {
+	b := make([]byte, FsObjectIDInfoSize)
+	copy(b[0:], i.ObjectID[:])
+	copy(b[16:], i.ExtendedInfo[:])
+	return b
+}
+
+// ParseFsObjectIDInfo 解析 FileFsObjectIdInformation（供测试与 Go 客户端使用）。
+func ParseFsObjectIDInfo(data []byte) (FsObjectIDInfo, error) {
+	var i FsObjectIDInfo
+	if err := need(data, FsObjectIDInfoSize); err != nil {
+		return i, fmt.Errorf("FileFsObjectIdInformation: %w", err)
+	}
+	copy(i.ObjectID[:], data[0:16])
+	copy(i.ExtendedInfo[:], data[16:64])
+	return i, nil
+}
 
 func boolByte(v bool) byte {
 	if v {

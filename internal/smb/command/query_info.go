@@ -14,9 +14,17 @@ func init() {
 //
 // 只宣告我们真正做得到的。谎报能力（例如宣告支持 ACL / 压缩 / 加密）
 // 会让客户端发我们处理不了的请求；漏报则会让它保守降级。
-const fsAttributes = wire.FileCasePreservedNames |
+//
+// FILE_NAMED_STREAMS 与 FILE_SUPPORTS_SPARSE_FILES 是 Time Machine 的前置条件：
+// macOS 只有看到这两位才会去查 FileStreamInformation（AFP_Resource/AFP_AfpInfo）
+// 与发 FSCTL_SET_SPARSE / FSCTL_QUERY_ALLOCATED_RANGES（.sparsebundle 的 band 回收）。
+//
+// FILE_CASE_SENSITIVE_SEARCH 按卷的真实能力在 queryFsInfo 里动态清除。
+const fsAttributes = wire.FileCaseSensitiveSearch |
+	wire.FileCasePreservedNames |
 	wire.FileUnicodeOnDisk |
-	wire.FileSupportsSparseFiles
+	wire.FileSupportsSparseFiles |
+	wire.FileNamedStreams
 
 // fsName 是回给客户端的文件系统名。
 //
