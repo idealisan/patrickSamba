@@ -155,8 +155,31 @@ fi
 
 # ---------------------------------------------------------------- 3. 推送
 #
+# 推的是**当前分支**，不是写死的 main。
+#
+# 这里原先写死 `git push origin main`，在 v0.2.0 的「每人一个 worktree + 自己的
+# 分支」协作方式下是个静默数据丢失的坑：worktree 之间共享同一份 .git，
+# refspec `main` 解析的是**本地 main 分支**。于是在 qa/xxx 分支的 worktree 里跑
+# save.sh，提交落到 qa/xxx，推上去的却是别人的 main —— 命令打印「已推送」，
+# 自己的工作一个 commit 都没出去，等容器崩了才发现。
+# 顺带它也直接违反 AGENTS.md §7.3「禁止直接向 main 推送」。
+#
 # 用 mkdir 做互斥锁（mkdir 是原子的），避免多个 agent 同时 rebase 打架。
 # rebase 期间工作树会被短暂改写，并发进行会互相破坏。
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [ "$BRANCH" = "HEAD" ]; then
+    echo ">>> 当前处于分离 HEAD，拒绝推送。请先 git switch 到一个分支。" >&2
+    exit 1
+fi
+
+# rebase 的目标：自己的分支跟 origin/main 对齐；main 本身跟自己对齐。
+if [ "$BRANCH" = "main" ]; then
+    BASE=main
+else
+    BASE=main
+    echo ">>> 当前分支: $BRANCH（将推送到 origin/$BRANCH，按 §7.3 走 PR 合入 main）"
+fi
 
 LOCK="$REPO/.git/stupidsamba-push.lock"
 
@@ -186,17 +209,17 @@ acquire() {
 acquire || exit 1
 trap 'rm -rf "$LOCK"' EXIT INT TERM
 
-if git push -q origin main 2>/dev/null; then
-    echo ">>> 已推送"
+if git push -q -u origin "$BRANCH" 2>/dev/null; then
+    echo ">>> 已推送到 origin/$BRANCH"
     exit 0
 fi
 
 i=1
 while [ "$i" -le 6 ]; do
     echo ">>> 推送被拒，第 $i 次同步远端 ..." >&2
-    # --autostash 保护其他 agent 未提交的工作树改动
-    if git pull --rebase --autostash -q origin main && git push -q origin main; then
-        echo ">>> 已推送 (第 $i 次重试)"
+    # --autostash 保护未提交的工作树改动
+    if git pull --rebase --autostash -q origin "$BASE" && git push -q -u origin "$BRANCH"; then
+        echo ">>> 已推送到 origin/$BRANCH (第 $i 次重试)"
         exit 0
     fi
     # rebase 冲突要人工处理，不要静默重试掩盖问题

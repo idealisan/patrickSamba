@@ -48,6 +48,16 @@ $:
           script: |
             out=$(gofmt -l .)
             if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi
+        # 上面的 build / vet 都**不带 build tag**，而 test/ 下所有文件都带
+        # `//go:build integration` —— 于是它们从来没被编译过，语法错了照样绿。
+        # 同样中招的还有 internal/mdns/responder_integration_test.go。
+        # 另有第二个洞：`go build` 根本不编译 _test.go，所以下面的交叉编译那关
+        # 抓不到 internal/vfs/metadata_windows_test.go 这类平台专属测试文件。
+        # 这一关用 go vet（含测试文件）× 全部 tag × 全部平台把两个洞一起堵上。
+        # 两个洞都做过负向验证，见 test/ci/negative-verify.sh。
+        - &gate_test_compile
+          name: 测试代码编译校验（全部 build tag × 全部平台）
+          script: sh test/ci/check-test-compile.sh
         - &gate_constraints
           name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
           script: sh scripts/check-constraints.sh
@@ -98,6 +108,7 @@ $:
         - *gate_build
         - *gate_vet
         - *gate_gofmt
+        - *gate_test_compile
         - *gate_constraints
         - *gate_test
         - *gate_cross
@@ -132,6 +143,7 @@ $:
         - *gate_build
         - *gate_vet
         - *gate_gofmt
+        - *gate_test_compile
         - *gate_constraints
         - *gate_test
         - *gate_cross
