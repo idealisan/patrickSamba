@@ -41,12 +41,19 @@ func TestIoctlSetSparseEmptyInputMeansTrue(t *testing.T) {
 		t.Fatalf("SetSparse=TRUE 应成功，实际 err=%v", err)
 	}
 
-	// 显式 FALSE：POSIX 后端把它实现成无操作（回 ErrNotSupported 会让 macOS
-	// 直接放弃稀疏卷，见 vfs.SparseFile.SetSparse 的注释）。
+	// 显式 FALSE：POSIX 后端做不到「取消稀疏」，如实回 STATUS_NOT_SUPPORTED。
+	//
+	// 这里断言的是**失败**，不是笔误。我们的 FILE_ATTRIBUTE_SPARSE_FILE 由
+	// `Alloc < Size` 现算（vfs/attr.go），谎称取消成功会让客户端回头查属性时
+	// 照样看到 SPARSE 位；而真的取消就得把洞全填零，Time Machine band 会当场
+	// 从几 KiB 涨到 8 MiB。详见 ioctlSetSparse 的注释。
+	//
+	// 与 Samba 的分歧（它存 user.DOSATTRIB 的 bit，所以 FALSE 能成功）也记在
+	// 那里。没有已知客户端会发 FALSE，改动此断言前先确认是哪个客户端在发。
 	ctx.Out = ctx.Out[:0]
 	req.Input = []byte{0}
-	if err := ioctlSetSparse(ctx, req); err != nil {
-		t.Fatalf("SetSparse=FALSE 应成功（无操作），实际 err=%v", err)
+	if err := ioctlSetSparse(ctx, req); err != status.NotSupported {
+		t.Fatalf("SetSparse=FALSE err = %v, 期望 %v", err, status.NotSupported)
 	}
 }
 
@@ -235,6 +242,110 @@ func TestTruncateAllocatedRanges(t *testing.T) {
 	}
 }
 
+// TestIoctlQueryAllocatedRangesBufferTooSmall 验证「连一条区间都装不下」时
+// 回 STATUS_BUFFER_TOO_SMALL，而不是空输出 + BUFFER_OVERFLOW。
+//
+// 依据 Samba source3/smbd/smb2_ioctl_filesys.c:fsctl_qar：
+//
+//	/* must have enough space for at least one range */
+//	if (in_max_output < sizeof(struct file_alloced_range_buf)) {
+//		return NT_STATUS_BUFFER_TOO_SMALL;
+//	}
+//
+// 两者的区别对客户端不是无所谓的：BUFFER_OVERFLOW 是「还有更多，加大缓冲再来」，
+// 而空输出 + OVERFLOW 会被解释成「这段没有已分配区间」，客户端可能据此认为
+// 整个 band 都是洞。
+func TestIoctlQueryAllocatedRangesBufferTooSmall(t *testing.T) {
+	const size = 1 << 20
+	ctx, req := newSparseCtx(t, size)
+
+	req.CtlCode = wire.FSCTLQueryAllocatedRanges
+	req.Input = encodeAllocatedRangeInput(0, size)
+	// 15 字节：比一条 FILE_ALLOCATED_RANGE_BUFFER(16) 少一个字节。
+	req.MaxOutputResponse = allocatedRangeSize - 1
+
+	if err := ioctlQueryAllocatedRanges(ctx, req); err != status.BufferTooSmall {
+		t.Errorf("err = %v, 期望 %v", err, status.BufferTooSmall)
+	}
+	if ctx.Status == status.BufferOverflow {
+		t.Error("不应把「一条都装不下」报成 BUFFER_OVERFLOW")
+	}
+}
+
+// TestIoctlQueryAllocatedRangesEmptyBeatsBufferCheck 验证空结果的判定
+// **排在缓冲区大小检查之前**。
+//
+// Samba 的 fsctl_qar 里，`len == 0 / 文件为空 / file_off >= EOF` 这三种情况
+// 直接 `return NT_STATUS_OK`，根本走不到那句 BUFFER_TOO_SMALL。顺序反了的话，
+// 客户端拿 16 字节缓冲去问一段位于 EOF 之外的区间会收到错误而不是「没有区间」。
+func TestIoctlQueryAllocatedRangesEmptyBeatsBufferCheck(t *testing.T) {
+	const size = 4096
+	ctx, req := newSparseCtx(t, size)
+
+	req.CtlCode = wire.FSCTLQueryAllocatedRanges
+	// 查询窗口整个落在 EOF 之外：vfs.AllocatedRanges 契约保证回 nil, nil。
+	req.Input = encodeAllocatedRangeInput(size*2, size)
+	req.MaxOutputResponse = 8 // 故意小于一条区间
+
+	if err := ioctlQueryAllocatedRanges(ctx, req); err != nil {
+		t.Fatalf("EOF 之外的查询应成功，实际 err=%v", err)
+	}
+	if ctx.Status != 0 {
+		t.Errorf("ctx.Status = %v, 期望 STATUS_SUCCESS", ctx.Status)
+	}
+	if got := parseRangesFromIoctlOut(t, ctx.Out); len(got) != 0 {
+		t.Errorf("EOF 之外应无已分配区间，实际 %+v", got)
+	}
+}
+
+// TestIoctlQueryAllocatedRangesOverflowTruncates 验证 handler 层的截断语义：
+// 装得下 1 条但装不下全部时，回**整条**区间 + STATUS_BUFFER_OVERFLOW。
+//
+// TestTruncateAllocatedRanges 测的是纯函数，这里测的是 handler 有没有把
+// overflow 真的写进 ctx.Status —— 漏写的话客户端会以为自己拿到了完整列表。
+func TestIoctlQueryAllocatedRangesOverflowTruncates(t *testing.T) {
+	const size = 1 << 20
+	ctx, req := newSparseCtx(t, size)
+	open := ctx.Chain.LastOpen
+
+	// 中间打洞，制造「前段有数据 + 洞 + 后段有数据」两条区间。
+	sp := open.Handle.(vfs.SparseFile)
+	if err := sp.PunchHole(size/4, size/2); err != nil {
+		t.Fatalf("PunchHole: %v", err)
+	}
+
+	req.CtlCode = wire.FSCTLQueryAllocatedRanges
+	req.Input = encodeAllocatedRangeInput(0, size)
+	req.MaxOutputResponse = 4096
+	if err := ioctlQueryAllocatedRanges(ctx, req); err != nil {
+		t.Fatalf("QUERY_ALLOCATED_RANGES err=%v", err)
+	}
+	full := parseRangesFromIoctlOut(t, ctx.Out)
+	if len(full) < 2 {
+		// tmpfs / overlayfs 探测不到空洞时会降级成「整个窗口已分配」，
+		// 这是 vfs 层承诺的合法降级（不是 bug），此时无从构造截断场景。
+		t.Skipf("后端未报告多段区间（得到 %d 段），空洞探测可能已降级，跳过截断用例", len(full))
+	}
+
+	// 只给一条的空间：应回第一条原样 + BUFFER_OVERFLOW。
+	ctx.Out = ctx.Out[:0]
+	ctx.Status = 0
+	req.MaxOutputResponse = allocatedRangeSize
+	if err := ioctlQueryAllocatedRanges(ctx, req); err != nil {
+		t.Fatalf("截断场景不应返回错误，实际 err=%v", err)
+	}
+	if ctx.Status != status.BufferOverflow {
+		t.Errorf("ctx.Status = %v, 期望 %v", ctx.Status, status.BufferOverflow)
+	}
+	got := parseRangesFromIoctlOut(t, ctx.Out)
+	if len(got) != 1 {
+		t.Fatalf("截断后 = %d 条, 期望 1 条整", len(got))
+	}
+	if got[0] != full[0] {
+		t.Errorf("截断后的第一条 = %+v, 期望与完整结果的第一条一致 %+v", got[0], full[0])
+	}
+}
+
 // TestIoctlSparseRejectsReadOnlyShare：只读共享上的写类 FSCTL 必须被拒。
 func TestIoctlSparseRejectsReadOnlyShare(t *testing.T) {
 	ctx, req := newSparseCtx(t, 4096)
@@ -370,5 +481,11 @@ func parseRangesFromIoctlOut(t *testing.T, body []byte) []wire.FileAllocatedRang
 	if len(body) < ioctlRespFixed {
 		t.Fatalf("IOCTL 响应体 %d 字节，短于固定部分 %d", len(body), ioctlRespFixed)
 	}
-	return parseRanges(t, body[ioctlRespFixed:])
+	out := body[ioctlRespFixed:]
+	// 输出为空时报文里仍有 1 个字节的占位符：SMB2 的变长字段即使长度为 0
+	// 也要留一个字节，否则 Buffer 偏移会落在报文之外。这不是一条区间。
+	if len(out) <= 1 {
+		return nil
+	}
+	return parseRanges(t, out)
 }
