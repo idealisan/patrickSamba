@@ -76,6 +76,12 @@ $:
         - &gate_test
           name: 单元测试 (CGO_ENABLED=0，与交付形态一致)
           script: CGO_ENABLED=0 go test -count=1 ./...
+        # bolt.go 带 `//go:build windows || metabolt`，在 Linux 上只有 `-tags metabolt`
+        # 才能编译/执行。否则这块 393 行的 bbolt 实现（PR #26 的主体）在 CI 上
+        # 一行都不会被跑——和历史上 metadata_windows.go 的假绿是同一类病。
+        - &gate_metabolt
+          name: Windows 旁路元数据存储实测 (bolt.go 在 Linux 上只有靠 tag 才能执行)
+          script: CGO_ENABLED=0 go test -tags metabolt -count=1 ./internal/meta/...
         - &gate_race
           name: 竞态检测 (race 检测器依赖 cgo，故单独开 CGO_ENABLED=1)
           script: CGO_ENABLED=1 go test -race -count=1 ./...
@@ -130,6 +136,7 @@ $:
         - *gate_test_compile
         - *gate_constraints
         - *gate_test
+        - *gate_metabolt
         - *gate_race
         - *gate_cross
         - *gate_static
@@ -166,6 +173,7 @@ $:
         - *gate_test_compile
         - *gate_constraints
         - *gate_test
+        - *gate_metabolt
         - *gate_race
         - *gate_cross
         - *gate_static
