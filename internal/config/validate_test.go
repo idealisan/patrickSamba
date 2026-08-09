@@ -42,6 +42,21 @@ func assertInvalid(t *testing.T, c *Config, wants ...string) {
 	}
 }
 
+// assertWarn 断言 Warnings() 至少有一条告警，且全部期望关键字都出现。
+func assertWarn(t *testing.T, c *Config, wants ...string) {
+	t.Helper()
+	ws := Warnings(c)
+	if len(ws) == 0 {
+		t.Fatalf("期望有告警，实际一条都没有。配置: %+v", c)
+	}
+	joined := strings.Join(ws, "\n")
+	for _, w := range wants {
+		if !strings.Contains(joined, w) {
+			t.Errorf("告警缺少 %q，实际:\n%s", w, joined)
+		}
+	}
+}
+
 func TestValidateSharesRequired(t *testing.T) {
 	c := baseConfig(t)
 	c.Shares = nil
@@ -188,25 +203,33 @@ func TestValidateLogFileDirMissing(t *testing.T) {
 	}
 }
 
-// 要求加密时 min_dialect 低于 3.0 必须**启动报错**（不是告警、更不是悄悄抬高）。
+// 要求加密时 min_dialect 低于 3.0 不再**启动报错**——降级成 WARNING。
 //
-// 2.0.2/2.1 没有加密能力，协商阶段会被 fail closed 拒掉，
-// 用户在运行期只看到"连不上"，猜不到是这个组合导致的。
-func TestEncryptionRequiredRejectsLowMinDialect(t *testing.T) {
+// 原因（见 validate.go 注释）：这种配置是**可用**的，3.0+ 方言照常加密，
+// 只有落到 2.x 的客户端在运行期被协商层 fail closed（STATUS_ACCESS_DENIED）。
+// 若做成启动 ERROR，唯一能端到端触达 fail-closed 的组合
+// （encryption_required + min_dialect 2.0.2）就根本起不来，防线退化成只有单测覆盖。
+// 这里断言：配置**合法可启动**，但 Warnings() 必须点名这个组合并告诉用户怎么改。
+func TestEncryptionRequiredWarnsLowMinDialect(t *testing.T) {
 	c := baseConfig(t)
 	c.Server.EncryptionRequired = true
 	c.Server.MinDialect = "2.0.2"
 	c.Server.MaxDialect = "3.1.1"
-	// 错误里必须带字段路径，并直接告诉用户改成什么。
-	assertInvalid(t, c, "server.min_dialect", "不能低于 3.0")
+	if err := Validate(c); err != nil {
+		t.Fatalf("要求加密 + min_dialect 2.0.2 应当合法（只告警不报错），实际: %v", err)
+	}
+	assertWarn(t, c, "min_dialect", "3.0", "STATUS_ACCESS_DENIED")
 
 	c = baseConfig(t)
 	c.Server.EncryptionRequired = true
 	c.Server.MinDialect = "2.1"
 	c.Server.MaxDialect = "3.1.1"
-	assertInvalid(t, c, "server.min_dialect", "encryption_required")
+	if err := Validate(c); err != nil {
+		t.Fatalf("要求加密 + min_dialect 2.1 应当合法（只告警不报错），实际: %v", err)
+	}
+	assertWarn(t, c, "min_dialect", "encryption_required")
 
-	// 抬到 3.0 之后就合法了。
+	// 抬到 3.0 之后既合法也无此告警。
 	c = baseConfig(t)
 	c.Server.EncryptionRequired = true
 	c.Server.MinDialect = "3.0"
@@ -214,8 +237,11 @@ func TestEncryptionRequiredRejectsLowMinDialect(t *testing.T) {
 	if err := Validate(c); err != nil {
 		t.Fatalf("min_dialect=3.0 + 要求加密应当合法，实际: %v", err)
 	}
+	if ws := strings.Join(Warnings(c), "\n"); strings.Contains(ws, "min_dialect") {
+		t.Fatalf("min_dialect=3.0 不应再告警，实际:\n%s", ws)
+	}
 
-	// 不要求加密时，低 min_dialect 一切照旧。
+	// 不要求加密时，低 min_dialect 既合法也无此告警。
 	c = baseConfig(t)
 	c.Server.MinDialect = "2.0.2"
 	if err := Validate(c); err != nil {
@@ -223,24 +249,19 @@ func TestEncryptionRequiredRejectsLowMinDialect(t *testing.T) {
 	}
 }
 
-// 默认 min_dialect 是 2.0.2，所以「只写 encryption_required: true」会直接
-// 启动失败 —— 这是有意为之的 fail fast，但错误必须让人一眼知道怎么办。
-func TestEncryptionRequiredWithDefaultMinDialectFailsLoudly(t *testing.T) {
+// 默认 min_dialect 是 2.0.2，所以「只写 encryption_required: true」会触发告警
+// （不再是启动失败）。这是有意为之的 fail fast 的温和版：用户第一次用就撞墙太凶，
+// WARN + 运行期拒绝才是合理的默认体验。告警必须让人一眼知道怎么办。
+func TestEncryptionRequiredWithDefaultMinDialectWarns(t *testing.T) {
 	c := baseConfig(t)
 	c.Server.MinDialect = DefaultMinDialect
 	c.Server.MaxDialect = DefaultMaxDialect
 	c.Server.EncryptionRequired = true
 
-	err := Validate(c)
-	if err == nil {
-		t.Fatal("默认 min_dialect 低于 3.0，只开 encryption_required 应当启动失败")
+	if err := Validate(c); err != nil {
+		t.Fatalf("默认 min_dialect 低于 3.0 + 只开 encryption_required 应当合法（只告警），实际: %v", err)
 	}
-	msg := err.Error()
-	for _, want := range []string{"server.min_dialect", "3.0", "encryption_required"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("错误信息缺少 %q，无法指导用户修改:\n%s", want, msg)
-		}
-	}
+	assertWarn(t, c, "min_dialect", "3.0", "encryption_required")
 }
 
 func TestWarningsSharePathOverlap(t *testing.T) {
