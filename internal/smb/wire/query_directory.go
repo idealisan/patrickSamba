@@ -1,6 +1,9 @@
 package wire
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
 // ---------------------------------------------------------------------------
 // QUERY_DIRECTORY Request（MS-SMB2 §2.2.33）
@@ -192,6 +195,22 @@ type DirEntry struct {
 	FileID uint64
 	// ShortName 是 8.3 短名，可为空（现代客户端不依赖它）。
 	ShortName string
+	// ShortNameRaw 非 nil 时**直接覆盖** ShortName 的 24 字节字段（不做 UTF-16
+	// 编码），并把 ShortNameLength 填成 len(ShortNameRaw)；此时 ShortName 被忽略。
+	// 超过 24 字节返回错误。
+	//
+	// 用途：Apple 的 AAPL readdir_attr 把 FileIdBothDirectoryInformation 里这
+	// 24 字节挪作他用（Samba vfs_fruit `readdir_attr` 的布局）：
+	//
+	//	[0:8]   资源派生（AFP_Resource）大小，**小端** uint64
+	//	[8:24]  压缩后的 16 字节 FinderInfo
+	//
+	// 同时 ShortNameLength 填 24（Samba 是 `SSVAL(p, 0, 24)`，即长度字节 24、
+	// 后面的 Reserved1 为 0）。
+	//
+	// 解析侧会填充本字段：取 ShortName 字段前 ShortNameLength 个字节的副本
+	// （ShortNameLength 为 0 时留 nil），因此「解析→再编码」是无损的。
+	ShortNameRaw []byte
 	// Name 是文件名（不含路径）。
 	Name string
 }
@@ -268,11 +287,20 @@ func AppendDirEntry(dst []byte, class FileInfoClass, e DirEntry) ([]byte, error)
 		// f[68:72] Reserved
 		le.PutUint64(f[72:], e.FileID)
 	case FileBothDirectoryInformation:
+		// MS-FSCC §2.4.8：64 EaSize(4) 68 ShortNameLength(1) 69 Reserved1(1)
+		//                 70 ShortName(24) → 固定部分 94 字节。
 		le.PutUint32(f[64:], e.EaSize)
-		putShortName(f[68:], e.ShortName)
+		if err := putShortName(f[68:], e); err != nil {
+			return nil, err
+		}
 	case FileIdBothDirectoryInformation:
+		// MS-FSCC §2.4.17：在 §2.4.8 的基础上多了
+		//                 94 Reserved2(2) 96 FileId(8) → 固定部分 104 字节。
+		// ⚠️ 68 后面的 Reserved1(1) 与 94 处的 Reserved2(2) 是最容易漏写/多写的两处。
 		le.PutUint32(f[64:], e.EaSize)
-		putShortName(f[68:], e.ShortName)
+		if err := putShortName(f[68:], e); err != nil {
+			return nil, err
+		}
 		// f[94:96] Reserved2
 		le.PutUint64(f[96:], e.FileID)
 	}
@@ -280,18 +308,31 @@ func AppendDirEntry(dst []byte, class FileInfoClass, e DirEntry) ([]byte, error)
 	return dst, nil
 }
 
-// putShortName 写入 ShortNameLength(1) + Reserved(1) + ShortName(24)。
-// 超长的短名直接截断（8.3 名最多 12 个 UTF-16 码元）。
-func putShortName(f []byte, short string) {
-	if short == "" {
-		return
+// putShortName 写入 ShortNameLength(1) + Reserved1(1) + ShortName(24)。
+//
+// e.ShortNameRaw 非 nil 时原样写入这 24 字节（AAPL readdir_attr 会用），
+// 否则把 e.ShortName 编码成 UTF-16LE；超长的短名直接截断
+// （8.3 名最多 12 个 UTF-16 码元）。
+func putShortName(f []byte, e DirEntry) error {
+	if e.ShortNameRaw != nil {
+		if len(e.ShortNameRaw) > shortNameFieldSize {
+			return fmt.Errorf("%w: ShortNameRaw %d 字节超过 %d",
+				ErrMalformed, len(e.ShortNameRaw), shortNameFieldSize)
+		}
+		f[0] = byte(len(e.ShortNameRaw))
+		copy(f[2:], e.ShortNameRaw)
+		return nil
 	}
-	b := EncodeUTF16LE(short)
+	if e.ShortName == "" {
+		return nil
+	}
+	b := EncodeUTF16LE(e.ShortName)
 	if len(b) > shortNameFieldSize {
 		b = b[:shortNameFieldSize]
 	}
 	f[0] = byte(len(b))
 	copy(f[2:], b)
+	return nil
 }
 
 // DirEntryWriter 按 information class 生成目录项链，负责 **8 字节对齐**、
@@ -398,9 +439,11 @@ func ParseDirEntries(b []byte, class FileInfoClass) ([]DirEntry, error) {
 			case FileBothDirectoryInformation:
 				e.EaSize = le.Uint32(f[64:])
 				e.ShortName, _ = DecodeUTF16LE(f[70 : 70+min(int(f[68]), shortNameFieldSize)])
+				e.ShortNameRaw = bytes.Clone(f[70 : 70+min(int(f[68]), shortNameFieldSize)])
 			case FileIdBothDirectoryInformation:
 				e.EaSize = le.Uint32(f[64:])
 				e.ShortName, _ = DecodeUTF16LE(f[70 : 70+min(int(f[68]), shortNameFieldSize)])
+				e.ShortNameRaw = bytes.Clone(f[70 : 70+min(int(f[68]), shortNameFieldSize)])
 				e.FileID = le.Uint64(f[96:])
 			}
 		}

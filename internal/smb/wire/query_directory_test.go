@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"testing"
 )
 
@@ -270,5 +271,174 @@ func TestParseDirEntriesMalformed(t *testing.T) {
 	le.PutUint32(buf[60:], 0xFFFF)
 	if _, err := ParseDirEntries(buf, FileDirectoryInformation); err == nil {
 		t.Error("FileNameLength 越界应报错")
+	}
+}
+
+// TestFileIdBothDirectoryInformationLayout 逐字段锁死 MS-FSCC §2.4.17 的偏移。
+//
+//	 0 NextEntryOffset(4)   32 ChangeTime(8)       64 EaSize(4)
+//	 4 FileIndex(4)         40 EndOfFile(8)        68 ShortNameLength(1)
+//	 8 CreationTime(8)      48 AllocationSize(8)   69 Reserved1(1)   ← 易漏
+//	16 LastAccessTime(8)    56 FileAttributes(4)   70 ShortName(24)
+//	24 LastWriteTime(8)     60 FileNameLength(4)   94 Reserved2(2)   ← 易漏
+//	                                               96 FileId(8)
+//	                                              104 FileName(变长)
+//
+// 69 处的 Reserved1 与 94 处的 Reserved2 是最容易少写/多写的两个字段，
+// 写错会让 FileId 与 FileName 整体错位，macOS Finder 表现为目录项乱码。
+func TestFileIdBothDirectoryInformationLayout(t *testing.T) {
+	e := DirEntry{
+		FileIndex:      0x11223344,
+		CreationTime:   0x0102030405060708,
+		LastAccessTime: 0x1112131415161718,
+		LastWriteTime:  0x2122232425262728,
+		ChangeTime:     0x3132333435363738,
+		EndOfFile:      0x4142434445464748,
+		AllocationSize: 0x5152535455565758,
+		FileAttributes: FileAttributeArchive,
+		EaSize:         0x61626364,
+		FileID:         0x7172737475767778,
+		ShortName:      "AB", // 4 字节 UTF-16LE
+		Name:           "ab", // 4 字节 UTF-16LE
+	}
+	b, err := AppendDirEntry(nil, FileIdBothDirectoryInformation, e)
+	if err != nil {
+		t.Fatalf("AppendDirEntry: %v", err)
+	}
+	if len(b) != dirInfoFixedIDBothDir+4 {
+		t.Fatalf("长度 = %d, 期望 %d", len(b), dirInfoFixedIDBothDir+4)
+	}
+	if dirInfoFixedIDBothDir != 104 {
+		t.Fatalf("固定部分 = %d, MS-FSCC §2.4.17 要求 104", dirInfoFixedIDBothDir)
+	}
+
+	checks := []struct {
+		off  int
+		size int
+		want uint64
+		name string
+	}{
+		{0, 4, 0, "NextEntryOffset"},
+		{4, 4, 0x11223344, "FileIndex"},
+		{8, 8, 0x0102030405060708, "CreationTime"},
+		{16, 8, 0x1112131415161718, "LastAccessTime"},
+		{24, 8, 0x2122232425262728, "LastWriteTime"},
+		{32, 8, 0x3132333435363738, "ChangeTime"},
+		{40, 8, 0x4142434445464748, "EndOfFile"},
+		{48, 8, 0x5152535455565758, "AllocationSize"},
+		{56, 4, uint64(FileAttributeArchive), "FileAttributes"},
+		{60, 4, 4, "FileNameLength"},
+		{64, 4, 0x61626364, "EaSize"},
+		{68, 1, 4, "ShortNameLength"},
+		{69, 1, 0, "Reserved1"},
+		{94, 2, 0, "Reserved2"},
+		{96, 8, 0x7172737475767778, "FileId"},
+	}
+	for _, c := range checks {
+		var got uint64
+		switch c.size {
+		case 1:
+			got = uint64(b[c.off])
+		case 2:
+			got = uint64(le.Uint16(b[c.off:]))
+		case 4:
+			got = uint64(le.Uint32(b[c.off:]))
+		case 8:
+			got = le.Uint64(b[c.off:])
+		}
+		if got != c.want {
+			t.Errorf("偏移 %d %s = %#x, 期望 %#x", c.off, c.name, got, c.want)
+		}
+	}
+	// ShortName 从 70 开始，"AB" 的 UTF-16LE 是 41 00 42 00，其余 20 字节补零。
+	if !bytes.Equal(b[70:94], []byte{'A', 0, 'B', 0,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) {
+		t.Errorf("ShortName 字段 = % X", b[70:94])
+	}
+	// FileName 紧跟固定部分，从 104 开始。
+	if !bytes.Equal(b[104:], []byte{'a', 0, 'b', 0}) {
+		t.Errorf("FileName = % X", b[104:])
+	}
+}
+
+// TestDirEntryShortNameRaw 覆盖 AAPL readdir_attr 需要的「整段 24 字节自定义」
+// 能力：Samba vfs_fruit 把 ShortName 字段改写成
+// 资源派生大小(8B 小端) + 压缩 FinderInfo(16B)，ShortNameLength 填 24。
+func TestDirEntryShortNameRaw(t *testing.T) {
+	var raw [24]byte
+	le.PutUint64(raw[0:8], 0x0000000000123456) // 资源派生大小
+	copy(raw[8:24], []byte("FINDERINFO-16BY!"))
+
+	e := DirEntry{
+		Name:         "a.txt",
+		EaSize:       0x001F01FF, // AAPL 下这里是 max_access
+		FileID:       42,
+		ShortName:    "IGNORED~1.TXT", // ShortNameRaw 非 nil 时必须被忽略
+		ShortNameRaw: raw[:],
+	}
+	b, err := AppendDirEntry(nil, FileIdBothDirectoryInformation, e)
+	if err != nil {
+		t.Fatalf("AppendDirEntry: %v", err)
+	}
+	if b[68] != 24 {
+		t.Errorf("ShortNameLength = %d, 期望 24", b[68])
+	}
+	if b[69] != 0 {
+		t.Errorf("Reserved1 = %d, 期望 0", b[69])
+	}
+	if !bytes.Equal(b[70:94], raw[:]) {
+		t.Errorf("ShortName 字段 = % X, 期望 % X", b[70:94], raw[:])
+	}
+	if le.Uint32(b[64:]) != 0x001F01FF {
+		t.Errorf("EaSize(max_access) = %#x", le.Uint32(b[64:]))
+	}
+	if le.Uint16(b[94:]) != 0 {
+		t.Error("Reserved2 必须留 0（不实现 NFS ACE）")
+	}
+	if le.Uint64(b[96:]) != 42 {
+		t.Errorf("FileId = %d", le.Uint64(b[96:]))
+	}
+
+	// 解析→再编码必须无损。
+	got, err := ParseDirEntries(b, FileIdBothDirectoryInformation)
+	if err != nil {
+		t.Fatalf("ParseDirEntries: %v", err)
+	}
+	if len(got) != 1 || !bytes.Equal(got[0].ShortNameRaw, raw[:]) {
+		t.Fatalf("ShortNameRaw 未还原: %+v", got)
+	}
+	again, err := AppendDirEntry(nil, FileIdBothDirectoryInformation, got[0])
+	if err != nil {
+		t.Fatalf("重新编码: %v", err)
+	}
+	if !bytes.Equal(again, b) {
+		t.Errorf("解析→编码不无损\n got=% X\nwant=% X", again, b)
+	}
+
+	// 普通短名的解析→编码同样要无损（ShortNameLength 不能被改成 24）。
+	plain, err := AppendDirEntry(nil, FileBothDirectoryInformation,
+		DirEntry{Name: "longfilename.txt", ShortName: "LONGFI~1.TXT"})
+	if err != nil {
+		t.Fatalf("AppendDirEntry 普通短名: %v", err)
+	}
+	pe, err := ParseDirEntries(plain, FileBothDirectoryInformation)
+	if err != nil {
+		t.Fatalf("ParseDirEntries 普通短名: %v", err)
+	}
+	if pe[0].ShortName != "LONGFI~1.TXT" {
+		t.Errorf("ShortName = %q", pe[0].ShortName)
+	}
+	pb, err := AppendDirEntry(nil, FileBothDirectoryInformation, pe[0])
+	if err != nil {
+		t.Fatalf("重新编码普通短名: %v", err)
+	}
+	if !bytes.Equal(pb, plain) {
+		t.Errorf("普通短名解析→编码不无损\n got=% X\nwant=% X", pb, plain)
+	}
+
+	// 超过 24 字节必须报错，不能越界写坏后面的 Reserved2/FileId。
+	if _, err := AppendDirEntry(nil, FileIdBothDirectoryInformation,
+		DirEntry{Name: "x", ShortNameRaw: make([]byte, 25)}); err == nil {
+		t.Error("ShortNameRaw 超过 24 字节应报错")
 	}
 }
