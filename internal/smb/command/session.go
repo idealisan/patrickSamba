@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
+	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 )
 
@@ -39,6 +40,8 @@ type Session struct {
 	encryptKey []byte
 	// decryptKey 用于解密**客户端发来**的消息（C2S）。
 	decryptKey []byte
+	// encNonce 是 S2C 加密用的**单调递增** nonce 计数器（MS-SMB2 §3.1.4.3）。
+	encNonce *crypto.NonceCounter
 
 	// signingRequired 表示本会话的请求必须带有效签名。
 	signingRequired bool
@@ -189,6 +192,20 @@ func (s *Session) SetEncryptData(v bool) {
 	s.mu.Lock()
 	s.encryptData = v
 	s.mu.Unlock()
+}
+
+// NextEncryptNonce 返回下一个 S2C 加密 nonce（单调递增，绝不重复）。
+//
+// 同一 (密钥, 方向) 下 nonce 复用会直接泄露明文异或值（SMB3 CCM/GCM），
+// 因此必须在锁内推进计数器，禁止随机或重置。
+func (s *Session) NextEncryptNonce() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.encNonce == nil {
+		s.encNonce = &crypto.NonceCounter{}
+	}
+	n := s.encNonce.Next()
+	return n[:]
 }
 
 // PreauthHash 返回会话级 preauth integrity hash。
