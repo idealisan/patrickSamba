@@ -135,14 +135,14 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 > export CNB_TOKEN=<你的个人访问令牌>
 > ```
 
-v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
+最新版本 **v0.2.0** 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 
 - **Release 页（推荐，普通用户点这里下载）**：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.1.0`
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.2.0`
   页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
 - **原始文件直链（给脚本 / CI 用）**：
-  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.1.0/SHA256SUMS`）。
+  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0/stupidsamba_v0.2.0_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.2.0/SHA256SUMS`）。
   注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
   最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
   ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
@@ -152,32 +152,67 @@ v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 
 | 平台 | 文件 |
 |---|---|
-| Linux x86-64 | `stupidsamba_v0.1.0_linux_amd64.tar.gz` |
-| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.1.0_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `stupidsamba_v0.1.0_darwin_arm64.tar.gz` |
-| Windows x86-64 | `stupidsamba_v0.1.0_windows_amd64.zip` |
+| Linux x86-64 | `stupidsamba_v0.2.0_linux_amd64.tar.gz` |
+| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.2.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `stupidsamba_v0.2.0_darwin_arm64.tar.gz` |
+| Windows x86-64 | `stupidsamba_v0.2.0_windows_amd64.zip` |
 
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0
+BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0
 
 # 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
-  -o stupidsamba_v0.1.0_linux_amd64.tar.gz \
-  "$BASE/stupidsamba_v0.1.0_linux_amd64.tar.gz"
+  -o stupidsamba_v0.2.0_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_v0.2.0_linux_amd64.tar.gz"
 
 # 校验完整性
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
 
-tar -xzf stupidsamba_v0.1.0_linux_amd64.tar.gz
-./stupidsamba_v0.1.0_linux_amd64/stupidsamba -config stupidsamba_v0.1.0_linux_amd64/configs/example.yaml
+tar -xzf stupidsamba_v0.2.0_linux_amd64.tar.gz
+./stupidsamba_v0.2.0_linux_amd64/stupidsamba -config stupidsamba_v0.2.0_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
 
-> 说明：Release 页面上同时保留 `v0.1.0-test` 条目，那是本版本发布流程的**验证记录**
-> （含预发布与多客户端验收产物），**请勿下载使用**。正式可用的版本是 **`v0.1.0`**。
+> 说明：Release 页面上同时保留 `v0.1.0` 与 `v0.1.0-test` 条目。
+> `v0.1.0-test` 是发布流程的**验证记录**，**请勿下载使用**；`v0.1.0` 是上一个版本。
+
+### 方式一之二：Docker 镜像（NAS / 家庭服务器推荐）
+
+v0.2.0 起每个版本同时发布**多架构容器镜像**（`linux/amd64` + `linux/arm64`），
+基础镜像是 `scratch`——镜像里只有一个静态二进制和一份配置，没有 shell、没有包管理器。
+
+```sh
+# 试跑：内置配置开着 guest 匿名读写，所以刻意只发布在回环地址上
+docker run -d --name stupidsamba \
+  -p 127.0.0.1:4445:445 \
+  -v /你的目录:/data \
+  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+
+smbclient //127.0.0.1/public -p 4445 -N -m SMB3 -c ls
+```
+
+⚠️ **内置配置 [`configs/docker.yaml`](configs/docker.yaml) 是试用配置，不要直接用于生产**：
+它开着 guest 匿名读写。正式使用请挂载自己的配置覆盖它：
+
+```sh
+docker run -d --name stupidsamba \
+  -p 445:445 \
+  -v /你的目录:/data \
+  -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro \
+  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+```
+
+两点须知：
+
+- **mDNS 在默认桥接网络下无效，因此内置配置里是关的。** 组播报文出不了 docker0 网桥，
+  就算出得去，广播的也是容器内部的 172.17.x.x 地址，客户端照着连必然失败。
+  要让 Finder / 资源管理器自动发现，用 `--network host` 起容器，
+  并挂载一份把 `mdns.enabled` 改成 `true` 的配置。
+- 容器内固定监听 445。要用非特权端口就改**宿主侧**的映射（`-p 4445:445`），
+  不要改容器内端口。
 
 ### 方式二：从源码构建
 
@@ -191,9 +226,15 @@ CGO_ENABLED=0 go build -o stupidsamba ./cmd/stupidsamba
 
 ```sh
 go build -trimpath \
-  -ldflags "-s -w -X main.version=v0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -ldflags "-s -w -X main.version=v0.2.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o stupidsamba ./cmd/stupidsamba
 ```
+
+> 版本号**没有硬编码在任何源文件里**：`cmd/stupidsamba/main.go` 里的默认值刻意是
+> `version = "dev"`，发布构建由 `scripts/build-release.sh` 经 `-ldflags -X` 注入，
+> 值来自 git tag（CI 里是 tag_push 事件的 `$CNB_BRANCH`）。
+> 所以「发新版本」= 打新 tag，不需要改代码；反过来，直接 `go build` 出来的二进制
+> `-version` 会显示 `dev`，一眼就能看出它不是发布产物。
 
 ### 四平台交叉编译
 
