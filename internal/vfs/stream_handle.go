@@ -335,10 +335,23 @@ func (h *streamHandle) WriteAt(p []byte, off int64) (int, error) {
 		// offset==0 && length==60 的写，其余一律 EINVAL。我们比它宽松，
 		// 保留分段写的缓冲能力（见下方），但只要某次写覆盖了完整的
 		// [0,60) 区间就必须立刻验。
-		if off == 0 && int64(len(p)) == AfpInfoSize {
-			if _, err := ParseAfpInfo(p); err != nil {
-				// 缓冲保持原值不动：一次非法写入不该破坏磁盘上的旧
-				// FinderInfo，也不该污染后续的合法分段写。
+		if off == 0 {
+			switch {
+			case int64(len(p)) == AfpInfoSize:
+				if _, err := ParseAfpInfo(p); err != nil {
+					// 缓冲保持原值不动：一次非法写入不该破坏磁盘上的旧
+					// FinderInfo，也不该污染后续的合法分段写。
+					return 0, ErrBadAfpInfo
+				}
+			case len(p) < len(afpSigPrefix):
+				// Samba fruit_pwrite_meta：`n < 3` 直接 EINVAL。
+				// 连签名都放不下的写一定是垃圾，早拒早好 ——
+				// 放进缓冲的话签名会被截断，最后在 flush 里失败，
+				// 而那个错误 CLOSE 承载不了，表现成数据无声蒸发。
+				return 0, ErrInvalidArg
+			case string(p[:len(afpSigPrefix)]) != afpSigPrefix:
+				// 同上，Samba 在 memcmp(data, "AFP", 3) 处就拦掉。
+				// 分段写的第一段必然带签名，所以这一检查不会误伤。
 				return 0, ErrBadAfpInfo
 			}
 		}

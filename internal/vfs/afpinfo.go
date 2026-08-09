@@ -54,6 +54,10 @@ const (
 
 	// afpSignature 是 "AFP\0" 的大端表示。
 	afpSignature uint32 = 0x41465000
+	// afpSigPrefix 是签名的前三个可打印字节。
+	// Samba 的 fruit_pwrite_meta 用 memcmp(data, "AFP", 3) 做早期拦截，
+	// 只比前三字节（第四字节是 NUL，写进 C 字符串字面量不便），照抄之。
+	afpSigPrefix = "AFP"
 	// afpVersion 是当前唯一被接受的版本号。
 	afpVersion uint32 = 0x00000100
 	// afpBackupTimeNever 表示「从未备份」。
