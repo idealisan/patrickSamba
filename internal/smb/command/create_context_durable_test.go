@@ -1,6 +1,7 @@
 package command
 
 import (
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"testing"
@@ -125,8 +126,13 @@ func TestDurableGrantV1NoPrecondition(t *testing.T) {
 	}
 }
 
-// 反向对照：v2 带 persistent flag，但本服务端无 CA 共享 → 整个 CREATE 失败。
-func TestDurableGrantV2PersistentRejected(t *testing.T) {
+// v2 带 persistent flag、本服务端无 CA 共享 → **忽略该位**，降级授予普通
+// durable v2，响应里的 persistent 位不置（§3.3.5.9.12，无失败出口）。
+//
+// 本用例原名 TestDurableGrantV2PersistentRejected，断言的是「整个 CREATE
+// 失败」。那个行为是错的：客户端顺手带上 persistent 位就连文件都打不开。
+// 改正依据见 create_context_durable.go 里的注释（含 Samba 的交叉验证）。
+func TestDurableGrantV2PersistentDegrades(t *testing.T) {
 	resetDurable()
 	ctx, _, _ := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 2, Volatile: 2, Path: "f.txt"}
@@ -142,12 +148,37 @@ func TestDurableGrantV2PersistentRejected(t *testing.T) {
 	if err := h.Parse(ctx, wire.CreateContextDH2Q, req.Contexts[0].Data); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	err := h.Registered(ctx, open)
-	if err != status.NotSupported {
-		t.Fatalf("persistent 应被拒(STATUS_NOT_SUPPORTED)，实际 %v", err)
+	if err := h.Registered(ctx, open); err != nil {
+		t.Fatalf("persistent 位应被忽略而非让 CREATE 失败，实得 %v", err)
 	}
-	if open.Durable != nil && open.Durable.Granted {
-		t.Error("persistent 被拒后不应留下授予状态")
+	if open.Durable == nil || !open.Durable.Granted {
+		t.Fatal("应降级授予普通 durable v2")
+	}
+	if !open.Durable.v2 {
+		t.Error("DH2Q 请求应授予 v2，不是 v1")
+	}
+
+	// 响应侧：必须回 DH2Q，且 Flags 里**不能**有 persistent 位 —— 否则等于
+	// 谎称授予了 persistent handle，客户端会据此放弃自己的重试逻辑。
+	resp := &wire.CreateResponse{}
+	if err := h.Respond(ctx, open, resp, nil); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if !hasCreateContext(resp.Contexts, wire.CreateContextDH2Q) {
+		t.Fatal("降级授予后应回 DH2Q 响应 context")
+	}
+	for _, c := range resp.Contexts {
+		if c.Name != wire.CreateContextDH2Q {
+			continue
+		}
+		// DurableResponseV2 线格式：Timeout(4) + Flags(4)，小端。
+		if len(c.Data) != 8 {
+			t.Fatalf("DH2Q 响应应为 8 字节，实得 %d", len(c.Data))
+		}
+		flags := binary.LittleEndian.Uint32(c.Data[4:8])
+		if flags&uint32(wire.DurableHandlePersistent) != 0 {
+			t.Errorf("响应里置了 persistent 位(flags=%#x) —— 谎称支持 persistent handle", flags)
+		}
 	}
 }
 

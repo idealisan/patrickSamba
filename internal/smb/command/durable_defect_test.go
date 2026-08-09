@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 )
 
@@ -26,6 +25,9 @@ import (
 //	remove 误删他人登记 → durable_qa_test.go TestQADurableRemoveChecksEntryOwnership
 //	超时回收不关句柄    → durable_qa_test.go TestQADurableExpiredEntryClosesHandle
 //	驱逐先于鉴权        → durable_qa_test.go TestQADurableEvictionRequiresAuthorization
+//	persistent 位打死 CREATE → durable_qa_test.go TestQADurablePersistentFlagDegrades
+//	                          （另见 create_context_durable_test.go
+//	                            TestDurableGrantV2PersistentDegrades，含响应侧断言）
 
 // --- 残留：无任何后续流量时，最后一批过期项不会被回收 ---
 
@@ -61,42 +63,5 @@ func TestQADefectExpiryHappensWithoutReconnect(t *testing.T) {
 
 	if n := len(durableRegistry.entries); n != 0 {
 		t.Errorf("超时后无人重连时登记表未被回收，仍有 %d 条 —— 没有后台回收者", n)
-	}
-}
-
-// --- 缺陷 3：DH2Q 的 persistent 位让整个 CREATE 失败 ---
-
-// TestQADefectPersistentFlagDegradesNotFails
-//
-// MS-SMB2 §3.3.5.9.12：DH2Q 里 SMB2_DHANDLE_FLAG_PERSISTENT 只有在
-// TreeConnect.Share.IsCA 且服务端宣告 SMB2_GLOBAL_CAP_PERSISTENT_HANDLES
-// 时才升级为 persistent；否则处理继续走普通 durable v2 授予流程，
-// **不是**让 CREATE 失败。当前实现直接返回 STATUS_NOT_SUPPORTED，
-// 会把「顺手带上 persistent 位」的客户端整个 CREATE 打掉（文件都打不开）。
-//
-// 判据：带 persistent 位 + batch oplock 应当降级授予普通 durable v2，
-// CREATE 成功。
-func TestQADefectPersistentFlagDegradesNotFails(t *testing.T) {
-	resetDurable()
-	conn := NewConn(&Settings{}, "test", "test")
-	ctx, s, tree := qaSession(t, conn, 1, "alice", "share")
-	open := qaAddOpen(t, s, tree, "f.txt", &fakeHandle{})
-
-	req := &wire.CreateRequest{
-		RequestedOplockLevel: wire.OplockLevelBatch,
-		Contexts: []wire.CreateContext{{
-			Name: wire.CreateContextDH2Q,
-			Data: (&wire.DurableRequestV2{Timeout: 10000, Flags: wire.DurableHandlePersistent}).Encode(),
-		}},
-	}
-	h := &durableHandler{req: req}
-	if err := h.Parse(ctx, wire.CreateContextDH2Q, req.Contexts[0].Data); err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if err := h.Registered(ctx, open); err != nil {
-		t.Fatalf("persistent 位应降级为普通 durable 而非让 CREATE 失败，实得 %v", err)
-	}
-	if open.Durable == nil || !open.Durable.Granted {
-		t.Error("降级后应授予普通 durable v2")
 	}
 }
