@@ -116,9 +116,9 @@ win-meta 澄清：那 1 行是把 `subtreeSkipByte` 由 `"0"` 改成 `"/"` 的**
 **所以不是丢失、不是违规，是我的快照误读。R2 在 win-meta 身上并未兑现。** 记一笔方法论：
 未提交改动可能是变异测试残留，下次先问「是不是测试残留」再记风险。
 
-### 6.4 当前开着的 PR（仅余 #26；#24/#25/#27/#28/#29 第 11 轮同步已合入）
+### 6.4 当前开着的 PR（#26 / #30 / #33 开着；#24/#25/#27/#28/#29 第 11 轮同步已合入）
 
-#18 / #20 / #21 / #22 / #23 已合入 `main`（`ef73b549`）。第 11 轮再合入 #24/#25/#27/#28/#29（main → `1acae3f`）。**现仅余 #26 开着**（见 §11）：
+#18 / #20 / #21 / #22 / #23 已合入 `main`（`ef73b549`）。第 11 轮再合入 #24/#25/#27/#28/#29（main → `1acae3f`）。**现开着：#26（conflict）、#30（win-vfs openhost 接缝）、#33（win-meta 分隔符收尾）**（见 §11）：
 
 | PR | 分支 | 主题 | 档 | 备注 |
 |---|---|---|---|---|
@@ -128,6 +128,8 @@ win-meta 澄清：那 1 行是把 `subtreeSkipByte` 由 `"0"` 改成 `"/"` 的**
 | #27 | `win-vfs` 系 | 抽 `IsWindowsSlash` 为分隔符唯一真源 | ✅ **已合入** | 名字词法相关 |
 | #28 | `qa-vfs` 系 | 变异测试（mutation testing） | ✅ **已合入** | team-lead 代开 |
 | #29 | `qa-proto` 系 | durable 缺陷复现用例 | ✅ **已合入** | team-lead 代开；另见 R12 |
+| #30 | `win-vfs/openhost-seam` | `openhost_windows.go` 接缝（R9 收口第一步） | 🟡 | owner=win-vfs，第二步 CreateFileW 暂缓 |
+| #33 | `win-meta` 系 | 分隔符收尾小 PR | 🟡 | win-meta 队列新增 |
 
 ### 6.5 qa 的 save.sh 修复已随 PR #22 合入
 
@@ -593,7 +595,7 @@ team-lead 就我转给 win-vfs 的对接要点下发两处订正，且 win-meta 
 
 ### 10.3 ⚠️ 两处需 team-lead 拍板的不一致（PM 已查出）
 1. **bucket 名不一致（已解决 · team-lead 第 11 轮推翻 PM 建议）**：PM 在 §10.3 建议「以 team-lead 的 `posix2` 为准、让 win-meta 改回」——**此建议已撤回并转达撤销**。team-lead 第 11 轮明确采纳 win-meta 实装的 **`posix.v2`**（带点），理由比 PM 原「避免撞库」更强：反方向安全降级（见 D6 新记理由）。已实装且 CI 已绿的字面量即为正确，为此再跑一轮 CI 换名是纯浪费。**PM 早先发给 win-meta 的「改回 posix2」指令作废。**
-2. **CI 实装者 vs 责任人不一致（已解决 · 选 (a)）**：team-lead 第 11 轮确认 **选 (a) 接受 #26 内的实装**。已核 `origin/qa-e2e/ci` 相对 main 对 `test/ci/check-test-compile.sh` 和 `.cnb.yml` **零 diff**——根本不存在撞车，只有一份实装；win-meta 把 `metabolt` 并进脚本 `KNOWN`/`TAGS`、与 `!windows` 同套，比 PM 原设想「带/不带 tag 各跑一次 vet」更简洁无死角。**win-meta 不必 revert、qa-e2e 不必重做**；今后 `.cnb.yml`/`test/ci/` 的改动归 qa-e2e 不变。
+2. **CI 实装者 vs 责任人不一致（已解决 · 归 #26）**：team-lead 第 11 轮直接对 win-meta 确认「`check-test-compile.sh` 的改法我采纳你的…这件事就**归你这个 PR 了**，我会通知 qa-e2e 别重复做」，且确认 qa-e2e 对 `check-test-compile.sh`/`.cnb.yml` **零 diff**。所以 #26 里的两处修复（`metabolt` 进 KNOWN/TAGS + `gate_metabolt`）**随 #26 合入、不 revert**；win-meta 以 team-lead 直接发给他的口径为准（与经 PM 中转的「`.cnb.yml`/`test/ci` 归 qa-e2e 专属」表面冲突，但 team-lead 已明确本次归 #26、今后变更归 qa-e2e，无实质矛盾）。板上记为「#26 内实装、team-lead 采纳、qa-e2e 不重复」。若 team-lead 改主意要挪给 qa-e2e 重做，会令 win-meta 从 #26 撤出（代价：metabolt 覆盖回退到零直到 qa-e2e 补上，team-lead 知情）。
 
 ### 10.4 环境观察（与 R2 相关）：编辑疑似被自动提交
 - win-meta 报告：他做完编辑后，git 里已是一个**已提交并 push 的 commit（`18d8d2b`）**——环境里似乎有自动提交/落盘机制，提交动作不在他显式控制下。内容是他 intended 的那批（8 文件已逐项核对），非丢失、非串扰。
@@ -612,12 +614,13 @@ team-lead 下发两处拍板、同步 5 个已合 PR、并新报两条重大风�
 ### 11.1 两处拍板（均推翻 PM 第 10 轮建议，原指令已撤回）
 
 1. **bucket 名用 `posix.v2`（带点），不退 `posix2`**——PM 第 10 轮建议「让 win-meta 改回 posix2」**已作废并转达撤销**。理由升级：原只为防止撞库；win-meta 补的「**反方向安全降级**」才是改名真正的价值——用户先跑 v0.2.0（21 字节记录，bucket=posix.v2）再回退 v0.1.0 旧二进制时，旧代码看不到 `posix` 这个 bucket → 判「无记录」→ 走安全默认，而**不是**把新记录按 12 字节旧格式解出垃圾 uid/gid/mode。**理由比名字字面量重要**，将来再改名须先满足这条。板上 D6 已改写：改名 = 不同于 `posix` 的新名（实装 posix.v2）、不迁移、记反方向降级理由。
-2. **CI 实装选 (a) 接受 #26 内的实装**——不令 qa-e2e 重做、不令 win-meta revert。已核 `origin/qa-e2e/ci` 对 `test/ci/check-test-compile.sh` 与 `.cnb.yml` **零 diff**，无撞车只有一份实装；win-meta 把 `metabolt` 并进脚本 `KNOWN`/`TAGS`、与 `!windows` 同套，比 PM 原设想更简洁无死角。**今后 `.cnb.yml`/`test/ci/` 改动仍归 qa-e2e**（§7.1）。
+2. **CI 实装归 #26 内（team-lead 直接口径）**——team-lead 直接对 win-meta：「`check-test-compile.sh` 的改法我采纳你的…这件事就**归你这个 PR 了**，我会通知 qa-e2e 别重复做」。已核 `origin/qa-e2e/ci` 对 `test/ci/check-test-compile.sh` 与 `.cnb.yml` **零 diff**，无撞车只有一份实装；win-meta 把 `metabolt` 并进脚本 `KNOWN`/`TAGS`、与 `!windows` 同套。故 #26 内修复随 #26 合入、不 revert；**今后 `.cnb.yml`/`test/ci/` 改动归 qa-e2e**（§7.1）——与「本次归 #26」无矛盾。详见 §10.3-2。
 
 ### 11.2 PR 同步（main → `1acae3f`）
 
 - ✅ #24（本看板，sha `986b1e0`）、#25（AGENTS.md §7.5）、#27（win-vfs `IsWindowsSlash`）、#28（qa-vfs 变异测试）、#29（qa-proto durable 缺陷复现，team-lead 代开）**全合入**。
 - ⚠️ **#26 现 `mergeable_state: conflict`（非 CI，CI 已绿）**：冲突仅两文件 `memory/MEMORY.md` 与 `memory/project_config_path_platform_semantics.md`。team-lead 已令 win-meta merge main 后按并集解掉（MEMORY.md 由 team-lead 维护，PM 不碰）。解完即可合。
+- 🟡 **#30（win-vfs/openhost-seam，`openhost_windows.go` 接缝，R9 收口第一步）**、**#33（win-meta 分隔符收尾小 PR）** 现开着，不阻塞主线。详见 §6.4。
 
 ### 11.3 🔴 头号技术风险 R12：durable handle 端到端是坏的
 
