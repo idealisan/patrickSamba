@@ -35,7 +35,9 @@ server:
   signing_required: false
   # 强制 SMB3 加密。需要 max_dialect >= 3.0。
   encryption_required: false
-  # 并发连接数上限，0 表示不限。
+  # 并发连接数上限。留空或填 0 表示使用内置默认值 **256**（不是"不限"）。
+  # 超过上限的新连接会被直接关闭。目前没有"完全不限"的选项，
+  # 要放宽就把这个数字调大。
   max_connections: 0
 
 listen:
@@ -63,7 +65,10 @@ auth:
     - name: alice
       # 明文口令与 nt_hash 二选一。用明文会有一条启动 WARN。
       password: "changeme"
-      # uid/gid 只是给 VFS 层用的数字标签，用于文件属主展示，不做系统用户解析。
+      # uid/gid 是**预留字段，当前版本没有任何效果**，可以整行删掉。
+      # 它们会被解析并带进认证身份，但没有任何代码消费：客户端看到的文件属主
+      # 在 Linux/macOS 上来自宿主文件系统的真实 stat，与这里填什么无关。
+      # 保留字段是为了将来接上属主映射；无论如何都不做系统用户解析。
       uid: 1000
       gid: 1000
     - name: bob
