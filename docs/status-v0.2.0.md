@@ -782,9 +782,9 @@ ad27691  test: 三客户端端到端冒烟套件 test/e2e/smoke.sh + 变异生�
 
 | # | 风险 | 现状 | 应对 |
 |---|---|---|---|
-| **R12** | durable handle（含本轮新查明的 data race） | 🔴 **仍是头号**，且已确证**卡住全队 CI**，影响面比第 11 轮判断的更大 | 修复已存在但未提交，见 §12.3 |
-| **R14** | **🔴 新增·门禁串行掩盖后续关卡**：第一道红灯让后面 7 关从未执行，「修好第一道」被误当成「全绿」 | 🔴 本轮实证：`main` 掩盖了真 race。这是 R1 的第三次同构复发 | 判据改为：**修红灯必须把整条链跑到底**，不能只验自己那一关。本看板今后每轮实跑全链 |
-| **R15** | **🟠 新增·「已推送」不等于「可编译」**：`go build` 不编译 `_test.go`，推上去的分支可以是坏的 | 🟠 本轮命中 `qa-proto` | 推送前跑 `sh test/ci/check-test-compile.sh`；建议 team-lead 定为全员纪律 |
+| **R12** | durable handle（含本轮新查明的 data race） | 🔴 第 12 轮：仍是头号，卡住全队 CI。**✅ 第 14 轮收口**：随 PR #40 合入 `0d60c68`，6 缺陷+data race 全修；main 第 ⑦ 关 race 已绿；唯一残留红用例 `TestQADefectExpiryHappensWithoutReconnect` 是 team-lead 刻意设计（不起常驻回收 goroutine），非缺陷 | 见 §12.3 / §14.5。B 块 durable 前置从「完成度 0%」恢复，仍待 TM 端到端实测才标 ✅ |
+| **R14** | **🔴 新增·门禁串行掩盖后续关卡**：第一道红灯让后面 7 关从未执行，「修好第一道」被误当成「全绿」 | 🔴 第 12 轮实证：`main` 掩盖了真 race。这是 R1 的第三次同构复发。**✅ 第 13 轮闭环**：#35+#40 合入后 main 整链绿 | 判据已固化：**修红灯必须把整条链跑到底**。本看板今后每轮实跑全链 |
+| **R15** | **🟠 新增·「已推送」不等于「可编译」**：`go build` 不编译 `_test.go`，推上去的分支可以是坏的 | 🟠 第 12 轮命中 `qa-proto`。**🔴 第 14 轮新增 bisect 地雷**：`0ad6441` 在 main 历史里，`go build` 绿但 `go vet` 红（create_context_durable_test.go:166 类型错），`git bisect run` 若只用 build 会误判 good | 推送前跑 `sh test/ci/check-test-compile.sh`；**bisect 脚本必须先跑 check-test-compile.sh（含 go vet），不过就 `git bisect skip`**（见 §14.3-③） |
 | **R7** | 无主分支/孤儿成果 | 🔴 **复发**：`qa-e2e` 2 个 A 块提交无人认领，仅存于磁盘 | 见 §12.6，待指派 |
 
 ### 12.9 待决事项（需 `team-lead` 拍板）
@@ -1017,13 +1017,102 @@ round-12 担心的 `qa-e2e/ci` 938 行冒烟套件（`ad27691`）并未丢失：
 |---|---|---|
 | D-新2（先合 #35） | ✅ 闭环 | #35 + #40 已合，main 绿 |
 | R12 data race | ✅ 闭环 | 随 #40 合入 main |
-| D-新1（qa-e2e 孤儿） | 🟡 进行中 | 分支级保全完成，待开 PR 落 main |
-| D-新6（#35 留 `TestQADefectDurableReconnectRebindsTree` 在 qadefect tag 后，与你此前点名回退的做法抵触） | ⏳ 仍待你复核 | 无新进展，#35 已合但口径未改；若维持现状，需你明确「此条可留在 tag 后」 |
-| #26 冲突 | ⚠️ 阻塞 | 低工作量，等 win-meta owner rebase（见 §13.4） |
-| qa-verify 双分支 | 🟡 关注 | 见 §13.6，防 acceptance.sh 双线冲突 |
+| D-新1（qa-e2e 孤儿） | 🟢 已开 PR | **PR #42 `qa-verify/rescue-e2e` 已开，mergeable**——孤儿抢救落 main 在即（见 §13.10） |
+| D-新6（#35 留 `TestQADefectDurableReconnectRebindsTree` 在 qadefect tag 后） | ✅ **前提错误，已更正撤回** | 见 §13.10：Round-1 把该用例塞进 tag 的尝试被你在定稿时 `git checkout` 还原，**从未进 #35 / main**；#35 终态只注册 tag 未动用例。qadefect tag 现仅含 1 条 `TestQADefectExpiryHappensWithoutReconnect`（红，系你裁定不起常驻回收 goroutine，非缺陷）。无需你拍板 |
+| #26 冲突 | ⚠️ 阻塞 | 低工作量，等 win-meta owner rebase（见 §13.4）；已发消息给 win-backend |
+| qa-verify 双/三分支 | 🟡 关注 | #38(e2e-ci) + #42(rescue-e2e) 两条 PR 都碰验收/集成测试区，加 `negative-matrix` 分支，防 acceptance.sh 双线冲突（见 §13.6 / §13.10） |
 
 ### 13.9 一句话结论
 
 **主干健康、进度高速、无停滞分支。唯一真正阻塞是 #26 的 3 文件低工作量冲突（等 win-meta owner 处理）；
 唯一需你拍板的是 D-新6（#35 的 tag 口径）。** 其余（孤儿抢救、qa-verify 双分支）均在 agent 手上正常推进。
+
+---
+
+## 第 14 轮：复核 fix-ci / qa-proto 两条确认信（PM 独立重验，非采信自述）
+
+收到 `fix-ci` 与 `qa-proto` 两条回函，核心是「#35 只动 CI 脚本、没碰测试文件」「归位方向认同你、与我无关」
+「D-新4/D-新6 交你拍板」「活二暂缓等 PM 通知」。PM 不采信自述，在干净工作树（`/tmp/mainverify` @ `0d60c68`
+= `origin/main` tip）上重验了所有可证伪的断言。**结论：两条信均与第 12/13 轮记录一致，且新增 4 个可落档的客观事实。**
+
+### 14.1 fix-ci 的两条主张 — 全部核实通过
+
+| fix-ci 主张 | 核实方式 | 结果 |
+|---|---|---|
+| #35 终态只改 `check-test-compile.sh` 一行，未动任何 `*_test.go` | `git merge-base --is-ancestor aae12b2 origin/main` ✅；`origin/main` vs 父 `4a1bee2` 的 diff **仅** `test/ci/check-test-compile.sh`（TAGS 由 `integration,smoke` 加 `,qadefect`） | ✅ **成立**。`durable_defect_test.go`/`durable_qa_test.go` 在 #35 里一次都没改 |
+| Round 1「把 `TestQADurableReconnectRebindsTree` 挪进 qadefect tag 并重命名」被定稿时 `git checkout origin/main --` 撤掉，从没进过 main | `git branch -r --contains 20af87d` → 空（含 fix-ci 自己的分支均不含该提交） | ✅ **成立**。qa-proto 看到的合并冲突 100% 来自 qa-proto 侧重组，与 #35 零重叠 |
+
+> 推论：第 12 轮担心的「#35 把用例留在 qadefect tag 后」其实**从未发生**——那个动作是 Round 1 的废弃态，
+> 定稿时被撤。所以 D-新6 的实际担忧（#35 引入了 tag 后失败用例）在 #35 上不成立；见 §14.4。
+
+### 14.2 qa-proto 的「无静默删用例」— 核实成立（含一处计数对账）
+
+PM 独立数 `origin/main` 上 durable 相关测试函数总数：
+
+```
+internal/smb/command/durable_defect_test.go      : 1   ← TestQADefectExpiryHappensWithoutReconnect
+internal/smb/command/durable_qa_test.go          : 13
+internal/smb/command/create_context_durable_test.go : 10
+─────────────────────────────────────────────────────
+合计 24 个 func Test（PM 独立计数）
+```
+
+- qa-proto 报「main 22 / 我的分支 23」——他的计数是 **2 文件子集**（未含 `create_context_durable_test.go`），
+  与 PM 的 24 差 2，**纯计数口径差异，不是删除**。这正是第 12 轮「数量减少≠成果丢失」纪律的反向印证：
+  先 `grep` 去向再下结论。✅
+- `durable_defect_test.go` 文件头现写明「已修复并移出本文件的缺陷（用例已转为回归保护，勿在此重建）」，
+  仅留 1 条——与 qa-proto 所述「搬到默认路径当回归保护」一致，且无任何一条被静默删。✅
+- qa-proto 的改名映射表（缺陷 2/4/5/6 转回归保护、地基探针断言翻转改名、`Persistent` 改全局唯一）与原 main 函数名逐条对得上。✅
+
+### 14.3 三条新增可落档的客观事实（PM 亲测）
+
+**① `go vet -tags integration,smoke,qadefect ./...` 在 main 上 rc=0 → #35 的 tag 注册确实让 tagged 文件进 CI 编译。**
+这是 R15「推送前跑 check-test-compile.sh」的正面证据：若 #35 没注册 qadefect，这些文件在 CI 第 ④ 关就编不过。
+
+**② main 上唯一红的 durable 用例是 `TestQADefectExpiryHappensWithoutReconnect`，失败信息「没有后台回收者」。**
+与 team-lead 的裁定（durable 刻意**不起常驻回收 goroutine**，残留登记表靠新重连/新注册覆盖，是设计不是遗漏）
+**完全一致**。不是缺陷、不是遗漏，勿计入缺陷数。✅
+
+**③ 🔴 bisect 地雷 `0ad6441` 已实证，在 main 历史里。**
+`git merge-base --is-ancestor 0ad6441 origin/main` ✅（它随 PR #40 进了 main）。在其工作树实测：
+
+```
+CGO_ENABLED=0 go build ./...        → rc=0   （PASS）
+CGO_ENABLED=0 go vet  ./...        → FAIL: internal/smb/command/create_context_durable_test.go:166:42
+                                       cannot use intent (*wire.DurableIntent) as *Tree value in argument to durableRegistry.reconnect
+```
+
+即 `go build` 绿、`go vet` 红——这正是第 12 轮 §12.3 那个「`go build` 不编译 `_test.go`」洞的残留提交。
+**影响**：任何 `git bisect run` 若只用 `make`/`go build` 判 good/bad，会把这个坏提交误判为 good，
+在它身上「丢失」回归。qa-proto 的建议正确：**bisect 脚本必须先跑 `test/ci/check-test-compile.sh`（含 `go vet`），不过就 `git bisect skip`**。已记入 R15 备注。
+
+**④ qa-proto 的「`-overlay` 注入 5 个变异体、5/5 全部被对应用例杀死」— 自述，PM 未逐一复跑，
+但 main 现 `go test -race ./internal/smb/command/` 已绿（第 ⑦ 关 race 消失）是该断言的强佐证，满足 R5「判据可证伪」。**
+其中「`Persistent` 改回会话内计数器 → 被 `IsGloballyUnique`+`V1KeyNoCrossSessionCollision` 杀」与 R12 根因（跨会话重连键不能含 SessionId）闭环。
+
+### 14.4 决策状态（D-新4 / D-新6）— 两人均交 team-lead，PM 给出建议
+
+| 决策 | fix-ci 立场 | qa-proto 立场 | PM 建议 |
+|---|---|---|---|
+| **D-新4**（qadefect 里故意失败的用例：只编译 vs 执行并断言失败） | 现状「只编译不执行」自洽——tag 后剩的都是当前必然失败的，只能编译不能执行；认同闭环 | 同（自洽推理） | ⏳ 仍待你拍板。PM 无新增异议，建议维持现状（执行必红会污染 CI），除非你要的是「红线告警」语义 |
+| **D-新6**（#35 留 `TestQADefectDurableReconnectRebindsTree` 在 qadefect tag 后，与你的回退拍板抵触） | #35 **从未**做这个动作（Round 1 已撤），冲突为零 | 已由 #40 把该用例提升回 `durable_qa_test.go` 默认路径，不在 tag 后 | ⏳ 实际担忧已消解：#35 没留它、#40 已归位。**建议直接关闭 D-新6**，除非你认领另一条仍应留在 tag 后的用例 |
+| **活二（qa-proto 独立验证）** | — | 仍暂缓，等 PM 通知 | PM 通知：当前无阻塞需它解除，维持暂缓 |
+
+### 14.5 本轮对 R12 的收口
+
+R12（durable handle 端到端坏的 6 缺陷 + data race）随 **PR #40 合入 `0d60c68`** 已全部修复：
+
+- 跨树防护 bug（reconnect 只改 Session 不改 Tree）→ 已修；
+- `Persistent` 改用进程级全局唯一计数器（非 SessionId 入键）→ 已修，且 `durable_defect_test.go` 文件头写明去向；
+- data race（§12.2）→ 已修，main 第 ⑦ 关 race 现绿；
+- 超时关句柄 / 先授权后驱逐 / 重连改绑树 → 已修并转为默认路径回归用例。
+
+**R12 由 🔴 头号风险降为 ✅ 已闭环**（唯一残留 `TestQADefectExpiryHappensWithoutReconnect` 是 team-lead 刻意设计，非缺陷）。
+B 块（Time Machine）durable 前置能力从「完成度 0%（合了但坏）」恢复为「功能可用，待 TM 实测验收」——但按本看板规矩，**不标 ✅**，留给 TM 端到端实测（AGENTS §3）。
+
+### 14.6 一句话结论（第 14 轮）
+
+**fix-ci / qa-proto 两条信全部经受住 PM 独立重验，与第 12/13 轮一致。新增 4 个落档事实：
+#35 注册令 tagged 文件进 CI 编译（vet rc=0）、main 唯一红用例是 team-lead 刻意设计、bisect 地雷 `0ad6441` 在 main 历史里（build 绿 vet 红）、`-overlay` 5/5 变异全杀。
+R12 闭环；D-新6 实际担忧已消解建议关闭；D-新4 维持现状待你拍板；活二维持暂缓。**
 
