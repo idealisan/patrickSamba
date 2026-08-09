@@ -278,13 +278,38 @@ func (r *Resolver) ResolveParent(rel string) (dir string, name string, err error
 		return "", "", err
 	}
 	name = comps[len(comps)-1]
-	if r.caseInsensitive {
-		if actual, ok := lookupCaseInsensitive(dir, name); ok {
-			name = actual
+	if r.caseFallback() {
+		// 先试精确匹配，**只有 ENOENT 才回退**到全目录扫描。
+		//
+		// 这不只是优化，也修一个语义问题：lookupCaseInsensitive 返回的是
+		// readdir 顺序里第一个 EqualFold 命中，目录里同时存在 "a.txt" 与
+		// "A.TXT" 时，可能把客户端明确指名的那一个折叠成另一个。
+		//
+		// 性能上更是必须：ResolveParent 是 Remove / Rename / Link 的必经之路，
+		// 而这几个操作的末级名字**绝大多数时候在磁盘上原样存在**
+		// （客户端用的是枚举里拿到的名字）。无条件全扫父目录会让
+		// 每一次删除/改名都付出 O(目录条目数)，在 Time Machine 的
+		// .sparsebundle/bands/（十万级）上就是每次操作几毫秒。
+		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil && os.IsNotExist(err) {
+			if actual, ok := lookupCaseInsensitive(dir, name); ok {
+				name = actual
+			}
 		}
 	}
 	return dir, name, nil
 }
+
+// caseFallback 判断是否需要做大小写不敏感回退查找。
+//
+// 这是给平台后端留的**唯一钩子**：宿主文件系统本身就大小写不敏感时
+// （NTFS、APFS 默认配置），精确 Lstat 不可能因为大小写而 miss，
+// 回退扫描是纯浪费，应当整个关掉。届时把这里改成
+//
+//	return r.caseInsensitive && !hostCaseInsensitive
+//
+// 并在 *_windows.go / *_unix.go 里定义 hostCaseInsensitive 常量即可，
+// 不需要动任何调用点。
+func (r *Resolver) caseFallback() bool { return r.caseInsensitive }
 
 // EvalFinal 把一个**已经过 Resolve 校验**的宿主机路径的最后一跳软链求值成实路径。
 //
@@ -322,7 +347,7 @@ func (r *Resolver) resolveComponents(comps []string) (string, error) {
 		next := filepath.Join(cur, comp)
 
 		fi, err := os.Lstat(next)
-		if err != nil && os.IsNotExist(err) && r.caseInsensitive {
+		if err != nil && os.IsNotExist(err) && r.caseFallback() {
 			if actual, ok := lookupCaseInsensitive(cur, comp); ok {
 				next = filepath.Join(cur, actual)
 				fi, err = os.Lstat(next)
@@ -399,13 +424,24 @@ func (r *Resolver) contains(p string) bool {
 // （例如 Explorer 记住的是 `Report.TXT`，磁盘上是 `report.txt`），
 // 精确匹配会误报 ENOENT。
 //
-// 性能：这是一次目录全扫描，只在**精确匹配失败**时才发生，
-// 正常路径零开销。大目录（Time Machine 的 band 目录可达十万条）上
-// 一次扫描很贵，但那种场景下客户端用的是从枚举里拿到的精确名字，
-// 不会走到这里。
+// 性能：这是一次目录全扫描，成本 O(目录条目数)。所有调用点都必须
+// **先做精确 Lstat，只在 ENOENT 时才回退到这里**。
 //
-// TODO: 若实测有热点，可加一个按 (dir, mtime) 失效的小 LRU 缓存。
-// 先做对再做快（不缓存就不会有「目录变了缓存没失效」的正确性问题）。
+// 实测（AMD EPYC 9K65，ext4，见 path_perf_test.go）单次扫描耗时：
+//
+//	1k 条目 ≈ 95 µs    10k ≈ 0.9 ms    50k ≈ 4.5 ms
+//
+// 也就是约 90 ns/条，线性增长。
+//
+// ⚠️ 仍未解决的热点：**末级名字在磁盘上根本不存在**时（FILE_CREATE
+// 新建文件、Mkdir 新建目录），精确 Lstat 必然 miss，于是每一次创建
+// 都要全扫一遍父目录。Time Machine 往 .sparsebundle/bands/ 灌十万个
+// band，这就是 O(n²)。这一条**尚未修复**，方案待定（候选：按目录缓存
+// 折叠索引并由本进程的改动点自行维护）。不要以为「加了精确匹配就没事了」。
+//
+// 这段注释上一版写的是「正常路径零开销……不会走到这里」——那是错的，
+// 而且错在两处：ResolveParent 当时根本没做精确匹配（无条件全扫），
+// 创建新文件也必然走到这里。留此记录，免得下一个人再被误导。
 func lookupCaseInsensitive(dir, name string) (string, bool) {
 	f, err := os.Open(dir)
 	if err != nil {
