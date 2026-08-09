@@ -8,9 +8,9 @@ import (
 // 本文件的字节向量**全部来自 MS-NLMP §4.2 的 worked example**（规范原文），
 // 不是自造的（AGENTS.md §3）。
 
-// randomSessionKey 是 MS-NLMP §4.2.1 里 worked example 使用的
+// specRandomSessionKey 是 MS-NLMP §4.2.1 里 worked example 使用的
 // RandomSessionKey / ExportedSessionKey：16 个 0x55。
-var randomSessionKey = bytes.Repeat([]byte{0x55}, 16)
+var specRandomSessionKey = bytes.Repeat([]byte{0x55}, 16)
 
 // plaintextExample 是 §4.2.3.4 / §4.2.4.4 里被封装的明文
 // "Plaintext" 的 UTF-16LE 编码。
@@ -36,14 +36,14 @@ func TestGSSWrapExNTLMv2Golden(t *testing.T) {
 		0x47, 0x88, 0xdc, 0x86, 0x1b, 0x47, 0x82, 0xf3,
 		0x5d, 0x43, 0xfd, 0x98, 0xfe, 0x1a, 0x2d, 0x39,
 	}
-	if got := SealKey(randomSessionKey, flags, true); !bytes.Equal(got, wantSeal) {
+	if got := SealKey(specRandomSessionKey, flags, true); !bytes.Equal(got, wantSeal) {
 		t.Errorf("SEALKEY = % x, want % x", got, wantSeal)
 	}
-	if got := SignKey(randomSessionKey, flags, true); !bytes.Equal(got, wantSign) {
+	if got := SignKey(specRandomSessionKey, flags, true); !bytes.Equal(got, wantSign) {
 		t.Errorf("SIGNKEY = % x, want % x", got, wantSign)
 	}
 
-	sc, err := NewSigningContext(randomSessionKey, flags, true)
+	sc, err := NewSigningContext(specRandomSessionKey, flags, true)
 	if err != nil {
 		t.Fatalf("NewSigningContext: %v", err)
 	}
@@ -124,12 +124,12 @@ func TestGSSWrapExNTLMv1ESSGolden(t *testing.T) {
 // 两个方向的密钥必须不同，否则会把自己的签名当成对端的接受。
 func TestSignKeyDirectionsDiffer(t *testing.T) {
 	flags := NegotiateExtendedSessionSecurity | Negotiate128 | NegotiateKeyExch
-	c := SignKey(randomSessionKey, flags, true)
-	s := SignKey(randomSessionKey, flags, false)
+	c := SignKey(specRandomSessionKey, flags, true)
+	s := SignKey(specRandomSessionKey, flags, false)
 	if bytes.Equal(c, s) {
 		t.Fatal("client/server 方向的 SIGNKEY 相同")
 	}
-	if bytes.Equal(SealKey(randomSessionKey, flags, true), SealKey(randomSessionKey, flags, false)) {
+	if bytes.Equal(SealKey(specRandomSessionKey, flags, true), SealKey(specRandomSessionKey, flags, false)) {
 		t.Fatal("client/server 方向的 SEALKEY 相同")
 	}
 }
@@ -137,7 +137,7 @@ func TestSignKeyDirectionsDiffer(t *testing.T) {
 // 序号必须逐条递增，且体现在签名尾部。
 func TestMICSeqNumAdvances(t *testing.T) {
 	flags := NegotiateExtendedSessionSecurity | Negotiate128
-	sc, err := NewSigningContext(randomSessionKey, flags, false)
+	sc, err := NewSigningContext(specRandomSessionKey, flags, false)
 	if err != nil {
 		t.Fatalf("NewSigningContext: %v", err)
 	}
@@ -156,10 +156,10 @@ func TestMICSeqNumAdvances(t *testing.T) {
 
 // 未协商 EXTENDED_SESSIONSECURITY 时没有 SignKey（MS-NLMP §3.4.5.2）。
 func TestNoExtendedSessionSecurity(t *testing.T) {
-	if k := SignKey(randomSessionKey, Negotiate128, true); k != nil {
+	if k := SignKey(specRandomSessionKey, Negotiate128, true); k != nil {
 		t.Errorf("SignKey = % x, want nil", k)
 	}
-	if _, err := NewSigningContext(randomSessionKey, Negotiate128, true); err != ErrNoSessionSecurity {
+	if _, err := NewSigningContext(specRandomSessionKey, Negotiate128, true); err != ErrNoSessionSecurity {
 		t.Errorf("err = %v, want ErrNoSessionSecurity", err)
 	}
 }
