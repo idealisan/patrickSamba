@@ -29,6 +29,7 @@
 | C6 | **允许使用第三方社区库，但功能不足时必须改写或重写** | 见 §4 依赖政策。宁可 vendor 一份可控的代码，也不要迁就一个功能不够的库。 |
 | C7 | **跨平台** | 至少 linux/amd64、linux/arm64、darwin/arm64、windows/amd64 能交叉编译通过。平台相关代码用 build tag 隔离。 |
 | C8 | **认证与加密完全自成体系，与操作系统用户管理零关系** | 见下方 §1.1，这是一条独立的硬性约束。 |
+| C9 | **操作系统只作为「文件系统 + 套接字」提供方** | OS 只提供两样东西：(a) 一块可读写的普通文件系统；(b) 网络套接字。其余一概自己实现。见下方 §1.2。 |
 
 ### 1.1 认证自成体系（C8 展开）
 
@@ -68,6 +69,96 @@ CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test ./...
 ```
 
+### 1.2 操作系统只是「文件系统 + 套接字」提供方（C9 展开）
+
+**起因**：项目所有者读到 §10.3 第 2 条（`mount.cifs` 在本容器跑不通）时提出质疑 ——
+「这个项目还依赖 namespace？依赖 linux 自身的 cifs 或者 mount？这不可接受，
+绝不应该依赖操作系统提供的任何相关机制。操作系统只被当作一个普通的文件系统提供方。」
+
+**核查结论：产品代码本来就是干净的** —— `internal/` + `cmd/` 的非测试代码里
+0 处 `os/exec`、0 处 `syscall.Mount` / `Setns` / `Unshare` / `Chroot` / `PivotRoot`。
+§10.3 第 2 条讲的是**测试工具**跑不起来，不是项目依赖。
+但那段文字写得像在讲项目依赖 —— **这就是本条约束存在的理由**：
+把边界写死成硬约束并且**机器校验**，不再靠「我们记得」，也不再让读者去猜。
+
+#### 允许向 OS 索取的（只有这两样）
+
+- ✅ **一块可读写的普通文件系统**：open/read/write/seek/stat/rename/unlink/mkdir/readdir/fsync。
+      关键词是「**普通**」—— 不假设它支持 xattr、稀疏文件、稳定 inode、创建时间、
+      POSIX 属主/权限位。这些可选能力**有就用，没有就由 builtin 适配器自己补**（见下）。
+- ✅ **网络套接字**：TCP listen/accept/read/write，UDP 组播收发（mDNS 用）。
+
+#### 明确禁止依赖的 OS 机制
+
+| 类别 | 具体禁止 |
+|---|---|
+| 协议实现 | 内核 cifs / smb3 驱动、`mount -t cifs`、任何内核态或系统自带的 SMB 实现 |
+| 守护进程 | avahi / Bonjour(mDNSResponder) / systemd-resolved / winbind / SSSD / nmbd / smbd |
+| 名字解析 | NSS、`/etc/resolv.conf`、`/etc/hosts`、系统解析器语义、`os/user.Lookup*` |
+| 认证机制 | PAM / SSPI / LSA / OpenDirectory / 系统 Kerberos 配置（与 C8 重合，此处再申明一次） |
+| 挂载与命名空间 | `mount` / `umount` / `setns` / `unshare` / `chroot` / `pivot_root` / FUSE / loop 设备 |
+
+#### 明确**不在**禁止之列：平台 ABI 本身
+
+调用平台的官方 ABI **不算**违反 C9，别把这条读成「不许有任何系统调用」——
+那样连 `os.Open` 都写不出来。
+
+Windows 没有稳定的系统调用号，**官方 ABI 边界就是 DLL 导出函数**：Go runtime 自身的
+`os` / `net` / `time` 全部通过 `NewLazySystemDLL` 调用 `kernel32.dll` / `ntdll.dll` /
+`ws2_32.dll`。这是**平台调用约定**，不是 C2 说的「依赖第三方动态库」——
+把我们的代码产物整个删掉，Windows 进程照样加载 kernel32。Linux 上的 `syscall` 指令同理。
+
+判据是**语义**不是形式：向 OS 要「一个字节区间的读写」是允许的，
+向 OS 要「一个 SMB 客户端」「一次身份认证」「一次挂载」是禁止的。
+
+#### 架构：能力抽象 port + native/builtin 双适配器
+
+项目所有者给的方向：「这个项目要做好对操作系统能力的抽象模块，并提供**依赖系统调用的
+模块实现版本**和**本项目在自己内部实现的另一个版本**。」落成结构：
+
+- `internal/oscap` —— 定义**能力 port**（接口）。它描述「我需要什么语义」，
+  不描述「谁来做」。
+- `internal/oscap/native` —— **借助 OS 能力**的适配器：有 xattr 就用 xattr，
+  有 `FALLOC_FL_PUNCH_HOLE` 就打洞，有 NTFS ADS 就直接写 ADS。快、省、
+  且行为与宿主上的本地工具一致（`getfattr` / `ls -l@` / `du --apparent-size`
+  看到的和 SMB 客户端看到的是同一份东西）。
+- `internal/oscap/builtin` —— **本项目自己实现**的适配器：只用 C9 允许的那两样东西
+  （普通文件 + 套接字）把**同一份语义**做出来。慢一些，但任何能跑 Go 的地方都能跑。
+
+两条铁律：
+
+1. **逐能力矩阵降级，不是整体二选一。**
+   每一项能力**独立**决定走 native 还是 builtin。真实场景本来就是混合的：
+   ext4 有 xattr 但拿不到可靠的「创建时间」，于是命名流走 native、创建时间走 builtin。
+   所谓「窄档」只是**所有项都指向 builtin 的极限情况**，不是一个单独的实现分支 ——
+   不要写出「if 窄平台 { 走另一套代码 }」这种结构，那会变成第二份永远没人测的实现。
+2. **builtin 版必须完整。**
+   每一项能力都必须有 builtin 实现，不允许出现「这项只有 native 有」。
+   理由：将来移植到未知系统环境（嵌入式、只读根文件系统、我们没见过的 NAS 固件）时，
+   **builtin 是唯一底座** —— 缺一项就等于那个平台整个不可用，而且往往到现场才发现。
+   因此：**新增一项能力的 native 实现时，必须同时给出 builtin 实现**，不许赊账。
+
+配置三态 `filesystem_mode`：
+
+| 取值 | 含义 |
+|---|---|
+| `auto`（默认） | 逐项探测宿主能力，能 native 就 native，不能就自动落到 builtin |
+| `native` | 强制全部走 native；探测到某项不支持就**启动即报错**，不静默降级 |
+| `portable` | 强制全部走 builtin，完全不碰 OS 的可选能力。可移植性/可预测性最高，性能最低 |
+
+`native` 为什么要「不支持就报错」而不是降级：它的用途是**在测试里钉死走的是哪条路**。
+一个会偷偷降级的 `native` 等于没有 —— 这个亏本项目已经吃过：
+某个策略开关只测了「允许」这条路径，全绿，而「拒绝」那条路径压根没接线，
+测试从头到尾都在验证同一条路。
+同理，`portable` 也必须在 CI 里真跑一遍，否则 builtin 就是一份薛定谔的实现。
+
+**实现排期：v0.3.0。** 本期只定规矩，不动代码结构 ——
+现在改会和正在收尾的 Time Machine 工作抢文件。
+
+**门禁**：C9 由 `scripts/check-constraints.sh` 的 C9 段做机器校验（扫描禁用符号与 import），
+配 `test/ci/negative-verify.sh` 做**反向对照**（故意塞一段违规代码，确认门禁真的会红）。
+反向对照不是可选项：**一个从来没红过的门禁，和没有门禁是一回事。**
+
 ---
 
 ## 2. 功能目标与阶段划分
@@ -99,12 +190,17 @@ CGO_ENABLED=0 go test ./...
 
 > **至少使用三种不同的第三方 SMB 客户端工具测试通过。**
 
+> **以下均为「测试对端客户端」——用来连接我们的服务端做验证，不是本项目的运行依赖。**
+> 本服务端不依赖其中任何一个即可独立运行：这台机器上一个都没装，
+> `stupidsamba` 照样启动、照样服务真实客户端（这正是 C9 要求的，见 §1.2）。
+> 这句话放在表格最前面，是因为这张表曾被读成「项目依赖 cifs-utils / 内核 cifs 驱动」。
+
 必测客户端矩阵（至少覆盖 3 种，优先前 4 项）：
 
 | # | 客户端 | 测试方式 |
 |---|---|---|
 | 1 | `smbclient`（Samba 官方 CLI） | `smbclient //127.0.0.1/share -U user%pass -m SMB3` — ls/get/put/mkdir/rm/rename |
-| 2 | `mount.cifs` / `cifs-utils`（Linux 内核客户端） | 真实挂载后跑 POSIX 文件操作与 `fio`/`dd` 吞吐 |
+| 2 | `mount.cifs` / `cifs-utils`（Linux 内核客户端）**（可选）** | 真实挂载后跑 POSIX 文件操作与 `fio`/`dd` 吞吐。**在非初始 user namespace 的容器里内核不放行 cifs 挂载**（详见 §10.3 第 2 条），本项直接跳过（`acceptance.sh` 记 skip/rc=77），由 smbclient + impacket + go-smb2 三家满足「至少三种客户端」的门槛 |
 | 3 | `pysmb` 或 `impacket`（Python 实现，第三方栈） | 脚本化回归测试，便于 CI |
 | 4 | macOS Finder / `mount_smbfs` | Apple 扩展与 Time Machine 验收 |
 | 5 | Windows 10/11 资源管理器 | 签名、guest 策略、属性页 |
@@ -167,6 +263,10 @@ internal/auth            SPNEGO / NTLM / 账户后端（接口化）
     ↓
 internal/vfs             可写虚拟文件系统抽象（接口 + 本地磁盘实现）
     ↓
+internal/oscap           OS 能力抽象（port + 双适配器，见 §1.2 C9 / §5 P7，v0.3.0 落地）
+      ├── native/        借助 OS 能力：xattr / 稀疏文件 / NTFS ADS / 平台 stat 扩展
+      └── builtin/       只用「普通文件 + 套接字」自实现同一份语义
+    ↓
 internal/mdns            进程内 mDNS/DNS-SD responder（与 SMB 层无耦合）
 ```
 
@@ -183,13 +283,30 @@ internal/mdns            进程内 mDNS/DNS-SD responder（与 SMB 层无耦合�
 - **P5 错误就是 NTSTATUS**：内部错误类型统一能映射到 NTSTATUS，
   在 `internal/smb/status` 集中定义，禁止在 handler 里裸写魔数。
 - **P6 不要过早抽象**：只在已经有第二个实现或明确即将有时才抽接口。
-- **P7 平台差异用 build tag 隔离，不要让兼容层污染主路径**：
-  Windows 上要能作为 Time Machine 的存储后端，但 Windows 没有 POSIX 的 uid/gid/mode。
-  这类"宿主文件系统表达不了的元数据"通过一个 `MetadataStore` 旁路存储解决
-  （纯 Go 的嵌入式 KV，**禁止 `mattn/go-sqlite3` 这类需要 CGO 的方案**）。
-  **该兼容层只在 Windows 编译进来**；Linux/macOS 原生能力足够，使用 noop 实现，零开销。
-  注意 NTFS 原生就支持 alternate data stream、稀疏文件、稳定 FileID、真实创建时间和
-  DOS 属性，这些**不需要**旁路存储 —— 只有 POSIX 属主/权限位才需要。
+- **P7 OS 能力抽象成 port，配 native/builtin 两套 adapter；平台差异仍用 build tag 隔离**：
+  SMB 语义需要一批「宿主文件系统不一定表达得了」的元数据 —— POSIX 属主/权限位、
+  命名流（ADS）、稀疏区间、稳定 FileID、真实创建时间、DOS 属性。
+  对**每一项**能力，`internal/oscap` 定义 port，`native/` 借助 OS 能力实现，
+  `builtin/` 用「普通文件 + 一份旁路存储」自己实现同一份语义（详见 §1.2 C9 展开）。
+  旁路存储用纯 Go 的嵌入式 KV，**禁止 `mattn/go-sqlite3` 这类需要 CGO 的方案**（C1）。
+  平台特有代码依然用 build tag 隔离，**不要让兼容层污染主路径**。
+
+  **逐项选择，不是整体二选一**：同一次运行里命名流可以走 native、创建时间走 builtin。
+  `filesystem_mode: portable` 时全部指向 builtin；`native` 时某项不支持就启动报错，
+  不静默降级。
+
+  NTFS 原生就支持 alternate data stream、稀疏文件、稳定 FileID、真实创建时间和 DOS 属性，
+  这些在 Windows 上**走 native、不需要旁路存储** —— Windows 上真正缺的只有 POSIX
+  属主/权限位。这个事实判断依然正确，变的只是它的定位：现在它是**能力矩阵里的几行**，
+  而不是「Windows 特例」。
+
+  > **当前缺口（v0.3.0 待补，不要以为已经做完了）**：
+  > `internal/vfs/metadata_other.go:8-10` 在非 Windows 平台直接 `return nil, nil` ——
+  > 也就是说**非 Windows 上根本没有旁路兜底**。这在旧的「Linux/macOS 原生能力足够」
+  > 假设下成立，但在 C9 下不成立：宿主文件系统不支持 xattr 的场景是真实存在的
+  > （FAT32/exFAT 外置盘、部分 NAS 导出、`nouser_xattr` 挂载、只读根），
+  > 那时这些元数据会**静默丢失**，连报错都没有。
+  > 这是 builtin 完整化最大的一个缺口，v0.3.0 的第一优先级。
 
 ### 编码规范
 
@@ -487,7 +604,16 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
 
 1. **Go 不在 PATH**：每个新 shell 都要 `export PATH=$PATH:/usr/local/go/bin`。
    真没了就重装 `go1.25.0.linux-amd64.tar.gz` 到 `/usr/local/go`。
-2. **`mount.cifs` 在本容器永远跑不通** —— **注意：真死因不是缺 `CAP_SYS_ADMIN`**，
+2. **`mount.cifs` 在本容器永远跑不通。**
+
+   > **先划清边界（这段别删）**：本条只影响**测试手段**。
+   > **产品自身不依赖任何 mount / namespace / 内核文件系统驱动机制** ——
+   > 见 §1 C9 与 §1.2，由 `scripts/check-constraints.sh` 的 C9 段**机器校验**。
+   > 下面讲的全是「我们拿什么工具去连它」，不是「我们的服务需要什么」。
+   > 之所以要专门写这一句：本条原文曾被读成「这个项目依赖 linux 的 cifs 和 namespace」，
+   > 直接触发了 C9 这条约束的确立。
+
+   **注意：真死因不是缺 `CAP_SYS_ADMIN`**，
    本条曾长期归因错误，2026-08-09 由 r-infra 用决定性实验推翻，现修正如下。
 
    实验：`docker run --cap-add SYS_ADMIN` 起 Debian 12，装 cifs-utils，
