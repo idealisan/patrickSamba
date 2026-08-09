@@ -327,6 +327,19 @@ $:
         #
         # 附带的可观测性：万一哪天 `if:` 语义变了，两个 stage 会**同时**出现在
         # 构建日志里（而不是一个 success 一个 skipped），扫一眼就能发现。
+        # 预发布 Release 正文在 CHANGELOG 前注入告警句：仅当 tag 名含 "-probe"
+        # （发布通道验证探针，如 v0.0.99-probe）才加「请勿下载」告警，避免把正式
+        # 预发布（如 v0.2.0-rc1）误标成探针。git:release 的 options 不支持变量
+        # 替换，故用生成文件实现。该临时文件落在仓库根目录，CI 不提交、无副作用。
+        - name: 生成预发布 Release 正文（探针 tag 注入告警）
+          script: |
+            set -e
+            BODY=_prerelease_release_body.md
+            : > "$BODY"
+            case "$CNB_BRANCH" in
+              *-probe*) printf '⚠️ 本 Release 为发布通道验证探针，不是可用版本，请勿下载使用。\n\n' >> "$BODY" ;;
+            esac
+            cat CHANGELOG.md >> "$BODY"
         - name: 创建 Release（正式版）
           if: |
             case "$CNB_BRANCH" in *-*) exit 1 ;; *) exit 0 ;; esac
@@ -340,7 +353,7 @@ $:
             case "$CNB_BRANCH" in *-*) exit 0 ;; *) exit 1 ;; esac
           type: git:release
           options:
-            descriptionFromFile: CHANGELOG.md
+            descriptionFromFile: _prerelease_release_body.md
             preRelease: true
             latest: false
         - name: 上传四平台产物到 Release
