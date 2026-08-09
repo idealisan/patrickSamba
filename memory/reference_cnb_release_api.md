@@ -1,6 +1,6 @@
 ---
 name: CNB Release API 与 tag_push 发布链路的实测事实
-description: 查 Release 用 /-/releases/tags/<tag>，判渠道看 prerelease 与 is_latest（latest 字段恒为 null，照它判必错）；git:release 是内置任务、options 不支持变量替换，要按 tag 名分渠道得用两个互斥 stage + if:；发布流水线实测 150~176 秒 / 0.16~0.19 核时
+description: 查 Release 用 /-/releases/tags/<tag>，判渠道看 prerelease 与 is_latest（latest 字段恒为 null，照它判必错）；git:release 是内置任务、options 不支持变量替换，要按 tag 名分渠道得用两个互斥 stage + if:；改已有正文用 PATCH /-/releases/<id>（tag 名端点 404）；发布流水线实测 150~176 秒 / 0.16~0.19 核时
 type: reference
 ---
 
@@ -19,6 +19,31 @@ curl -sS -H "Authorization: Bearer $CNB_TOKEN" -H "Accept: application/json" \
   照它判会得出「所有 Release 都不是最新版」的错误结论。这是 `reference_cnb_pr_api.md` 里
   「已合并的 PR 仍回 `merged=null`」的同型坑：**回显说没有，其实发生了。**
 - `prerelease`（bool）、`draft`（bool）、`assets[]`（附件列表，`.name` 可用来核对四平台包是否齐）都正常可读。
+
+## 改已有 Release 正文（PATCH /-/releases/<id>）
+
+已发布的 Release 一旦要补正文（如探针告警句），不能删 tag 重建（memory 规定测试
+Release 是珍贵记录、不可删），只能改正文。实测可用的更新端点：
+
+- `GET  /-/releases/tags/<tag>` → 取 `id`（`body` 字段就是正文，Markdown）。
+- `PATCH /-/releases/<id>`，`-d '{"body": "<新正文>"}'` → **200 成功**。
+- ❌ `PUT` / `PATCH` 打到 `/-/releases/tags/<tag>` → 404（errcode 5，Resource not found）。
+- ❌ `PUT` / `POST` 打到 `/-/releases/<id>` → 404；`POST /-/releases` → 400（要 title）。
+- 即：**更新用 PATCH + 数字 id**，不是 tag 名，也不是 PUT。
+
+用法（把告警句补到正文开头）：
+
+```sh
+ID=$(curl -sS -H "Authorization: Bearer $CNB_TOKEN" -H "Accept: application/json" \
+  "https://api.cnb.cool/$CNB_REPO_SLUG/-/releases/tags/<tag>" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+curl -sS -X PATCH -H "Authorization: Bearer $CNB_TOKEN" -H "Content-Type: application/json" \
+  -H "Accept: application/json" -d "{\"body\":\"<告警句>\\n\\n<原正文>\"}" \
+  "https://api.cnb.cool/$CNB_REPO_SLUG/-/releases/$ID"
+```
+
+⚠️ 这个端点与 PR 更新（PATCH）不同：PR 更新用 `PATCH /-/pulls/<号>`（见
+`reference_cnb_pr_api.md`），Release 更新用 `PATCH /-/releases/<id>`；两者都是 PATCH，
+但路径与资源 id 类型不同，别混。
 
 ## `git:release` 的 `options` **不支持**变量替换 —— 要分渠道就用两个互斥 stage
 
