@@ -25,4 +25,5 @@
 - [metadata 存储双实现冲突的定夺](project_metadata_store_consolidation.md) — vfs 与 internal/meta 撞同一文件/bucket 静默吐垃圾；定夺由 internal/meta 单一化（posix2 桶+迁移），并暴露 -tags metabolt 的 CI 假绿洞
 - [git worktree remove --force 会静默删未提交工作](feedback_worktree_remove_force.md) — 删工作树前先 git status；绝不带脏状态 --force 删，否则未 git add 的工作永久丢失
 - [新增 build tag 的 PR 会当场打红全仓](project_build_tag_registry.md) — check-test-compile.sh 有未知 tag 守卫，新 tag 必须同 PR 登记进 TAGS
+- [push 前必须单独跑 gofmt -l .](feedback_gofmt_gate_not_in_check_test_compile.md) — check-test-compile.sh 不跑 gofmt，只跑它漏网，push 被 gate_gofmt 打红
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
