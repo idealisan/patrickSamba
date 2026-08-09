@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
 
 // isAbsPath 判断是否为**本平台**的绝对路径。
@@ -498,6 +501,7 @@ func Warnings(c *Config) []string {
 	}
 
 	w = append(w, sharePathOverlapWarnings(c)...)
+	w = append(w, quotaUsageWarnings(c)...)
 
 	for i := range c.Auth.Users {
 		if c.Auth.Users[i].Password != "" {
@@ -511,6 +515,62 @@ func Warnings(c *Config) []string {
 	}
 
 	return w
+}
+
+// quotaScanBudget 是启动自检允许花在**单个共享**用量统计上的时间上限。
+//
+// 这只是一次性的启动提示，不能让服务为它迟迟不监听：超出预算就放弃这一条告警
+// （静默跳过 —— 宁可不提示，也不要拿一个半截数字去吓唬人）。
+// 运行期真正的用量统计由 vfs 在后台自己做，与这里无关。
+const quotaScanBudget = 300 * time.Millisecond
+
+// quotaUsageWarnings 检查 quota_bytes 是不是已经不大于共享现有的用量。
+//
+// 为什么值得在启动时查一次：这种配置下客户端看到的可用空间恒为 0，
+// macOS 会**直接拒绝启动 Time Machine 备份**，而服务端日志里不会有任何异常 ——
+// 用户那边只有 Finder 上一句「备份磁盘已满」，完全无从下手。
+// 启动时一句人话能省掉几个小时的排查。
+//
+// 依赖方向说明：config 位于 vfs 之上（AGENTS.md §5 的分层图），
+// 这里只是复用 vfs 的用量统计口径（分配空间、硬链接去重、不跟随软链），
+// 免得同一件事在两个包里算出两个不同的数。
+func quotaUsageWarnings(c *Config) []string {
+	var w []string
+	for i := range c.Shares {
+		s := &c.Shares[i]
+		if s.QuotaBytes == 0 || s.Path == "" {
+			continue
+		}
+		used, ok := vfs.ScanUsage(s.Path, quotaScanBudget)
+		if !ok {
+			// 目录不存在（Validate 会另行报错）、读不到，或者大到来不及统计。
+			continue
+		}
+		if used < s.QuotaBytes {
+			continue
+		}
+		w = append(w, fmt.Sprintf(
+			"shares[%d] %q 的 quota_bytes=%s 不大于该目录现有用量 %s，"+
+				"客户端会看到 0 可用空间，Time Machine 会直接拒绝备份。"+
+				"请把 quota_bytes 调到现有用量之上，或清理 %s",
+			i, s.Name, humanBytes(s.QuotaBytes), humanBytes(used), s.Path))
+	}
+	return w
+}
+
+// humanBytes 把字节数写成人看得懂的单位。
+// 告警信息里裸写 2199023255552 没人读得出那是 2 TiB。
+func humanBytes(n uint64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := uint64(unit), 0
+	for v := n / unit; v >= unit && exp < 4; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
 }
 
 // sharePathOverlapWarnings 提示互相重叠的共享目录。
