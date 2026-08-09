@@ -16,7 +16,7 @@ type: project
 | # | 事故 | 假象 | 自查 |
 |---|---|---|---|
 | 1 | `save.sh` 写死 `git push origin main`，在特性分支 worktree 里推的是别人的本地 main | 打印「已推送」 | `git log --oneline origin/$(git branch --show-current)..HEAD` 有输出＝没推出去 |
-| 2 | PR 合并关闭后继续往原分支推提交 → 孤儿提交，CI 照跑照绿，但永远进不了 main | 分支有提交、CI 全绿 | 推完查 PR 是否仍 `state=open`，关了就新开一个 |
+| 2 | PR 合并关闭后继续往原分支推提交 → 孤儿提交，CI 照跑照绿，但永远进不了 main | 分支有提交、CI 全绿、**`git push` 打印 ok 且退出 0** | **每次 push 前**查自己的 PR 是否仍 `state=open`（`cnb pulls list-pulls --repo <repo> --state open` 里还有没有自己那条），关了就新开一个。**注意是「推前」不是「推完」**——失效是**别人合并你的 PR** 造成的，不是你自己的动作，所以任何一次 push 之前它都可能已经发生。2026-08-09 pm 复现：16:23 建 #125 并回查确认 open，~16:30 被人合并，16:30:48 再 push 时 push 照样打印 ok，提交却成了孤儿，另开 #130 才救回 |
 | 3 | `CGO_ENABLED=0 go test -race` 无法执行（race 依赖 cgo），0.1s 退出码 2；它是第一个失败 stage，其后 4 关全被 skip，**自建项目起一次都没执行过** | 流水线「有在跑」 | 别只看有没有构建记录，要看**每个 stage 的 status**，`skipped` 和 `success` 不是一回事 |
 | 4 | 变异测试用 `grep '^    --- FAIL'` 计数，只匹配带缩进的子测试；顶层 FAIL 没缩进 → 报 0 失败。编译失败同样让计数变 0 | 「变异没被捕获」的误判 | 变异前先跑一次**未变异基线**，确认计数器读数符合预期，否则分不清「没抓到」和「根本没跑」 |
 | 5 | 安全检查写好了但没接线（`validateWindowsName` 未被 `ValidateComponent` 调用）；旧表被架空后 Go 不报 unused | 代码在、测试绿 | 新增校验函数后 grep 它的调用点；替换旧实现时**必须删掉旧的包级变量**，留着就是负资产 |
