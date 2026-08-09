@@ -5,7 +5,7 @@
 
 ---
 
-## v0.2.0（2026-08-09，**实际发布渠道仍是 prerelease**，见「发布物形态」末条）
+## v0.2.0（2026-08-09，正式版）
 
 > **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实；本节保留作为历史）：
 >
@@ -73,13 +73,29 @@
   并做过**变异对照**：把内置配置的共享路径改成 `/nonexistent-share-dir` 重打镜像，
   同一脚本退出码 1 并打出「配置校验失败: shares[0].path: 共享 "public" 的目录不存在」，
   正常镜像退出码 0 —— 证明这 8 个 PASS 有鉴别力，不是恒真。
-- **发布渠道：打 tag 后 Release 页面会被标成「预发布」，不是正式版。**
-  `.cnb.yml:235-240` 的 Release 步骤硬编码 `preRelease: true` / `latest: false`
-  （stage 名字就叫「创建 Release（预发布）」），且 `tag_push` 对**任何** tag 都触发、
-  不按 tag 名区分。所以 v0.2.0 与 v0.1.0 走的是同一条渠道。
-  想发成正式版就改那两行（`preRelease: false` / `latest: true`），
-  **不要靠 tag 名去猜**——那两行的上方注释里已经写明了这个决定必须显式做。
-  本条如实记录当前状态，不代表已经决定要改。
+- **发布渠道改为按 tag 名的 SemVer 判定**（PR #156，合入 `25e92d2`）。
+  在此之前 Release 步骤**硬编码** `preRelease: true` / `latest: false`，且 `tag_push`
+  对任何 tag 都触发、不按 tag 名区分 —— 也就是说 v0.2.0 本来会和 v0.1.0 一样被发成预发布。
+  现在的规则：**tag 名带连字符**（`v0.2.0-rc1`）→ 预发布；**不带连字符**（`v0.2.0`）→
+  正式版且标记为 latest。
+
+  实现是**两个互斥 stage + `if:`**，而不是往 `options` 里塞变量：CNB 只对**插件任务的
+  `settings`** 明文声明支持 `$VAR` 替换，`git:release` 是内置任务用 `options:`，没有这条
+  声明 —— 往里塞变量是赌一个没写进文档的行为，赌输的代价就是发出一个渠道错误的 Release。
+
+  **两条真 tag 的端到端实测**（不是推断）：
+
+  | tag | 正式版 stage | 预发布 stage | `prerelease` | `is_latest` |
+  |---|---|---|---|---|
+  | `v0.0.99-probe` | skipped | success | True | False |
+  | `v0.0.99` | success | skipped | False | True |
+
+  并做过**跨配置对照**，排除「是 tag 名本身决定渠道、与本次改动无关」这个替代解释：
+  `v0.1.0` 与 `v0.0.99` 同为不带连字符的形态，前者走旧配置得 `prerelease=True`、
+  后者走新配置得 `False` —— 差异只能归因于这次改动。
+
+  ⚠️ 查询时**看 `is_latest` 字段，不要看 `latest`**：后者实测恒为 `null`，照它判会得出
+  「所有 Release 都不是最新版」的错误结论（与 PR 的 `merged=null` 同型）。
 - `scripts/docker-build.sh` 的多架构自检**不再在本地构建时跳过**：改用
   `docker create --platform` 做解析探针，并以一个未构建的架构（`linux/s390x`）
   做反向对照。此前本地路径直接打印「跳过 manifest 核对」，等于「多架构」在推送前
