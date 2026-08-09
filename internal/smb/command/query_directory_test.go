@@ -713,36 +713,37 @@ func writeStream(t *testing.T, fs vfs.FileSystem, path, stream string, data []by
 //
 // # 实测（AMD EPYC 9K65, linux/amd64, 2 核容器，条目为空文件、无 Apple 元数据）
 //
-//	条目数   readdir_attr 关   readdir_attr 开   倍数   每条增量
-//	 1 000       4.3 ms            12.5 ms       2.9×    8.2 µs
-//	10 000     125   ms           282   ms       2.3×   15.7 µs
-//	50 000     387   ms          1053   ms       2.7×   13.3 µs
+// 第一版（走 FileSystem.AppleInfo，每条目录项重新做一次全路径解析）：
 //
-// # 结论：变慢是真的（约 2.5×），但仍不做优化
+//	条目数   关        开        倍数   每条增量   AAPL 总 allocs
+//	 1 000    4.3 ms    12.5 ms   2.9×    8.2 µs      21 316
+//	10 000  125   ms   282   ms   2.3×   15.7 µs     215 144
+//	50 000  387   ms  1053   ms   2.7×   13.3 µs   1 082 417
 //
-//  1. 增量随条目数**线性**，约 13 µs/条，全部花在
-//     LocalFS.AppleInfo 的 4 次系统调用上：
-//     Resolve 的 lstat、AppleInfo 自己又一次 lstat、getxattr(netatalk meta)、
-//     open("._name")。**没有**任何超线性的行为。
+// 改用 vfs.DirAppleMetadata.AppleInfoAt 的目录句柄快路径之后
+// （省掉逐级 lstat 的路径解析，并靠目录快照免掉注定 ENOENT 的 `._name` 探测）：
+//
+//	条目数   关        开        倍数   AAPL 总 allocs
+//	 1 000    9.9 ms    16.6 ms   1.7×      12 314
+//	10 000  154   ms   304   ms   2.0×     125 135
+//	50 000  576   ms   554   ms   ≈1×      632 416
+//
+// 每条目录项的额外分配从约 13.7 降到约 4.7。绝对耗时的**倍数**在这台
+// 与其它 agent 抢 CPU 的 2 核容器上噪声很大（50k 那一行甚至出现开比关还快），
+// 分配数才是可信的对照指标。
+//
+// # 结论：不做进一步优化
+//
+//  1. 增量随条目数**线性**，没有任何超线性行为。
 //  2. 客户端感知的是**单页延迟**而不是总时长。64 KiB 输出缓冲一页约装 480 条，
-//     即每页约 10 ms —— 与不开时的 4 ms 同一个量级，离任何客户端超时都很远。
+//     即每页 10 ms 量级，离任何客户端超时都很远。
 //  3. 参照物：Samba 的 vfs_fruit 在 FRUIT_META_STREAM 模式下是对每个条目
 //     **完整 CREATE + PREAD + CLOSE** 一个 AFP_AfpInfo 流，比我们一次
 //     getxattr 贵得多。macOS 在真实 Samba 上就是这个体量，说明可接受。
 //  4. 这条路径只在 macOS 协商了 AAPL 之后才走，Windows/Linux 客户端零开销。
 //
-// # 已定位、但不属于本 agent 文件范围的优化点（已报 team-lead）
-//
-//   - internal/vfs/optional.go `LocalFS.AppleInfo` 里的 `os.Lstat(host)` 是**多余**的：
-//     上一行的 `res.Resolve(base)` 已经对每个分量 lstat 过了。去掉可省 1/4 的系统调用。
-//   - 更彻底的做法是给 vfs 加一个目录级批量接口
-//     （`AppleInfoBatch(dir string, names []string)`）：枚举时后端本来就
-//     Readdirnames 过整个目录，能一次性知道哪些 `._name` 存在，
-//     从而对绝大多数没有资源派生的 band 文件**完全免掉** open 探测。
-//     Time Machine 的 band 目录正是「几乎没有一个文件带 Apple 元数据」的场景。
-//
-// 在这两项落地之前不要在命令层加并发 fan-out：那是拿复杂度换一个
-// 尚未证明会造成问题的常数因子（AGENTS.md §5 P6）。
+// 不要在命令层加并发 fan-out：那是拿复杂度换一个尚未证明会造成问题的
+// 常数因子（AGENTS.md §5 P6）。
 
 // buildBandFiles 在 root 下造 n 个模拟 .sparsebundle band 的文件。
 func buildBandFiles(tb testing.TB, root string, n int) {
