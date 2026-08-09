@@ -115,6 +115,11 @@ const (
 	createContextOrderAAPL    = 30
 	createContextOrderAlSi    = 40
 	createContextOrderDurable = 50
+	// createContextOrderLease 留给 tm-lease 的 RqLs。值大于 Durable：
+	// 若一次 CREATE 同时申请 lease 与 durable（§3.3.5.9.6 的常见组合），
+	// 让 lease 的 Respond 最后跑、覆写 OplockLevel 后 durable 再读状态，
+	// 次序更自然。具体值不影响任何线上行为。
+	createContextOrderLease = 60
 )
 
 // createContextSpecs 按 Order 升序保存全部注册项。
