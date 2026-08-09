@@ -161,11 +161,23 @@ func (r *durableTable) detachLocked(open *Open) {
 // 修法只能是让 Persistent 本身全进程唯一：键必须能从客户端带回的值反推，
 // 所以不存在「另起一个内部唯一键」的选项。
 //
-// 从 1 开始（Add 先加后返），0 保留作「未分配」。uint64 单调递增，
-// 每秒分配一百万个也要 58 万年才回绕，不考虑复用。
+// **不变量（改这里之前必读）**：返回值永远落在 [1, 0xFFFFFFFFFFFFFFFF) 内，
+// 两端都不能碰：
+//
+//   - 0 保留作「未分配」。Add 先加后返，首值即 1，天然避开。
+//   - 全 1（0xFFFFFFFFFFFFFFFF）是 wire.CompoundFileID 的一半 —— 复合请求里
+//     「复用上一条 CREATE 返回的句柄」的占位值（§3.2.4.1.4，macOS 大量使用）。
+//     单调递增到它需要 1.8e19 次分配，实际不可达；而且 IsCompound() 要求
+//     Persistent 与 Volatile **同时**为全 1，Volatile 是会话内计数器，更够不着。
+//
+// 将来若有人把这里改成「从别处取值」（复用回收的 ID、取时间戳、取随机数），
+// 上面两条就不再自动成立，**必须显式排除这两个值** —— 否则一个正常句柄会被
+// IsCompound() 误判成复合占位符，客户端拿到的句柄直接串号。
+//
+// 不考虑回绕与复用：每秒分配一百万个也要 58 万年。
 var nextPersistentID atomic.Uint64
 
-// newPersistentID 分配一个全进程唯一的 FileId.Persistent。
+// newPersistentID 分配一个全进程唯一的 FileId.Persistent。见上面的不变量。
 func newPersistentID() uint64 { return nextPersistentID.Add(1) }
 
 // durableKey 计算登记表键。
