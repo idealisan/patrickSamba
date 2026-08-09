@@ -131,23 +131,19 @@ func validateServer(c *Config, errs *ValidationErrors) {
 
 	// SMB3 加密最低要求 3.0（MS-SMB2 §3.3.5.4）。
 	//
-	// max_dialect 与 min_dialect 都要卡：
-	//   - max_dialect < 3.0 → 谁都加密不了，配置自相矛盾；
-	//   - min_dialect < 3.0 → 区间里的 2.x 全是死档位。协商层对它们会
-	//     fail closed 直接 ACCESS_DENIED（见 command/negotiate.go），
-	//     用户在运行期只能看到"连不上"，根本猜不到是这个组合导致的。
-	//     所以启动时就报错，而**不是**悄悄把 min_dialect 抬到 3.0 ——
-	//     静默改写用户写下的配置是魔法行为，本项目一律用"启动时一次性
-	//     校验 + 人话错误"处理这类矛盾（与上面 max_dialect 那条对称）。
+	// 两档**故意不对称**，别当漏了：
+	//   - max_dialect < 3.0 → ERROR（下面那条）。服务端最高只到 2.1 时，
+	//     没有任何客户端能协商出加密算法，encryption_required 永远无法满足——
+	//     这是死配置，启动就该拒绝，引导用户改对（与 min>max 那条同理）。
+	//   - min_dialect < 3.0 → **不报错**，降级成 WARNING（见 Warnings()）。
+	//     这种配置是**可用**的：3.0+ 方言照常加密，只有落到 2.x 的客户端
+	//     会在运行期被协商层 fail closed（STATUS_ACCESS_DENIED，见
+	//     command/negotiate.go 与 command/session_setup.go）。若也做成启动
+	//     ERROR，唯一能端到端触达那两处 fail-closed 的配置组合
+	//     （encryption_required + min_dialect 2.0.2）就根本起不来，防线退化成
+	//     只有单测覆盖——而本次事故恰恰是单测覆盖掩盖了缺陷。
 	if c.Server.EncryptionRequired && maxRank >= 0 && maxRank < dialectRank("3.0") {
 		errs.add("server.encryption_required", "要求加密但 max_dialect 为 %s，SMB3 加密最低需要 3.0", c.Server.MaxDialect)
-	}
-	if c.Server.EncryptionRequired && minRank >= 0 && minRank < dialectRank("3.0") {
-		errs.add("server.min_dialect",
-			"server.encryption_required 为 true 时 min_dialect 不能低于 3.0（当前 %s）——"+
-				"SMB 2.x 没有加密能力，这些客户端会被直接拒绝。"+
-				"请设 min_dialect: \"3.0\"，或关闭 encryption_required",
-			c.Server.MinDialect)
 	}
 
 	if c.Server.MaxConnections < 0 {
@@ -508,6 +504,19 @@ func Warnings(c *Config) []string {
 
 	if !c.Server.SigningRequired {
 		w = append(w, "server.signing_required=false：未强制 SMB 签名，存在中间人篡改风险")
+	}
+
+	// encryption_required + min_dialect < 3.0：**告警不报错**（与上面的
+	// max_dialect 那条不对称，详见 validateServer 里的注释）。这种配置可用，
+	// 只是 2.x 客户端会在运行期被拒；提示用户抬到 3.0 即可避免。
+	if c.Server.EncryptionRequired {
+		if minRank := dialectRank(c.Server.MinDialect); minRank >= 0 && minRank < dialectRank("3.0") {
+			w = append(w, fmt.Sprintf(
+				"server.encryption_required 为 true 且 min_dialect 低于 3.0（当前 %s）："+
+					"SMB 2.x 没有加密能力，协商到这些方言的客户端将被拒绝连接（STATUS_ACCESS_DENIED）。"+
+					"若不希望低方言客户端连入，请设 min_dialect: \"3.0\"",
+				c.Server.MinDialect))
+		}
 	}
 
 	return w
