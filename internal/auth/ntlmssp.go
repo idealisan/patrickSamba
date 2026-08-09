@@ -342,6 +342,12 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 // （含外层 SEQUENCE 的 tag 与 length），不是里面几个 OID 的裸拼接 ——
 // RFC 4178 §5 对此写得含糊，这里以 Windows / Samba 的实际行为为准。
 //
+// 已用 smbclient（Samba 4，-m SMB3，signing required）实测抓包比对：
+//
+//	mechTypeList DER   30 0c 06 0a 2b 06 01 04 01 82 37 02 02 0a
+//	客户端 mechListMIC 01 00 00 00 d8 74 4b c1 89 2b 8d f0 00 00 00 00
+//	服务端 mechListMIC 01 00 00 00 1b 17 e7 47 b3 7d a8 e0 00 00 00 00
+//
 // 两个方向各用一个独立的 NTLM 会话安全状态，序号都从 0 开始：
 // mechListMIC 是各自方向上第一次、也是唯一一次 GSS_GetMIC
 // （认证完成后 SMB2 改用自己派生的签名密钥，不再走 NTLM 的 MAC）。
