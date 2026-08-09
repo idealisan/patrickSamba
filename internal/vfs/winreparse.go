@@ -92,13 +92,12 @@ func winLegacyIsRedirect(attrs, tag uint32) bool {
 
 // winPathContains 判断 final path `p` 是否落在共享根 `root` 之内（含根本身）。
 //
-// # 两边都必须是 GetFinalPathNameByHandleW 的输出
+// # 两边必须是同一种形式
 //
-// 调用方要保证 root 和 p 来自**同一个 API、同一组 flags**
-// （FILE_NAME_NORMALIZED | VOLUME_NAME_DOS）。这不是随口的约定，而是这个函数
-// 能写得这么短的前提：`\\?\` 前缀、`\\?\UNC\` 形式、卷 GUID、8.3 短名、
-// 大小写规范化——全部由内核在两边一致地处理掉了。
-// 我们自己去规范化字符串只会引入分叉。
+// 调用方要保证 root 和 p 已经被 winStripLongPathPrefix 归到同一种形式。
+// 这不是随口的约定，而是这个函数能写得这么短的前提：`\\?\` 前缀、
+// `\\?\UNC\` 形式、8.3 短名、大小写规范化——只要两边同源，
+// 就全部由内核一致地处理掉了。我们自己去规范化字符串只会引入分叉。
 //
 // # 为什么是精确比较而不是大小写不敏感比较
 //
@@ -116,8 +115,20 @@ func winLegacyIsRedirect(attrs, tag uint32) bool {
 // # 边界
 //
 // 前缀比较必须卡在分隔符上，否则 `C:\share` 会把 `C:\shareEvil` 也算进来。
-// root 末尾的分隔符先剥掉再统一补一个，这样共享根是盘符根（`\\?\C:\`）时
-// 也不会拼出 `\\?\C:\\`。
+// root 末尾的分隔符先剥掉再统一补一个，这样共享根是盘符根（`C:\`）时
+// 也不会拼出 `C:\\`。
+func winPathContains(root, p string) bool {
+	root = strings.TrimRight(root, `\`)
+	if root == "" || p == "" {
+		// 空根不是「匹配一切」，是「配置有问题」。失败方向选拒绝。
+		return false
+	}
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, root+`\`)
+}
+
 // winStripLongPathPrefix 把 GetFinalPathNameByHandleW 输出的 `\\?\` 形式
 // 还原成普通 Win32 路径形式。
 //
@@ -150,16 +161,4 @@ func winStripLongPathPrefix(p string) string {
 		}
 	}
 	return p
-}
-
-func winPathContains(root, p string) bool {
-	root = strings.TrimRight(root, `\`)
-	if root == "" || p == "" {
-		// 空根不是「匹配一切」，是「配置有问题」。失败方向选拒绝。
-		return false
-	}
-	if p == root {
-		return true
-	}
-	return strings.HasPrefix(p, root+`\`)
 }
