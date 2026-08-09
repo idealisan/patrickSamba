@@ -397,3 +397,124 @@ func findCreateCtx(ctxs []wire.CreateContext, name string) ([]byte, bool) {
 	}
 	return nil, false
 }
+
+// ---------------------------------------------------------------------------
+// .sparsebundle：目录上的 alternate data stream
+// ---------------------------------------------------------------------------
+//
+// Time Machine 的备份包 `<host>.sparsebundle` 是一个**目录**，macOS 会往它
+// 身上设 FinderInfo（走 `AFP_AfpInfo` 流）。这条路径以前在 vfs 层被
+// 「目录不支持流」挡掉，现在放开了 —— 这个测试钉住命令层不会再把它挡回去。
+//
+// 依据（Samba 源码逐条核对）：`fruit_open_meta_netatalk()`(vfs_fruit.c:1455)
+// 与 `fruit_streaminfo_meta_netatalk()`(:3859) 都**没有**目录判断；
+// 而 `fruit_open_rsrc_adouble()`(:1561) 对目录直接 ENOENT
+// （原注释「sorry, but directories don't have a resource fork」）。
+
+// TestCreateStreamOnDirectory 走真实 handler：在目录上开 AFP_AfpInfo 流。
+func TestCreateStreamOnDirectory(t *testing.T) {
+	root := t.TempDir()
+	const bundle = "host.sparsebundle"
+	if err := os.Mkdir(filepath.Join(root, bundle), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := newQueryDirTestFS(t, root)
+	ctx, _ := newQueryDirTestContext(t, fs, false)
+
+	open := createForTest(t, ctx, bundle+":AFP_AfpInfo", 0)
+
+	// 关键断言：目标是**流**，不是目录。
+	//
+	// 若这里为 true，客户端会转头对这个句柄发 QUERY_DIRECTORY —— 而它
+	// 其实是个 60 字节的数据流。vfs 侧靠「目录上的流句柄 Stat() 显式清掉
+	// DIRECTORY 位」来保证，这条测试就是钉住那个约定。
+	if open.IsDir {
+		t.Error("目录上的流句柄不该被判定为目录")
+	}
+	if open.Stream != "AFP_AfpInfo" {
+		t.Errorf("Stream = %q, 期望 AFP_AfpInfo", open.Stream)
+	}
+
+	// 流要能真的读写：写进去的 FinderInfo 必须原样读回来。
+	ai := vfs.NewAfpInfo()
+	ai.FinderInfo = sampleFinderInfo
+	if _, err := open.Handle.WriteAt(ai.Marshal(), 0); err != nil {
+		t.Fatalf("写目录上的 AFP_AfpInfo: %v", err)
+	}
+	buf := make([]byte, vfs.AfpInfoSize)
+	if _, err := open.Handle.ReadAt(buf, 0); err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	got, err := vfs.ParseAfpInfo(buf)
+	if err != nil {
+		t.Fatalf("解析 AfpInfo: %v", err)
+	}
+	if got.FinderInfo != sampleFinderInfo {
+		t.Errorf("FinderInfo 未原样返回:\n got %x\nwant %x", got.FinderInfo, sampleFinderInfo)
+	}
+}
+
+// TestCreateStreamOnDirectoryNonDirectoryFlag 覆盖 FILE_NON_DIRECTORY_FILE。
+//
+// 客户端打开 `dir:AFP_AfpInfo` 时目标是**流**，即使基础对象是目录，
+// 带上 FILE_NON_DIRECTORY_FILE 也**不该**被拒 —— 否则 macOS 设不上
+// .sparsebundle 的 FinderInfo。
+func TestCreateStreamOnDirectoryNonDirectoryFlag(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "b.sparsebundle"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := newQueryDirTestFS(t, root)
+	ctx, _ := newQueryDirTestContext(t, fs, false)
+
+	open := createForTest(t, ctx, "b.sparsebundle:AFP_AfpInfo", wire.FileNonDirectoryFile)
+	if open.IsDir {
+		t.Error("流句柄不该被判定为目录")
+	}
+}
+
+// TestCreateResourceForkOnDirectoryRejected：目录没有资源派生。
+//
+// Samba `fruit_open_rsrc_adouble()` 对目录直接 ENOENT。放行的话
+// 磁盘上会冒出一个 `._host.sparsebundle` 旁路文件，Finder 会显示重影。
+func TestCreateResourceForkOnDirectoryRejected(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := newQueryDirTestFS(t, root)
+	ctx, _ := newQueryDirTestContext(t, fs, false)
+
+	ctx.Out = make([]byte, wire.HeaderSize)
+	err := createFile(ctx, &wire.CreateRequest{
+		Name:              `d:AFP_Resource`,
+		DesiredAccess:     wire.Access(wire.MaximalAccessReadWrite),
+		CreateDisposition: wire.FileOpenIf,
+	})
+	if err == nil {
+		t.Error("目录上的 AFP_Resource 应当被拒绝（目录没有资源派生）")
+	}
+}
+
+// createForTest 走真实 createFile，返回建立的句柄。
+func createForTest(t *testing.T, ctx *Context, name string, opts wire.CreateOptions) *Open {
+	t.Helper()
+
+	ctx.Out = make([]byte, wire.HeaderSize)
+	ctx.Chain = &Chain{}
+	req := &wire.CreateRequest{
+		Name:              name,
+		DesiredAccess:     wire.Access(wire.MaximalAccessReadWrite),
+		CreateDisposition: wire.FileOpenIf,
+		CreateOptions:     opts,
+	}
+	if err := createFile(ctx, req); err != nil {
+		t.Fatalf("createFile(%q): %v", name, err)
+	}
+	open := ctx.Chain.LastOpen
+	if open == nil {
+		t.Fatalf("createFile(%q) 没有建立句柄", name)
+	}
+	t.Cleanup(open.close)
+	return open
+}
