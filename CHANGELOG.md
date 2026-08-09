@@ -25,10 +25,24 @@
   （独立 git worktree + 独立分支 + PR）。v0.2.0 起全员适用。
 - 新增 `scripts/devenv.sh`：开发环境削峰配置（编译串行锁、`GOFLAGS=-p=1`、
   git 重打包内存上限、`gobuild` / `gocheck` / `gocross` 快捷命令）。
+- CI 新增**测试代码编译门禁**：对所有 build tag × 全平台组合执行 `go build ./...`，
+  确保 `//go:build integration` 等被隔离的测试代码也真实可编译（此前它们从未被编译校验过）。
+  门禁自带**负向验证**（故意写坏一处应当失败），避免门禁本身形同虚设。
+- 修复 `scripts/save.sh` 的 `git push` refspec（**影响使用者，请注意**）：v0.1.0 时期在
+  非 `main` 分支的 worktree 里跑 `save.sh` 会**静默把提交推丢**——脚本写死
+  `git push -q origin main`，而各 worktree 共享同一份 `.git`，`main` 解析到的是
+  **别人的本地 main**。现已改为推当前分支，并在分离 HEAD 时拒绝推送。
+  ⚠️ 若你曾在自己的 worktree 用过旧版 `save.sh`，请立即
+  `git log --oneline origin/<你的分支>..HEAD` 自查是否有未推送的提交。
+- 修正 `README.md` / `configs/example.yaml` 中**与真二进制实测不符**的描述：启动日志
+  改成真实 slog 输出格式、路径字段按运行平台判定绝对性、metadata_path 的「会被忽略」
+  改为如实说明跨平台校验行为（填错平台的绝对路径会直接启动失败）。
 
 ### 协议与功能
 
-（暂无。v0.2.0 的功能改动尚未合入 `main`，按上面第 1 条纪律，合入后才登记。）
+- 新增 oplock / lease 相关的三个 NTSTATUS 常量；`handleOplockBreak` 改回返回
+  `STATUS_INVALID_OPLOCK_PROTOCOL`（此前误用 `STATUS_INVALID_PARAMETER`）。
+  属协议状态机内部修正，不改变对外可观察行为。
 
 ---
 
