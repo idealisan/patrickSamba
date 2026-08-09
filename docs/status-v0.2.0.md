@@ -4,9 +4,9 @@
 > **本文件的判断只采信客观证据**：分支上的 commit、已合并的 PR、可复现的实测记录。
 > agent 的自我汇报不作为进度依据。
 >
-> 最近盘点：**2026-08-09（第 6 轮 · win-vfs / win-meta / qa 三方回函后）**
+> 最近盘点：**2026-08-09（第 11 轮 · team-lead 拍板 posix.v2 与 CI 归属 + 同步已合 PR + 两条重大风险）**
 > 上轮：13:22（第 4 轮）、13:14（第 3 轮）、13:06（第 2 轮）、12:15（第 1 轮 · 基线）
-> 本期核对基线：`origin/main` = `ef73b549`（Merge PR #23）
+> 本期核对基线：`origin/main` = `1acae3f`（Merge 后 #24/#25/#27/#28/#29 全合入）
 
 ---
 
@@ -116,16 +116,18 @@ win-meta 澄清：那 1 行是把 `subtreeSkipByte` 由 `"0"` 改成 `"/"` 的**
 **所以不是丢失、不是违规，是我的快照误读。R2 在 win-meta 身上并未兑现。** 记一笔方法论：
 未提交改动可能是变异测试残留，下次先问「是不是测试残留」再记风险。
 
-### 6.4 当前开着的 PR（4 个，已用 pull-ref 与 main 比对确认未合入）
+### 6.4 当前开着的 PR（仅余 #26；#24/#25/#27/#28/#29 第 11 轮同步已合入）
 
-#18 / #20 / #21 / #22 / #23 **均已合入** `main`（`ef73b549`）。现余 4 个：
+#18 / #20 / #21 / #22 / #23 已合入 `main`（`ef73b549`）。第 11 轮再合入 #24/#25/#27/#28/#29（main → `1acae3f`）。**现仅余 #26 开着**（见 §11）：
 
 | PR | 分支 | 主题 | 档 | 备注 |
 |---|---|---|---|---|
-| #24 | `pm/status` | 本看板（第 5 轮） | 🟡 | 我自己的，排最后合 |
-| #25 | `team-lead` 系 | AGENTS.md §7.5 高危命令禁令 | 🟡 | 团队纪律，建议早合 |
-| #26 | `win-meta/metadata-store` | `internal/meta` bbolt/noop + 单测 | 🟡 **draft** | ⚠️ **见 §4.1 阻断项，勿合** |
-| #27 | `win-vfs` 系 | 抽 `IsWindowsSlash` 为分隔符唯一真源 | 🟡 | 与 #7/#19 名字词法相关 |
+| #24 | `pm/status` | 本看板 | ✅ **已合入**（sha `986b1e0` → main） | 我的 |
+| #25 | `team-lead` 系 | AGENTS.md §7.5 高危命令禁令 | ✅ **已合入** | 团队纪律 |
+| #26 | `win-meta/metadata-store` | `internal/meta` bbolt/noop + 单测 | 🟡 **draft，现 conflict** | ⚠️ R11 处置已决（D6，`posix.v2` 不迁移）；现 `mergeable_state: conflict`（仅 `memory/MEMORY.md` + `memory/project_config_path_platform_semantics.md` 两文件），非 CI；team-lead 已令 win-meta merge main 按并集解。见 §11 |
+| #27 | `win-vfs` 系 | 抽 `IsWindowsSlash` 为分隔符唯一真源 | ✅ **已合入** | 名字词法相关 |
+| #28 | `qa-vfs` 系 | 变异测试（mutation testing） | ✅ **已合入** | team-lead 代开 |
+| #29 | `qa-proto` 系 | durable 缺陷复现用例 | ✅ **已合入** | team-lead 代开；另见 R12 |
 
 ### 6.5 qa 的 save.sh 修复已随 PR #22 合入
 
@@ -398,7 +400,7 @@ Time Machine `.sparsebundle` band 目录数万文件的性能命门）和 `Reap`
 
 **win-meta 建议处置**（涉及 win-vfs 的文件，按 §7.3.3 他不擅自动手，需 team-lead 拍板）：
 `internal/vfs` 改为依赖 `internal/meta`，删掉 `metadata_windows.go` 的 bbolt 实现，
-并将 bucket 由 `posix` 改名为 `posix2`（**不写任何迁移代码**：`vfs/metadata_windows.go` 的 build tag 是 `//go:build windows`，本项目从未在真实 Windows 上运行过，那份 12 字节记录的库文件在地球上任何机器上都未被创建；v0.1.0 是私密 prerelease、无外部用户；迁移代码无样本可测、属静默失败形态——见 D6）。PR #26 描述里已写明保持 draft。
+并将 bucket 由 `posix` 改名为一个不同于 `posix` 的新名字（**实装为 `posix.v2`，带点**，见 D6）——**不写任何迁移代码**：`vfs/metadata_windows.go` 的 build tag 是 `//go:build windows`，本项目从未在真实 Windows 上运行过，那份 12 字节记录的库文件在地球上任何机器上都未被创建；v0.1.0 是私密 prerelease、无外部用户；迁移代码无样本可测、属静默失败形态——见 D6。PR #26 描述里已写明保持 draft。
 
 <details>
 <summary>第 5 轮误报原文（保留，作复盘：未提交改动可能是变异测试残留）</summary>
@@ -487,14 +489,14 @@ tm-handle: create context 注册表重构（+1677，无 PR）──► tm-lease 
 
 win-meta: bbolt 合规✅(带-tags metabolt) ──► internal/meta PR #26(draft)
           ──► ⚠️ 与 vfs/metadata_windows.go 同 bucket "posix" 撞车(R11)
-          ──► 处置已定（D6）：vfs 依赖 meta、删 vfs bbolt、bucket 改名 posix→posix2 不迁移、CI 归 qa-e2e
+          ──► 处置已定（D6）：vfs 依赖 meta、删 vfs bbolt、bucket 改名为不同于 posix 的新名（实装 posix.v2）不迁移、CI 归 qa-e2e（实装随 #26 合入，见 §10.3/§11）
 win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 由 `openhost_windows.go` 接缝消费（owner=win-vfs，PR #30，第二步 CreateFileW 暂缓）
 ```
 
 **当前瓶颈（按紧迫度，第 6 轮）**：
 
 1. **⚠️ R11 双 bbolt 撞车**：`internal/meta`(PR #26) 与 `vfs/metadata_windows.go` 并存会静默损坏数据，
-   PR #26 必须保持 draft 直到 team-lead 定处置（vfs 依赖 meta / 删 metadata_windows.go bbolt / **bucket 改名 `posix`→`posix2`、不迁移**）。
+   PR #26 必须保持 draft 直到 team-lead 定处置（vfs 依赖 meta / 删 metadata_windows.go bbolt / **bucket 改名为不同于 posix 的新名（实装 posix.v2）、不迁移**）。
    这是当前唯一会「合了反而更糟」的 PR。
 2. **评审吞吐**：现仅 4 个开 PR（#24/#25/#26/#27）。建议先合零冲突的 #25（团队纪律）、#27（名字词法相关），
    #24（本看板）我排最后。#26 在 R11 解决前勿合。
@@ -517,7 +519,9 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 由 `openhost_window
 | **R8** | **PR 堆积期越长，热点文件 rebase 代价越高** | 🟢 已收敛：现仅 4 个开 PR | 按 §6.4 顺序合 |
 | **R9** | **「被架空的逻辑」**：PR #7 新增 764 行 | 🟢 **已闭环（第 9 轮）**：`validateWindowsName` 已接线（`path.go:203`，PR #19）；`winOpenParamsFor`/`isNameSurrogateTag` 已由 win-vfs `openhost_windows.go` 接缝预留调用点（TODO），待第二步 `CreateFileW` 接线（owner=win-vfs，PR #30），非死代码失控 | §6.2；**今后凡新增函数零调用点，合并前必问一句** |
 | **R10** | **CI「假红」**：旧 `.cnb.yml` 致 push 构建必红，与代码无关 | 🟢 已不阻塞：各分支已 rebase 拿到新 `.cnb.yml` | §2.4。**别拿 push 的红拦 PR** |
-| **R11** | **🔴 新增·双 bbolt 实现撞车**：`internal/meta`（PR #26）与 `internal/vfs/metadata_windows.go` 同写 bucket `posix`、记录布局不同 → 静默数据损坏（见 §4.1） | 🟢 **已决（第 8 轮）**：vfs 依赖 meta、删 vfs bbolt、bucket 改名 `posix`→`posix2` 不迁移；PR #26 待合 | PR #26 保持 draft 勿合；处置：rename posix→posix2、不迁移、CI 归 qa-e2e |
+| **R11** | **🔴 新增·双 bbolt 实现撞车**：`internal/meta`（PR #26）与 `internal/vfs/metadata_windows.go` 同写 bucket `posix`、记录布局不同 → 静默数据损坏（见 §4.1） | 🟢 **已决（第 11 轮）**：vfs 依赖 meta、删 vfs bbolt、bucket 改名为不同于 `posix` 的新名（**实装 `posix.v2`，带点**）、不迁移；PR #26 待合（现 conflict 非 CI，见 §11） | 处置：rename posix→posix.v2、不迁移、CI 实装随 #26 合入（今后归 qa-e2e） |
+| **R12** | **🔴 新增·durable handle 端到端是坏的**：重连「成功」但拿回的句柄一用就 `STATUS_INVALID_PARAMETER`——`reconnect()` 只改 `open.Session` 不改 `open.Tree`，被 `close.go:42` 跨树防护挡掉，READ/WRITE/CLOSE 全废、连关都关不掉 | 🔴 **头号技术风险（第 11 轮立）**：PR #20 已合入 main → **主干上该特性完成度实际 0%**；Time Machine 强依赖它。修复归 `qa-proto`；team-lead 裁决 Persistent 用**进程级全局计数器**，原「SessionId 入键」方案被 qa-proto 实测推翻（durable 的存在意义即跨会话重连，塞 SessionId 等于结构性废掉）。见 §11 | 单独立项跟踪；修完前 Time Machine 验收判据不可标 ✅ |
+| **R13** | **🟠 新增·`test/integration` 在 main 上是红的**：qa-e2e 实测 3 个失败，但都是测试侧问题、产品没坏 | 🟠 **已定位（第 11 轮）**：该目录从未在 CI 运行（CI 只编译不执行），红了无人知。是「build tag 后代码从未真校验」洞的又一例 | 见 §11；纳入 CI 实际运行（归 qa-e2e） |
 
 ---
 
@@ -530,7 +534,7 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 由 `openhost_window
 | D3 | `tm-handle` / `r-infra` 是否已关闭？其分支由谁代为开 PR？ | `pm`、Time Machine 块整体 | ✅ 已闭环：#20 / #21 已合入 |
 | D4 | `qa` 是否还活着？`save.sh` 历史改写 bug 要不要插队进第 1 批？ | 全队（它会改写别人 PR 的历史） | ✅ 已闭环：save.sh 修复随 PR #22 合入 main |
 | D5 | PR #7 的接线是刻意拆两步还是漏做？合并时如何措辞才不误判为「已完成」？ | `win-vfs`、CHANGELOG | **第 6 轮已答**：`validateWindowsName` 漏了、已 PR #19 接线；`winOpenParamsFor`/`isNameSurrogateTag` 刻意拆，由 `openhost_windows.go` 接缝收口（owner=win-vfs，PR #30） |
-| **D6** | ⚠️ **R11 双 bbolt 撞车如何处置？** `internal/meta`(PR #26) 与 `vfs/metadata_windows.go` 谁留谁删、bucket 改名、CI 归属 | `win-meta`、`win-vfs`、`qa-e2e`、`team-lead` | **已决（第 8 轮订正）**：vfs 依赖 meta、删 vfs bbolt；**bucket `posix`→`posix2`，不写迁移代码**（vfs 那份 12 字节实现 build tag=windows，项目从未在真实 Windows 跑过、库文件从未被创建；v0.1.0 私密 prerelease 无外部用户；迁移码不可测试=静默失败形态）；**CI（`.cnb.yml`/`test/ci`）归 qa-e2e**，vfs 适配层归 win-vfs。PR #26 待 team-lead 合（win-meta 已实装 CI 修复，绿） |
+| **D6** | ⚠️ **R11 双 bbolt 撞车如何处置？** `internal/meta`(PR #26) 与 `vfs/metadata_windows.go` 谁留谁删、bucket 改名、CI 归属 | `win-meta`、`win-vfs`、`qa-e2e`、`team-lead` | **已决（第 11 轮订正）**：vfs 依赖 meta、删 vfs bbolt；**bucket 改名为一个不同于 `posix` 的新名字（实装 `posix.v2`，带点），不写迁移代码**。`posix.v2` 而非 `posix2` 是实装中已 CI 绿的字面量，team-lead 第 11 轮推翻 PM「改回 posix2」建议、采纳 `posix.v2`（理由升级见下）。**改名核心价值 = 反方向安全降级：用户先跑 v0.2.0（21 字节记录，bucket=posix.v2）再回退 v0.1.0 旧二进制时，旧代码看不到 `posix` 这个 bucket → 判「无记录」→ 走安全默认，而绝不会把 21 字节新记录按 12 字节旧格式解出垃圾 uid/gid/mode**。将来谁想再改名须先满足这条（理由比名字字面量重要）。另：**CI（`.cnb.yml`/`test/ci`）归 qa-e2e**，但本次解阻塞实装由 win-meta 在 #26 内完成（已绿）随 #26 合入；vfs 适配层归 win-vfs。PR #26 待合（现 conflict 非 CI，见 §11）。 |
 
 > D1 的对照实验已做完（`git diff --name-only` 逐分支比对），不是推测，可直接执行。
 
@@ -588,8 +592,8 @@ team-lead 就我转给 win-vfs 的对接要点下发两处订正，且 win-meta 
 - win-meta 只需在 `internal/meta/bolt.go:57` 把 `bucketName` 由 `posix` 改为 `posix2`，并在上方写「为何换名、为何不迁移」注释。**不新增任何 migrate 函数。**
 
 ### 10.3 ⚠️ 两处需 team-lead 拍板的不一致（PM 已查出）
-1. **bucket 名不一致**：team-lead D6 说改名 `posix2`；win-meta 在 #26 里实装成了 **`posix.v2`**（带点）。bucket 名是存储契约，合入前必须统一。建议以 team-lead 的 `posix2` 为准，请 win-meta 把 `posix.v2` 改回 `posix2`。
-2. **CI 实装者 vs 责任人不一致**：team-lead 把 CI 归 qa-e2e，但 win-meta 已在 PR #26 内实装了完全对应的修复（`check-test-compile.sh` + `gate_metabolt`）并转绿。两种处置：(a) 接受 #26 内的实装作本次解阻塞权威改动、随 #26 合入，今后 CI 归 qa-e2e（推荐）；(b) 要求 qa-e2e 另起 PR 重做。请 team-lead 明示。
+1. **bucket 名不一致（已解决 · team-lead 第 11 轮推翻 PM 建议）**：PM 在 §10.3 建议「以 team-lead 的 `posix2` 为准、让 win-meta 改回」——**此建议已撤回并转达撤销**。team-lead 第 11 轮明确采纳 win-meta 实装的 **`posix.v2`**（带点），理由比 PM 原「避免撞库」更强：反方向安全降级（见 D6 新记理由）。已实装且 CI 已绿的字面量即为正确，为此再跑一轮 CI 换名是纯浪费。**PM 早先发给 win-meta 的「改回 posix2」指令作废。**
+2. **CI 实装者 vs 责任人不一致（已解决 · 选 (a)）**：team-lead 第 11 轮确认 **选 (a) 接受 #26 内的实装**。已核 `origin/qa-e2e/ci` 相对 main 对 `test/ci/check-test-compile.sh` 和 `.cnb.yml` **零 diff**——根本不存在撞车，只有一份实装；win-meta 把 `metabolt` 并进脚本 `KNOWN`/`TAGS`、与 `!windows` 同套，比 PM 原设想「带/不带 tag 各跑一次 vet」更简洁无死角。**win-meta 不必 revert、qa-e2e 不必重做**；今后 `.cnb.yml`/`test/ci/` 的改动归 qa-e2e 不变。
 
 ### 10.4 环境观察（与 R2 相关）：编辑疑似被自动提交
 - win-meta 报告：他做完编辑后，git 里已是一个**已提交并 push 的 commit（`18d8d2b`）**——环境里似乎有自动提交/落盘机制，提交动作不在他显式控制下。内容是他 intended 的那批（8 文件已逐项核对），非丢失、非串扰。
@@ -597,7 +601,57 @@ team-lead 就我转给 win-vfs 的对接要点下发两处订正，且 win-meta 
 
 ### 10.5 当前待合 PR（新增）
 - **qa-vfs/verify（`db03c4d`）**：team-lead 即开 PR，加进待合清单。
-- 仍在待合：PR #26（win-meta，绿，待合，受 10.3 两处不一致待拍板）、PR #27（win-vfs，IsWindowsSlash）、PR #24（本看板，待 team-lead 合，sha `986b1e0`）、**PR #30（`win-vfs/openhost-seam`，openhost_windows.go 接缝，R9 收口第一步）**。
+- **已合入（第 11 轮同步）**：PR #24（本看板，sha `986b1e0` → main）、PR #25（AGENTS.md §7.5）、PR #27（win-vfs `IsWindowsSlash`）、PR #28（qa-vfs 变异测试）、PR #29（qa-proto durable 缺陷复现，team-lead 代开）。main 现 = `1acae3f`。**仅余 #26 开着（conflict 非 CI，见 §11）。**
+
+---
+
+## 11. 第 11 轮（PM 收 team-lead 拍板 posix.v2 / CI 归属 + 同步已合 PR + 两条重大风险，2026-08-09）
+
+team-lead 下发两处拍板、同步 5 个已合 PR、并新报两条重大风险 + 两名新成员。全板已据「以 team-lead 为准」更新（D6 / R11 / §4.1 / §5 / §10.3 / §6.4）。**PM 只动本文件，MEMORY.md 条目由 team-lead 写**（新约定，§10 末确认）。
+
+### 11.1 两处拍板（均推翻 PM 第 10 轮建议，原指令已撤回）
+
+1. **bucket 名用 `posix.v2`（带点），不退 `posix2`**——PM 第 10 轮建议「让 win-meta 改回 posix2」**已作废并转达撤销**。理由升级：原只为防止撞库；win-meta 补的「**反方向安全降级**」才是改名真正的价值——用户先跑 v0.2.0（21 字节记录，bucket=posix.v2）再回退 v0.1.0 旧二进制时，旧代码看不到 `posix` 这个 bucket → 判「无记录」→ 走安全默认，而**不是**把新记录按 12 字节旧格式解出垃圾 uid/gid/mode。**理由比名字字面量重要**，将来再改名须先满足这条。板上 D6 已改写：改名 = 不同于 `posix` 的新名（实装 posix.v2）、不迁移、记反方向降级理由。
+2. **CI 实装选 (a) 接受 #26 内的实装**——不令 qa-e2e 重做、不令 win-meta revert。已核 `origin/qa-e2e/ci` 对 `test/ci/check-test-compile.sh` 与 `.cnb.yml` **零 diff**，无撞车只有一份实装；win-meta 把 `metabolt` 并进脚本 `KNOWN`/`TAGS`、与 `!windows` 同套，比 PM 原设想更简洁无死角。**今后 `.cnb.yml`/`test/ci/` 改动仍归 qa-e2e**（§7.1）。
+
+### 11.2 PR 同步（main → `1acae3f`）
+
+- ✅ #24（本看板，sha `986b1e0`）、#25（AGENTS.md §7.5）、#27（win-vfs `IsWindowsSlash`）、#28（qa-vfs 变异测试）、#29（qa-proto durable 缺陷复现，team-lead 代开）**全合入**。
+- ⚠️ **#26 现 `mergeable_state: conflict`（非 CI，CI 已绿）**：冲突仅两文件 `memory/MEMORY.md` 与 `memory/project_config_path_platform_semantics.md`。team-lead 已令 win-meta merge main 后按并集解掉（MEMORY.md 由 team-lead 维护，PM 不碰）。解完即可合。
+
+### 11.3 🔴 头号技术风险 R12：durable handle 端到端是坏的
+
+- qa-proto **线级实测**：重连「成功」，但拿回的句柄一用就 `STATUS_INVALID_PARAMETER`。
+- 根因：`reconnect()` 只改 `open.Session` 不改 `open.Tree`，被 `close.go:42` 的**跨树防护**挡掉 → READ/WRITE/CLOSE 全废，连 `CLOSE` 都发不出去（关不掉）。
+- **严重度**：PR #20 已合入 main，所以**主干上 durable 特性完成度实际是 0%**；而 Time Machine 强依赖它。**这是 v0.2.0 头号技术风险，单独立项（R12）。**
+- 修复归 `qa-proto`。team-lead 裁决 Persistent 改用**进程级全局计数器**；原「SessionId 入键」方案被 qa-proto 实测推翻——durable 的存在意义就是跨会话重连，键里塞 SessionId 等于结构性废掉。
+- ⚠️ 这直接否定 §「三大块总览」B 块（Time Machine）的「主体已合入」判断——durable 合了但坏，完成度回落到 0%。B 块 Time Machine 验收判据在 R12 修复前不可标 ✅。
+
+### 11.4 🟠 R13：`test/integration` 在 main 上是红的
+
+- qa-e2e 实测 3 个失败，但**都是测试侧问题、产品没坏**。
+- 根因：该目录**从没在 CI 里跑过**（CI 只编译不执行 `//go:build integration` 后的代码），所以红了无人知。
+- 是「build tag 后面的代码从未被真正校验」那类洞的又一例（同 R1 假绿、R4 假绿）。**归 qa-e2e 纳入 CI 实际运行**。
+
+### 11.5 两名新成员（容器化发布，项目所有者今日新提要求）
+
+要求原文：「以后的版本，制作 docker 镜像，同时发布裸包和 docker 镜像」+「添加一个成员专门把上一个版本做一个 docker 镜像，托管在 cnb 平台上」。
+
+| 成员 | 负责 | 交付物 | 档 |
+|---|---|---|---|
+| `rel-docker` | 从 v0.2.0 起「裸包 + 镜像」双轨发布接进 `.cnb.yml` | Dockerfile + `.cnb.yml` 双轨发布流水线 | ⚪ 新建跟踪 |
+| `rel-v010` | 给**已发布的 v0.1.0** 补一个镜像，托管到 CNB 制品库 `docker.cnb.cool/finalappstore/stupidsamba:v0.1.0` | v0.1.0 镜像（retroactive） | ⚪ 新建跟踪 |
+
+> 发布物形态（裸包 + 镜像双轨）从 v0.2.0 起为硬性要求；v0.1.0 镜像为补做。
+
+### 11.6 资源控制（全员）
+
+项目所有者强调「注意控制资源用量，别崩溃了」。容器 **4 GB 内存、零 swap**。
+- team-lead 已关掉两名完工成员（`tui-diag`、`qa`）。**在册成员更新**：tui-diag、qa 已关闭（完工）；新增 `rel-docker`、`rel-v010`。
+- 全员**不要跑整包 `go test ./...`**。
+- PM 盘点也**不重复跑构建**——优先读分支 diff 与别人报的结果；确需跑只跑最小范围。
+- 本看板本轮所有更新均为读档 + 编辑，未触发任何 `go build` / `go test`。
+
 
 ### 10.6 `open_windows.go` 归属落定 = win-vfs（第 9 轮）
 - win-meta 明确**不接** `open_windows.go`（team-lead 两封「元数据库归属裁决 D」「拍板」明令 win-meta 不得动 `internal/vfs/` 任何文件；他已在 #11 描述记「win-meta 不得动 internal/vfs」边界）。早先「等拍板期间去写它」的话在边界划定前说的，现已撤回。
