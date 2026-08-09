@@ -55,6 +55,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -422,6 +423,20 @@ func (r *Resolver) contains(p string) bool {
 	return strings.HasPrefix(p, r.root+string(filepath.Separator))
 }
 
+// pathFullScans 统计 lookupCaseInsensitive 被进入的次数，也就是**全目录扫描
+// 发生了几次**。它只服务于测试判据（path_perf_test.go），不导出、不进公共 API、
+// 不改变任何行为。
+//
+// 为什么要有它：「精确匹配优先」这个优化承诺的是「命中已存在且大小写一致的
+// 名字时不会全扫」。原先的用例是从**墙钟耗时的增长比值**去反推有没有全扫，
+// 而基准量只有 ~1.5 µs —— 一次 GC、一次调度抢占就能把 20 次取平均的结果抬高
+// 十几倍，于是在共享 runner 上假红（实例见 path_perf_test.go 顶部）。
+// 计数器把「有没有全扫」从**推断**变成**直接断言**，零噪声、确定性。
+//
+// 开销：只在已经要做 O(目录条目数) readdir 的那条路径上加一次原子自增，
+// 相对于紧随其后的整目录扫描可以忽略；快路径（精确 Lstat 命中）一行都不执行。
+var pathFullScans atomic.Int64
+
 // lookupCaseInsensitive 在 dir 下做不区分大小写的名字查找。
 //
 // SMB 的语义是「大小写不敏感、保留大小写」，而 Linux 的 ext4/xfs 是
@@ -448,6 +463,8 @@ func (r *Resolver) contains(p string) bool {
 // 而且错在两处：ResolveParent 当时根本没做精确匹配（无条件全扫），
 // 创建新文件也必然走到这里。留此记录，免得下一个人再被误导。
 func lookupCaseInsensitive(dir, name string) (string, bool) {
+	pathFullScans.Add(1)
+
 	f, err := openHostFile(dir, os.O_RDONLY, 0)
 	if err != nil {
 		return "", false
