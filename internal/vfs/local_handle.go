@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -42,6 +43,13 @@ type localHandle struct {
 	// 客户端期待看到的是一个稳定的视图（Windows 服务端亦然）。
 	dirNames []string
 	dirPos   int
+
+	// dotUnder 是快照时看到的、存在 "._<name>" 旁路文件的 <name> 集合。
+	//
+	// 只在真的看到 ._ 文件时才分配 —— Time Machine 的 bands 目录一个都没有，
+	// 那里恒为 nil，零内存开销。AAPL readdir_attr 靠它跳过对每个条目
+	// 「试着打开 ._ 文件」的那次注定失败的 open（见 AppleInfoAt）。
+	dotUnder map[string]struct{}
 }
 
 var _ Handle = (*localHandle)(nil)
@@ -374,20 +382,29 @@ func (h *localHandle) snapshotLocked() error {
 	kept := make([]string, 0, len(names)+2)
 	// Windows 期待枚举结果里带 "." 与 ".."（docs/protocol-notes.md §9）。
 	kept = append(kept, ".", "..")
+	var dotUnder map[string]struct{}
 	for _, n := range names {
-		if ValidateComponent(n) != nil {
-			continue
-		}
 		// AppleDouble 资源派生旁路文件不作为独立条目出现：
 		// 客户端要拿资源派生是通过 AFP_Resource 流，不是通过 ._foo。
 		// 列出来会让 Finder 显示重影，也会让 Time Machine 的 band 计数翻倍。
+		//
+		// 但**要记下来**：readdir_attr 需要知道哪些条目有资源派生，
+		// 这里顺手记一笔就免掉后面每条一次的失败 open。
 		if isDotUnderscoreName(n) {
+			if dotUnder == nil {
+				dotUnder = make(map[string]struct{})
+			}
+			dotUnder[strings.TrimPrefix(n, adoubleNamePrefix)] = struct{}{}
+			continue
+		}
+		if ValidateComponent(n) != nil {
 			continue
 		}
 		kept = append(kept, n)
 	}
 
 	h.dirNames = kept
+	h.dotUnder = dotUnder
 	h.dirPos = 0
 	return nil
 }
