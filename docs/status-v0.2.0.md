@@ -4,9 +4,12 @@
 > **本文件的判断只采信客观证据**：分支上的 commit、已合并的 PR、可复现的实测记录。
 > agent 的自我汇报不作为进度依据。
 >
-> 最近盘点：**2026-08-09（第 11 轮 · team-lead 拍板 posix.v2 与 CI 归属 + 同步已合 PR + 两条重大风险）**
-> 上轮：13:22（第 4 轮）、13:14（第 3 轮）、13:06（第 2 轮）、12:15（第 1 轮 · 基线）
-> 本期核对基线：`origin/main` = `1acae3f`（Merge 后 #24/#25/#27/#28/#29 全合入）
+> 最近盘点：**2026-08-09 06:50Z（第 12 轮 · 实测复现 CI 全链，查明 `main` 红灯有两道而非一道）**
+> 上轮：第 11 轮（拍板 posix.v2 / CI 归属）、13:22（第 4 轮）、13:14（第 3 轮）、13:06（第 2 轮）、12:15（第 1 轮 · 基线）
+> 本期核对基线：`origin/main` = `4a1bee2`（第 11 轮基线 `1acae3f` 之后又前进 1 个提交）
+>
+> **第 12 轮头条**：合并 fix-ci 的 PR #35 **不足以**让 `main` 变绿——它后面还压着一个
+> 真实的产品级 data race，而修它的代码正未提交地躺在 `qa-proto` 的磁盘上。详见 §12。
 
 ---
 
@@ -662,4 +665,140 @@ team-lead 下发两处拍板、同步 5 个已合 PR、并新报两条重大风�
 - **进度**：接缝第一步完成并开 **PR #30（`win-vfs/openhost-seam`）**——7 处宿主文件打开全收口到 `openHostFile`，`openhost_windows.go` 当前原样转调 `os.OpenFile`，`winOpenParamsFor` 调用点以 TODO 标出。第二步真接 `CreateFileW` 被 team-lead **暂缓**：无 Windows runner 验 `os.NewFile(handle)` 的 `Seek/ReadAt/WriteAt/Truncate` 互操作——属不可静态验的存亡假设，不赌。故 `winOpenParamsFor`/`isNameSurrogateTag` 现处「接缝里预留、待第二步接线」状态，**非死代码失控**（R9 由 🟠 半关闭改为 🟢 已闭环）。
 - 看板 `owner 待定` 三条（§6.2 / §5 / §9 / D5）已全部改为 win-vfs；task #11 已更新：第一步接缝完成，转为跟踪第二步 CreateFileW 接入。
 - 附注：win-vfs 确认我早先对 team-lead 的「reservedNames 不是死变量」误报已撤回并经其复核无误，此条无需再跟；「先查调用点再动手」方法论本次又抓到 winopen 真缺口，沿用。
+
+---
+
+## 12. 第 12 轮（2026-08-09 06:50Z）：**`main` 的红灯是两道，不是一道**
+
+本轮我没有采信任何人的自述，把 CI 的 11 道关卡在干净工作树上逐条重跑了一遍。
+结论推翻了本轮开工时的普遍认知（「合了 #35 就绿了」）。
+
+### 12.1 头号结论：关键路径上串着两块，缺一不可
+
+CI 的 stage **顺序执行、失败即中断**。这意味着**第一道红灯会把它后面所有关卡全部掩盖**
+（这正是 R1 那个「CI 假绿」老洞的同构变体，第三次出现了）。
+
+`pull_request` 流水线的 11 关顺序：
+`build → vet → gofmt → **test_compile** → constraints → test → **race** → cross → static → example_config → smoke`
+
+| 关卡 | `origin/main` `4a1bee2` | fix-ci `20af87d`（PR #35） | qa-proto 本地未提交树 |
+|---|---|---|---|
+| ④ 测试代码编译校验 | ❌ **红** `qadefect` tag 未注册 | ✅ 过 | ❌（缺 #35） |
+| ⑤ 约束 C1/C3/C4/C8 | 被掩盖 | ✅ 过 | — |
+| ⑥ 单元测试 `CGO_ENABLED=0` | 被掩盖 | ✅ 过 | — |
+| ⑦ **竞态检测** | **被掩盖** | ❌ **红·真 bug** | ✅ **过** |
+| ⑧ 四平台交叉编译 | 被掩盖 | ✅ 过 | — |
+
+**所以：`#35` 只解开第 ④ 关，解开后立刻暴露第 ⑦ 关的真 bug。两块都落地，`main` 才可能绿。**
+
+### 12.2 第 ⑦ 关是一个真实的产品级 data race（不是测试问题）
+
+```
+WARNING: DATA RACE
+Read  at internal/smb/command/durable.go:172  (*durableTable).remove()
+        ← (*Open).close()            open.go:222
+Write at internal/smb/command/durable.go:248  (*DurableState).disconnectedAtZero()
+        ← (*durableTable).reconnect() durable.go:242
+--- FAIL: TestQADurableSessionCloseReconnectNoDeadlock (0.05s)
+        testing.go:1617: race detected during execution of test
+```
+
+两处都在 **产品代码** `durable.go`，触发者是 PR #29 合入的缺陷复现用例。
+**归属 R12（durable handle），owner `qa-proto`。**
+
+> 反向对照（满足 R5 要求）：同一命令在 `qa-proto` 本地工作树上
+> `CGO_ENABLED=1 go test -race ./internal/smb/command/` → `ok  1.420s`。
+> 即「有修复则绿、无修复则红」双向成立，不是环境噪声。
+
+### 12.3 🔴 关键路径上的修复**尚未提交**（本轮最高丢失风险）
+
+| 事实 | 证据 |
+|---|---|
+| `origin/qa-proto/durable-fix` @ `8199288` **编译不过** | `vet: create_context_durable_test.go:166:42: cannot use intent (*wire.DurableIntent) as *Tree value in argument to durableRegistry.reconnect` |
+| 其**本地**工作树（+3 个未提交 `_test.go`）编译干净且 race 已消除 | `go vet` rc=0；`go test -race` → `ok` |
+
+也就是说，**当前全队关键路径上的唯一一块，只存在于容器磁盘上，一次重启即永久蒸发**。
+已于 06:49Z 直接致信 `qa-proto` 要求立刻 `commit && push`（其状态早已满足 §7.2 的提交门槛）。
+
+附带教训：作者推送前只跑了 `go build`，而 **`go build` 不编译 `_test.go`** ——
+AGENTS.md 已记过这个洞，本轮它又咬了一次。**推送前请跑 `sh test/ci/check-test-compile.sh`。**
+
+### 12.4 五个开着的 PR：全红，且全红在同一条链上
+
+| PR | 分支 | push | PR 事件 | 实测红因 |
+|---|---|---|---|---|
+| #35 | `fix-ci/qadefect-tag` | ❌ | ❌ | 第 ⑦ 关 race（其目标第 ④ 关**已过**） |
+| #34 | `srv-share/share-access` | ❌ | ❌ | 第 ④ 关 `qadefect`（已复现） |
+| #33 | `win-meta/validate-slash-source` | ❌ | ❌ | 第 ④ 关 `qadefect`（已复现） |
+| #31 | `win-vfs/open-seam` | ✅ | ❌ | 第 ④ 关：push 建的是旧基线故绿，PR 与 `main` 合并后拿到 `qadefect` 才红 |
+| #26 | `win-meta/metadata-store` | ❌ | ❌ | 同链（另有 R11 历史包袱） |
+
+> **#31 是本项目「假红/假绿」现象的第三种形态**，与 §2.4 记的两种都不同：
+> 这次是 **push 绿而 PR 红**，且 **PR 的红才是真的**。
+> 老经验「别拿 push 的红拦 PR」依然成立，但**反过来「push 绿就没事」是错的**。
+> 判据统一为：**只看 `pull_request` 事件。**
+
+### 12.5 逐人盘点（客观证据，非自述）
+
+| agent | 分支 | 领先 main | 远端 | 状态 |
+|---|---|---|---|---|
+| `fix-ci` | `fix-ci/qadefect-tag` | +1 | ✅ 已推 | 🟢 目标关卡已达成，PR #35 待合 |
+| `oscap-gate` | `oscap-gate/c9-constraint` | +1 | ✅ 已推（3 分钟前） | 🟢 `check-constraints.sh` C9 段已落地 |
+| `oscap-audit` | `oscap-audit/capabilities-doc` | +1 | ✅ 已推（60 秒前） | 🟢 `docs/os-capabilities.md` 首版已落地 |
+| `oscap-rules` | `oscap-rules/c9-agents-md` | 0 | 分支已建、无提交 | 🟠 本地 `AGENTS.md` 改动**未提交**，需催 |
+| `qa-proto` | `qa-proto/durable-fix` | +1 | ⚠️ 已推但**编译不过** | 🔴 见 §12.3，关键路径 |
+| `win-backend` | `win-backend/symlink-gap` | 0 | ✅ 空分支已推 | ⚪ 已开工建仓，暂无产出 |
+| `qa-verify` | `qa-verify/e2e-ci` | 0 | ✅ 空分支已推 | ⚪ 已开工建仓，暂无产出 |
+
+**✅ 「5 个 agent 零分支而无人察觉」的历史事故本轮没有复发**——在册 7 人全部已建远端分支，
+其中 5 人已有实质提交。§7.3.1「开工先推空分支」这条纪律是有效的，继续保持。
+
+### 12.6 🔴 R7 复发：`qa-e2e` 的成果成了孤儿
+
+`/work/qa-e2e` 工作树相对 `origin/qa-e2e/ci` 领先 **29** 个提交，逐条比对后：
+**27 个是已在 `main` 里的合并祖先，真正未推送的原创提交是 2 个**——
+
+```
+265bcaf  test: 失败对照实验 reverse-control.sh，6 个变异全部被定点抓住
+ad27691  test: 三客户端端到端冒烟套件 test/e2e/smoke.sh + 变异生成器
+```
+
+这**正是 v0.2.0 A 块（测试设施）的核心交付物**，而且自带反向对照（恰好满足 R5）。
+作者 `qa-e2e` 因容器重启已退出，**这两个提交只存在于本容器磁盘上**。
+处置同 R7 旧例（#20/#21 代开 PR），**需 team-lead 指派接手人**——见 D-新1。
+
+### 12.7 其他工作树残留（已核实，均不阻塞）
+
+| 工作树 | 残留 | 判定 |
+|---|---|---|
+| `/work/win-meta` | +1 提交（仅 merge main）、未提交改 `test/ci/check-test-compile.sh` | 与 fix-ci 同文件但**未提交未推送**，不会冲突；作者已退出，属残留 |
+| `/work/qa`、`/work/tm-vfs` | 本地分支无远端、0 领先 | 空壳，无内容丢失风险 |
+| `/work/rel-docker`、`/work/rel-v010`、`/work/tui-diag` | 各 1 个未提交文件 | 作者已退出，0 未推送提交，无原创成果损失 |
+
+### 12.8 风险登记增补
+
+| # | 风险 | 现状 | 应对 |
+|---|---|---|---|
+| **R12** | durable handle（含本轮新查明的 data race） | 🔴 **仍是头号**，且已确证**卡住全队 CI**，影响面比第 11 轮判断的更大 | 修复已存在但未提交，见 §12.3 |
+| **R14** | **🔴 新增·门禁串行掩盖后续关卡**：第一道红灯让后面 7 关从未执行，「修好第一道」被误当成「全绿」 | 🔴 本轮实证：`main` 掩盖了真 race。这是 R1 的第三次同构复发 | 判据改为：**修红灯必须把整条链跑到底**，不能只验自己那一关。本看板今后每轮实跑全链 |
+| **R15** | **🟠 新增·「已推送」不等于「可编译」**：`go build` 不编译 `_test.go`，推上去的分支可以是坏的 | 🟠 本轮命中 `qa-proto` | 推送前跑 `sh test/ci/check-test-compile.sh`；建议 team-lead 定为全员纪律 |
+| **R7** | 无主分支/孤儿成果 | 🔴 **复发**：`qa-e2e` 2 个 A 块提交无人认领，仅存于磁盘 | 见 §12.6，待指派 |
+
+### 12.9 待决事项（需 `team-lead` 拍板）
+
+| # | 事项 | 建议 | 谁在等 |
+|---|---|---|---|
+| **D-新1** | `qa-e2e` 那 2 个孤儿提交谁接手代开 PR？ | 建议指派 `qa-verify`（其职责本就是端到端验证与 CI 接入，且分支空着正好承接） | A 块进度 |
+| **D-新2** | PR #35 是否**先合**？（合了 `main` 仍红在 race，但它让红灯前移到真问题） | 建议**先合**：它本身已过目标关卡且经独立复现；留着不合只会让后续所有 PR 继续红在一个已知已修的点上 | 全部 5 个 PR |
+| **D-新3** | 是否把「推送前跑 `check-test-compile.sh`」写进 AGENTS.md §7.2？ | 建议写入，可交正在改 AGENTS.md 的 `oscap-rules` 顺带落笔（避免与其冲突） | 全队纪律 |
+| **D-新4** | `qadefect` 里那些**故意失败**的用例，语义上应「只编译」还是「要执行并断言其失败」？ | 现状只编译不执行。若本意是后者，则归位工作还差一步 | fix-ci / qa 口径 |
+
+### 12.10 本轮资源用量说明
+
+第 11 轮定的「PM 不重复跑构建」在本轮**被我有意突破**，因为「合了 #35 就绿」这个判断
+无法靠读 diff 证伪，而 CNB 的 build API **不返回 stage 级明细**（`pipelines[].stages` 为空数组），
+不实跑就查不出第二道红灯。实跑均限定最小范围、串行、并发为 1，单次最长 24s，未触发内存告警。
+
+**结论：这条自律应当修订为「不重复跑*别人已经报过结果*的构建；涉及关键路径判定时必须自己实跑」。**
+本轮如果继续遵守旧口径，交付给 team-lead 的会是一个错误的「合并 #35 即解锁」的结论。
 
