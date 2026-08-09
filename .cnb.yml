@@ -166,6 +166,15 @@ $:
         cpus: 4
       docker:
         image: golang:1.25
+      # 出多架构镜像必须开 dind 并启用 rootlessBuildkitd：默认的 docker 驱动
+      # 存不下 manifest list（会报 "docker exporter does not currently support
+      # exporting manifest lists"），只有 buildkitd 后端能一次出双架构并 --push。
+      # 声明本服务后 CNB 会自动 docker login 到本仓库制品库 docker.cnb.cool。
+      services:
+        - name: docker
+          options:
+            rootlessBuildkitd:
+              enabled: true
       stages:
         - *gate_build
         - *gate_vet
@@ -184,6 +193,34 @@ $:
         # 任一不过直接非零退出，发布就停在这里。
         - name: 构建四平台发布产物
           script: VERSION=$CNB_BRANCH sh scripts/build-release.sh
+        # ------------------------------------------------------------------
+        # 容器镜像与裸包是**双轨**交付，不是二选一 —— NAS 用户只用容器。
+        # 这一 stage 在 v0.2.0 前是缺席的：打 tag 只会产出 Release 附件，
+        # 镜像永远不会存在，而且流水线全绿，没有任何地方会提示它没做。
+        #
+        # 位置刻意放在 git:release **之前**：镜像出不来就不建 Release，
+        # 避免发出一个"只有裸包、没有镜像"的半成品版本。重跑是安全的 ——
+        # git:release 默认 overlying=false（先删后建），镜像同 tag 覆盖推送。
+        #
+        # --skip-build 的前提（已核实，别照抄字面）：上一个 stage 已把四平台
+        # 产物落到 **dist/*.tar.gz**。docker-build.sh 是从这些 tar.gz 里解出
+        # 二进制、自己摆进 dist/docker/ 再 COPY 进镜像的，**不是**从 dist/docker/
+        # 直接取现成的。两处版本号都取 $CNB_BRANCH（tag_push 下就是 tag 名），
+        # 所以它按 stupidsamba_${CNB_BRANCH}_linux_{amd64,arm64}.tar.gz 找得到。
+        # 这也保证了镜像里的字节与用户下载的裸包**完全同一份**。
+        #
+        # 不打 :latest。与上面 Release 的 preRelease:true/latest:false 保持一致：
+        # v0.x 一律按内测发布，:latest 要等第一个正式版再一起放开，
+        # 两处必须同时改，不要只改一边。
+        - name: 构建并推送多架构容器镜像
+          script: |
+            set -e
+            # services.docker 已经自动登录过一次，这里再显式登一次是兜底：
+            # 自动登录哪天失效，失败点会明确停在这一行，而不是拖到 buildx --push
+            # 的最后一秒才报一句 denied，让人误以为是构建出了问题。
+            # 用 --password-stdin 而不是 -p：后者会把令牌写进进程命令行与 CI 日志。
+            printf '%s' "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
+            sh scripts/docker-build.sh --tag "$CNB_BRANCH" --push
         - name: 创建 Release（预发布）
           type: git:release
           options:
