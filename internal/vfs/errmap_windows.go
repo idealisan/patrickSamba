@@ -20,6 +20,7 @@ const (
 	errAlreadyExists    syscall.Errno = 183 // ERROR_ALREADY_EXISTS
 	errFilenameTooLong  syscall.Errno = 206 // ERROR_FILENAME_EXCED_RANGE
 	errDirectory        syscall.Errno = 267 // ERROR_DIRECTORY
+	errNotSameDevice    syscall.Errno = 17  // ERROR_NOT_SAME_DEVICE（跨卷 rename/hardlink）
 	errNotSupported     syscall.Errno = 50  // ERROR_NOT_SUPPORTED
 	errInvalidParam     syscall.Errno = 87  // ERROR_INVALID_PARAMETER
 	errNegativeSeek     syscall.Errno = 131 // ERROR_NEGATIVE_SEEK
@@ -45,7 +46,7 @@ func mapErrno(errno syscall.Errno) error {
 		return ErrInvalidPath
 	case errDirectory:
 		return ErrNotDir
-	case errNotSupported:
+	case errNotSupported, errNotSameDevice:
 		return ErrNotSupported
 	case errInvalidParam, errNegativeSeek:
 		return ErrInvalidArg
