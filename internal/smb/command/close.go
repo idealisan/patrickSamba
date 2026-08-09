@@ -18,7 +18,15 @@ func init() {
 func (c *Context) resolveOpen(fid wire.FileID) (*Open, error) {
 	if fid.IsCompound() {
 		if c.Chain.LastOpen == nil {
-			return nil, status.FileClosed
+			// MS-SMB2 §3.3.5.2.7.2 原文："When the current operation
+			// requires a FileId, and if the previous operation neither
+			// contains nor generates a FileId, the server MUST fail the
+			// current operation and all subsequent operations with
+			// STATUS_INVALID_HANDLE."
+			//
+			// 注意这里**不是** STATUS_FILE_CLOSED —— 那是 §3.3.5.2.10
+			// 针对"给了具体 FileId 但句柄已失效"的错误码。
+			return nil, status.InvalidHandle
 		}
 		return c.Chain.LastOpen, nil
 	}
