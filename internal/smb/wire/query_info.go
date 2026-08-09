@@ -558,6 +558,31 @@ func (i FsVolumeInfo) Encode() []byte {
 	return b
 }
 
+// ParseFsVolumeInfo 解析 FileFsVolumeInformation。
+//
+// 存在的意义不是服务端要用（我们只编不解），而是抓包比对：把真实 Samba 的
+// 响应解出来再编回去，逐字节对上才能证明我们对结构布局的理解没错
+// （AGENTS.md §3「关键路径要有抓包比对」）。下面几个 ParseFs* 同理。
+func ParseFsVolumeInfo(data []byte) (FsVolumeInfo, error) {
+	var i FsVolumeInfo
+	if err := need(data, 18); err != nil {
+		return i, fmt.Errorf("FileFsVolumeInformation: %w", err)
+	}
+	labelLen := int(le.Uint32(data[12:]))
+	if err := need(data, 18+labelLen); err != nil {
+		return i, fmt.Errorf("FileFsVolumeInformation 卷标: %w", err)
+	}
+	i.VolumeCreationTime = le.Uint64(data[0:])
+	i.VolumeSerialNumber = le.Uint32(data[8:])
+	i.SupportsObjects = data[16] != 0
+	label, err := DecodeUTF16LE(data[18 : 18+labelLen])
+	if err != nil {
+		return i, fmt.Errorf("FileFsVolumeInformation 卷标: %w", err)
+	}
+	i.Label = label
+	return i, nil
+}
+
 // FsSizeInfo 是 FileFsSizeInformation（MS-FSCC §2.5.8），固定 24 字节。
 type FsSizeInfo struct {
 	TotalAllocationUnits     int64
@@ -577,6 +602,19 @@ func (i FsSizeInfo) Encode() []byte {
 	le.PutUint32(b[16:], i.SectorsPerAllocationUnit)
 	le.PutUint32(b[20:], i.BytesPerSector)
 	return b
+}
+
+// ParseFsSizeInfo 解析 FileFsSizeInformation。
+func ParseFsSizeInfo(data []byte) (FsSizeInfo, error) {
+	var i FsSizeInfo
+	if err := need(data, FsSizeInfoSize); err != nil {
+		return i, fmt.Errorf("FileFsSizeInformation: %w", err)
+	}
+	i.TotalAllocationUnits = int64(le.Uint64(data[0:]))
+	i.AvailableAllocationUnits = int64(le.Uint64(data[8:]))
+	i.SectorsPerAllocationUnit = le.Uint32(data[16:])
+	i.BytesPerSector = le.Uint32(data[20:])
+	return i, nil
 }
 
 // FsFullSizeInfo 是 FileFsFullSizeInformation（MS-FSCC §2.5.4），固定 32 字节。
@@ -601,6 +639,20 @@ func (i FsFullSizeInfo) Encode() []byte {
 	le.PutUint32(b[24:], i.SectorsPerAllocationUnit)
 	le.PutUint32(b[28:], i.BytesPerSector)
 	return b
+}
+
+// ParseFsFullSizeInfo 解析 FileFsFullSizeInformation。
+func ParseFsFullSizeInfo(data []byte) (FsFullSizeInfo, error) {
+	var i FsFullSizeInfo
+	if err := need(data, FsFullSizeInfoSize); err != nil {
+		return i, fmt.Errorf("FileFsFullSizeInformation: %w", err)
+	}
+	i.TotalAllocationUnits = int64(le.Uint64(data[0:]))
+	i.CallerAvailableAllocationUnits = int64(le.Uint64(data[8:]))
+	i.ActualAvailableAllocationUnits = int64(le.Uint64(data[16:]))
+	i.SectorsPerAllocationUnit = le.Uint32(data[24:])
+	i.BytesPerSector = le.Uint32(data[28:])
+	return i, nil
 }
 
 // FsDeviceInfo 是 FileFsDeviceInformation（MS-FSCC §2.5.10），固定 8 字节。
@@ -638,6 +690,37 @@ func (i FsAttributeInfo) Encode() []byte {
 	return b
 }
 
+// ParseFsDeviceInfo 解析 FileFsDeviceInformation。
+func ParseFsDeviceInfo(data []byte) (FsDeviceInfo, error) {
+	var i FsDeviceInfo
+	if err := need(data, FsDeviceInfoSize); err != nil {
+		return i, fmt.Errorf("FileFsDeviceInformation: %w", err)
+	}
+	i.DeviceType = le.Uint32(data[0:])
+	i.Characteristics = le.Uint32(data[4:])
+	return i, nil
+}
+
+// ParseFsAttributeInfo 解析 FileFsAttributeInformation。
+func ParseFsAttributeInfo(data []byte) (FsAttributeInfo, error) {
+	var i FsAttributeInfo
+	if err := need(data, 12); err != nil {
+		return i, fmt.Errorf("FileFsAttributeInformation: %w", err)
+	}
+	nameLen := int(le.Uint32(data[8:]))
+	if err := need(data, 12+nameLen); err != nil {
+		return i, fmt.Errorf("FileFsAttributeInformation 文件系统名: %w", err)
+	}
+	i.Attributes = le.Uint32(data[0:])
+	i.MaximumComponentNameLength = int32(le.Uint32(data[4:]))
+	name, err := DecodeUTF16LE(data[12 : 12+nameLen])
+	if err != nil {
+		return i, fmt.Errorf("FileFsAttributeInformation 文件系统名: %w", err)
+	}
+	i.FileSystemName = name
+	return i, nil
+}
+
 // FsSectorSizeInfo 是 FileFsSectorSizeInformation（MS-FSCC §2.5.7），固定 28 字节。
 type FsSectorSizeInfo struct {
 	LogicalBytesPerSector                                 uint32
@@ -663,6 +746,22 @@ func (i FsSectorSizeInfo) Encode() []byte {
 	le.PutUint32(b[20:], i.ByteOffsetForSectorAlignment)
 	le.PutUint32(b[24:], i.ByteOffsetForPartitionAlignment)
 	return b
+}
+
+// ParseFsSectorSizeInfo 解析 FileFsSectorSizeInformation。
+func ParseFsSectorSizeInfo(data []byte) (FsSectorSizeInfo, error) {
+	var i FsSectorSizeInfo
+	if err := need(data, FsSectorSizeInfoSize); err != nil {
+		return i, fmt.Errorf("FileFsSectorSizeInformation: %w", err)
+	}
+	i.LogicalBytesPerSector = le.Uint32(data[0:])
+	i.PhysicalBytesPerSectorForAtomicity = le.Uint32(data[4:])
+	i.PhysicalBytesPerSectorForPerformance = le.Uint32(data[8:])
+	i.FileSystemEffectivePhysicalBytesPerSectorForAtomicity = le.Uint32(data[12:])
+	i.Flags = le.Uint32(data[16:])
+	i.ByteOffsetForSectorAlignment = le.Uint32(data[20:])
+	i.ByteOffsetForPartitionAlignment = le.Uint32(data[24:])
+	return i, nil
 }
 
 // FsObjectIDInfoSize 是 FileFsObjectIdInformation（MS-FSCC §2.5.6）的字节数：
