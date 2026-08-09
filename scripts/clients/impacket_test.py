@@ -77,7 +77,10 @@ def main() -> int:
     assert "impacket_renamed.txt" not in [f.get_longname() for f in conn.listPath(share, "\\*")]
     print("  删除文件 OK")
 
-    conn.logoff()
+    # close() 内部已经会发 LOGOFF，不要再单独调 logoff()：
+    # impacket 的 logoff() 会把 SessionID 清零但保留加密开关，
+    # 于是 close() 发出的第二个 LOGOFF 变成「SessionId=0 的加密帧」，
+    # 服务端只能按 MS-SMB2 §3.3.5.2.1 断开连接并打一条 WARN。
     conn.close()
     return 0
 
