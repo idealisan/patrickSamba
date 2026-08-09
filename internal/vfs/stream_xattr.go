@@ -36,6 +36,27 @@ package vfs
 // rename/unlink 带走，不会在目录里留下客户端看得见的垃圾条目，
 // 也不会让 Time Machine 的 band 计数出错。代价是受 xattr 大小上限约束，
 // 但通用 ADS 的真实用途（Finder 元数据、隔离标记）都只有几十到几百字节。
+//
+// # 流名里的「非法」字符：原样存，不做转换
+//
+// macOS 真实用到的流名长这样：`com.apple.metadata:kMDItemFinderComment`
+// —— **含冒号**，而冒号是 SMB 流名的分隔符。这看似矛盾，实际不会冲突：
+//
+//	OS X maps NTFS illegal characters to the Unicode private range
+//	in SMB requests.                        —— vfs_fruit(8) 手册
+//
+// 也就是说客户端在线上发的是 U+F03A（= 0xF000 + ':'），不是裸冒号。
+// 于是 SplitStreamPath 按裸冒号切分**依然是正确的**，
+// ValidateStreamName 拒绝裸冒号也依然正确 —— 合法请求里根本不会有。
+//
+// 我们把流名**原样**（连同私用区字符）拼进 xattr 名，不还原成 ASCII。
+// 依据：Samba 的 `fruit:encoding` 默认值就是 `private`（保留私用区字符，
+// 见 vfs_fruit.c:319 的 lp_parm_enum 默认参数），`native` 是可选项且
+// 手册明确警告它 "is known to not fully work"。原样存能保证
+// SMB 读写完美往返，也与 Samba 的默认配置在磁盘上一致。
+//
+// 注意私用区字符 UTF-8 编码占 3 字节，会更快吃掉下面的名字长度预算 ——
+// 这是对的，xattr 名的上限本来就是按字节算的。
 
 import (
 	"strings"
