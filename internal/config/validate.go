@@ -467,6 +467,15 @@ func Warnings(c *Config) []string {
 		if s.QuotaBytes != 0 && s.QuotaBytes < quotaMinWarn {
 			w = append(w, fmt.Sprintf("shares[%d] %q 的 quota_bytes=%d 小于 1 GiB，Time Machine 在过小的卷上会反复失败", i, s.Name, s.QuotaBytes))
 		}
+		// 设了却不生效的字段必须说出来，否则用户会以为限额已经生效。
+		if s.TimeMachineMaxSize != 0 {
+			msg := fmt.Sprintf("shares[%d] %q 的 time_machine_max_size 目前不起任何作用"+
+				"（_adisk 的 TXT 里没有经过验证的容量键，macOS 是按 SMB 上报的卷容量判断的）", i, s.Name)
+			if s.QuotaBytes == 0 {
+				msg += "；要限制 Time Machine 的体积请改用 quota_bytes"
+			}
+			w = append(w, msg)
+		}
 		if s.MetadataPath == "" {
 			continue
 		}
