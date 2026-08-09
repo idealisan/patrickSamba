@@ -59,7 +59,7 @@ $:
           name: 测试代码编译校验（全部 build tag × 全部平台）
           script: sh test/ci/check-test-compile.sh
         - &gate_constraints
-          name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
+          name: 校验硬性约束 C1/C3/C4/C8/C9 (AGENTS.md)
           script: sh scripts/check-constraints.sh
         # 这一关原先写的是 `CGO_ENABLED=0 go test -race`，而**race 检测器依赖 cgo**，
         # 于是 go 直接拒绝执行：`go: -race requires cgo; enable cgo by setting
