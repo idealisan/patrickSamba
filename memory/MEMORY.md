@@ -27,4 +27,5 @@
 - [新增 build tag 的 PR 会当场打红全仓](project_build_tag_registry.md) — check-test-compile.sh 有未知 tag 守卫，新 tag 必须同 PR 登记进 TAGS
 - [push 前必须单独跑 gofmt -l .](feedback_gofmt_gate_not_in_check_test_compile.md) — check-test-compile.sh 不跑 gofmt，只跑它漏网，push 被 gate_gofmt 打红
 - [跨 agent 的 sha/计数出厂即过期 + 批量扫描要抽验](feedback_stale_sha_refetch_and_batch_spotcheck.md) — 决策前先自己 fetch；批量结论随机抽 1 个用精确方法复验，别换简单命令
+- [两个 CodeBuddy 进程可同挂一个 session](project_dual_codebuddy_session.md) — codebuddy -c 不查占用；「双进程=两套同名 agent 共写 /work」是机制推演，本次实测**未发生**（跨 owner 写冲突 0 次），当危险信号看、别当事故成因；附自检命令与「崩溃丢什么/不丢什么」判据
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
