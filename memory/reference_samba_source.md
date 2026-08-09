@@ -27,6 +27,11 @@ curl -sSL "https://gitlab.com/samba-team/samba/-/raw/master/<仓库内路径>" -
 | `libcli/smb/smb2_constants.h` | `SMB2_CRTCTX_AAPL_*` 各能力位 |
 | `source3/smbd/smb2_create.c` | MxAc 的两条真实行为：L1608 请求长度只许 0/8，L1875 mtime 未变则**不回**响应 context |
 | `source3/lib/string_replace.c` | `macos_string_replace_map` —— macOS 非法字符 ↔ Unicode 私有区映射表（见下） |
+| `source3/smbd/smb2_ioctl_filesys.c` | `fsctl_qar`（QUERY_ALLOCATED_RANGES）、`fsctl_zero_data`、压缩、dup_extents |
+| `source3/smbd/smb2_ioctl_network_fs.c` | copychunk、QUERY_NETWORK_INTERFACE_INFO、VALIDATE_NEGOTIATE_INFO、REQUEST_RESUME_KEY |
+| `source3/modules/vfs_default.c` | `vfswrap_fsctl` —— **上面两个文件 switch 里没有的 FSCTL 全部 fall through 到这里**，`FSCTL_GET_SHADOW_COPY_DATA` 就在其中 |
+| `source3/smbd/dosmode.c` | `file_set_sparse()` —— Samba 把稀疏位存进 `user.DOSATTRIB`，所以它的 SET_SPARSE(FALSE) 能成功 |
+| `source3/libsmb/cli_smb2_fnum.c` | smbclient **客户端侧**的解析。与服务端行为冲突时以它为准 —— 它才是我们的对端 |
 
 ## 一个特别容易搞错的事实：macOS 非法字符映射不是 `0xF000 + 字符`
 
@@ -53,6 +58,30 @@ Finder 注释与 Spotlight 元数据全部读不回来，且与 Samba/netatalk �
 注意 Samba 近年做过文件重命名：目录项编码**不在** `source3/smbd/dir.c` 里
 （那里已经没有 readdir_attr 了），也不在 `source3/smbd/trans2.c`（只剩 88 行的壳），
 在 `source3/smbd/smb2_trans2.c`。找不到就先 `grep -n readdir_attr` 定位再读。
+
+## 找 FSCTL 实现时别按控制码的 DeviceType 猜文件
+
+真实教训：`FSCTL_SRV_ENUMERATE_SNAPSHOTS = 0x00144064`，DeviceType 是 0x14
+（FILE_DEVICE_NETWORK_FILE_SYSTEM），照分类猜应该在 `smb2_ioctl_network_fs.c`。
+结果那里的 switch **根本没有它** —— 它走 `default:` 落到 `SMB_VFS_FSCTL`，
+真正实现在 `source3/modules/vfs_default.c` 的 `vfswrap_fsctl`。
+连抓两个文件都扑空，白费三次 fetch。**先 grep 函数名，别按分类猜。**
+
+## Samba 的服务端与客户端会互相不一致
+
+遇到分歧看 `source3/libsmb/cli_smb2_fnum.c`（smbclient 走的就是它）。
+实例 —— shadow copy 应答长度：
+
+- 服务端 `vfswrap_fsctl`：`max_out_len == 16` 回 16 字节，`> 16` 回
+  `12 + labels_data_count`，而 `labels_data_count = n*50 + 2`，
+  **零快照时 SnapShotArraySize 是 2 不是 0**，整个应答只有 14 字节；
+- 客户端 `cli_smb2_shadow_copy_data_fnum_recv`：硬性要求 `length >= 16`，
+  否则回 `NT_STATUS_INVALID_NETWORK_RESPONSE`。
+
+也就是说**严格按规范/Windows 的 14 字节形式回，会被 smbclient 判为坏响应**。
+本项目取 16 字节（14 的超集）。同一族的坑还有：`max_out_len < 16` 时
+Samba 回 `INVALID_PARAMETER` 而不是 `BUFFER_TOO_SMALL`（后者只用于
+「头装得下但标签装不下」的第二道检查）。
 
 License 提醒：Samba 是 GPL-3.0，**只可阅读参考、不得复制代码**（AGENTS.md §4）。
 把查到的事实写成注释 + 自己实现，并在注释里注明文件与函数名。
