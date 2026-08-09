@@ -44,6 +44,22 @@ $:
               echo "错误: 产物不是静态链接"; ldd /tmp/stupidsamba; exit 1
             fi
             echo "OK: 静态链接"
+        # 示例配置是大多数人接触本项目的第一份文件，它错了等于开箱即坏。
+        # 曾经真的错过：addresses 写成 [0.0.0.0, "::"]，照抄的人一启动就 bind 失败。
+        # 这里用**真二进制**跑一遍 -check，与 internal/config 里的单元测试形成双保险。
+        - name: 示例配置必须能通过校验
+          script: |
+            set -e
+            CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
+            # 示例里的共享目录在构建机上不存在，先建出来 —— 校验的是配置本身，
+            # 不是构建机的目录结构。
+            mkdir -p /srv/share/public /srv/share/docs /srv/share/private /srv/share/backup
+            /tmp/stupidsamba -config configs/example.yaml -check
+        # 优雅退出只有端到端能验：真二进制 + 真信号 + 真客户端连接。
+        # 防的是「代码里写了 Shutdown 和超时但一行没生效」这类接线错误 ——
+        # 每个函数单独看都对，错的是它们怎么被接到一起的，单元测试看不出来。
+        - name: 优雅退出冒烟
+          script: CGO_ENABLED=0 go test -tags smoke -count=1 -v -timeout 120s ./cmd/stupidsamba/
 
   pull_request:
     - runner:
@@ -57,3 +73,11 @@ $:
           script: CGO_ENABLED=0 go vet ./...
         - name: 单元测试
           script: CGO_ENABLED=0 go test -race -count=1 ./...
+        - name: 示例配置必须能通过校验
+          script: |
+            set -e
+            CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
+            mkdir -p /srv/share/public /srv/share/docs /srv/share/private /srv/share/backup
+            /tmp/stupidsamba -config configs/example.yaml -check
+        - name: 优雅退出冒烟
+          script: CGO_ENABLED=0 go test -tags smoke -count=1 -timeout 120s ./cmd/stupidsamba/
