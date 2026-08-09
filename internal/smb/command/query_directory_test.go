@@ -608,11 +608,23 @@ func drainQueryDirectory(tb testing.TB, ctx *Context, open *Open) int {
 	}
 }
 
+// idBothFixed 是 FileIdBothDirectoryInformation 固定部分的长度（MS-FSCC §2.4.17 = 104）。
+//
+// 取自 wire 而不是在本文件里另写一个常量：aapl.go 改用 ShortNameRaw 之后
+// 命令层不再需要自己知道条目布局，这个长度的唯一权威在 wire 层。
+var idBothFixed = func() int {
+	n, ok := wire.DirInfoFixedSize(wire.FileIdBothDirectoryInformation)
+	if !ok {
+		panic("wire 不认识 FileIdBothDirectoryInformation")
+	}
+	return n
+}()
+
 // countDirEntries 沿 NextEntryOffset 链数条数。
 func countDirEntries(tb testing.TB, buf []byte) int {
 	n, pos := 0, 0
 	for {
-		if pos+aaplDirEntryFixed > len(buf) {
+		if pos+idBothFixed > len(buf) {
 			tb.Fatalf("目录项在 %d 处被截断", pos)
 		}
 		n++
@@ -630,16 +642,16 @@ func splitDirEntries(t *testing.T, buf []byte, out map[string][]byte) {
 
 	pos := 0
 	for {
-		if pos+aaplDirEntryFixed > len(buf) {
+		if pos+idBothFixed > len(buf) {
 			t.Fatalf("目录项在 %d 处被截断（缓冲 %d 字节）", pos, len(buf))
 		}
 		next := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
 		nameLen := int(binary.LittleEndian.Uint32(buf[pos+60 : pos+64]))
-		end := pos + aaplDirEntryFixed + nameLen
+		end := pos + idBothFixed + nameLen
 		if end > len(buf) {
 			t.Fatalf("目录项名字越界: %d > %d", end, len(buf))
 		}
-		name, err := wire.DecodeUTF16LE(buf[pos+aaplDirEntryFixed : end])
+		name, err := wire.DecodeUTF16LE(buf[pos+idBothFixed : end])
 		if err != nil {
 			t.Fatalf("解码名字: %v", err)
 		}
