@@ -258,17 +258,20 @@ $:
         # 所以它按 stupidsamba_${CNB_BRANCH}_linux_{amd64,arm64}.tar.gz 找得到。
         # 这也保证了镜像里的字节与用户下载的裸包**完全同一份**。
         #
-        # 不打 :latest。原先的理由是「与下面 Release 的 preRelease:true/
-        # latest:false 保持一致」，而 Release 那边已经改成按 tag 名判渠道，
-        # 所以这条理由**现在不成立了**：正式版 tag 会拿到 latest 的 Release，
-        # 镜像却仍然没有 :latest，两边不再同步。
+        # 镜像 :latest **与上面的 Release 渠道同源**：都按 tag 名里的连字符判定，
+        # 用同一段 `case` 表达式（带 `-` 的不带 --latest，不含 `-` 的带 --latest）。
+        # 这是一条**两处必须同时改、不能只改一边**的不变量：Release 侧一旦改用
+        # tag 名判渠道，镜像侧若仍写死「不打 :latest」，就会退化成「正式版 Release
+        # 标了 latest、镜像却没有 :latest」——双轨交付里容器那一轨对新用户是空的
+        # （`docker pull <repo>` 不带 tag 的人拿不到任何东西），等于没交付。
+        # 2026-08-09 之前是硬编码 preRelease:true/latest:false 且镜像不打 :latest，
+        # 那时两边一致；Release 改成按 tag 名判定后，镜像侧必须跟上，否则就亲手
+        # 制造了这条注释一直警告的「不同步」状态。
         #
-        # 这里刻意先不改，因为它是一个独立的决定而不是本次改动的推论：
-        # 镜像的 :latest 一旦推上去，`docker pull <repo>` 不带 tag 的人立刻会
-        # 拿到它，影响面比 Release 页面上的一个标记大。docker-build.sh 已经支持
-        # `--latest`，接上只是在下面那行加一个条件参数，等发布渠道这套按 tag 名
-        # 判定的机制**跑过真实 tag 验证**之后再单独决定（跟踪：见 PR 描述）。
-        # 在那之前，不要把这段注释删掉当成「已经一致」。
+        # `--latest` 经由 docker-build.sh 的 `--latest` 开关接入；正式版 tag 一落地
+        # 就把镜像 :latest 顶到它，预发布 tag 不动 :latest（保持指向之前的正式版）。
+        # 反向对照（带 `-` 的 tag 不动镜像 :latest）与 Release 侧共用同一段 `case`
+        # 判定，逻辑同源，未单独跑真 tag 验证。
         - name: 构建并推送多架构容器镜像
           script: |
             set -e
@@ -277,7 +280,8 @@ $:
             # 的最后一秒才报一句 denied，让人误以为是构建出了问题。
             # 用 --password-stdin 而不是 -p：后者会把令牌写进进程命令行与 CI 日志。
             printf '%s' "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
-            sh scripts/docker-build.sh --tag "$CNB_BRANCH" --push
+            LATEST=""; case "$CNB_BRANCH" in *-*) ;; *) LATEST=--latest ;; esac
+            sh scripts/docker-build.sh --tag "$CNB_BRANCH" --push $LATEST
         # ------------------------------------------------------------------
         # 发布渠道由 **tag 名里有没有连字符** 决定，不再硬编码：
         #   v0.2.0        → 正式版（preRelease: false / latest: true）
