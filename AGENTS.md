@@ -395,6 +395,18 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
    把父 shell 一起杀掉，表现为「命令无输出 / 被 SIGTERM / 服务起不来」，极难排查。
    一律用 `pkill -x stupidsamba`。起后台服务用
    `setsid nohup ... > log 2>&1 < /dev/null & disown`。
+   **但 `pkill -x` 也有坑**：进程名超过 15 字符时内核 `comm` 字段被截断，
+   pkill 报 `pattern that searches for process name longer than 15 characters
+   will result in zero matches` 然后**静默匹配不到** —— 旧进程还活着占着端口，
+   新进程绑不上，表现和「服务起不来」一模一样。**调试二进制名必须 ≤ 15 字符**
+   （`stupidsamba4462` 正好 15，再长就废了）。
+5. **`setsid nohup ... &` 之后 `$!` 不是监听进程**：`$!` 是 setsid 包装进程的 PID，
+   真正 listen 的是它的子进程，`kill $!` 杀不掉。找真实 PID 用 **`fuser <port>/tcp`**
+   （本容器 `ss -ltnp` 拿不到 pid 列）。
+6. **多 agent 共用工作树时，未提交的中间态会砸到别人**。真实发生过：某 agent 分两步做
+   重命名（先改声明、再改引用），中间约 1 分钟窗口里工作树是 `undefined: xxx`，
+   另一个 agent 正好在那时 `go build ./...` 撞上，排查了一个根本不存在的 bug。
+   **跨文件改动必须一次原子改完再落盘**；报编译错误前先重跑一次确认不是瞬时态。
 5. **致命坑二：smbclient 4.22 的 `-c` 不按换行分割命令**。多条命令必须用**分号**分隔。
    写成多行会产生 `NT_STATUS_NO_SUCH_FILE listing \get` 这种**假故障**，
    看起来像服务端 bug，其实是测试脚本的问题。
