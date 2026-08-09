@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -208,6 +211,63 @@ func TestMaxConnectionsEnforced(t *testing.T) {
 	if got := srv.ConnectionCount(); got != 2 {
 		t.Fatalf("超限连接不应被登记：连接数 = %d，期望 2", got)
 	}
+}
+
+// TestRejectLogIsThrottled：超限拒绝必须**可见但节流**。
+//
+// 静默拒绝会让运维完全查不出"为什么连不上"；而一条连接一行日志，
+// 连接洪水就能顺带把磁盘写满，等于把一次拒绝服务放大成第二次。
+func TestRejectLogIsThrottled(t *testing.T) {
+	var buf syncBuffer
+	srv := newTestServer(t, func(o *Options) {
+		o.MaxConnections = 1
+		o.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	})
+	addr := serverAddr(t, srv)
+
+	dial(t, addr) // 占满唯一的槽位
+	waitConnCount(t, srv, 1, 2*time.Second)
+
+	const flood = 20
+	for range flood {
+		c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			t.Fatalf("建链失败: %v", err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _ = c.Read(make([]byte, 1)) // 等服务端把它关掉
+		_ = c.Close()
+	}
+
+	logged := strings.Count(buf.String(), "并发连接数已达上限")
+	if logged == 0 {
+		t.Fatalf("超限拒绝必须留下日志，实际日志:\n%s", buf.String())
+	}
+	if logged > 1 {
+		t.Fatalf("%d 次拒绝写了 %d 行日志，节流没生效:\n%s", flood, logged, buf.String())
+	}
+	// 那唯一一行必须带上被拒总数，否则节流会把信息量也一起丢掉。
+	if !strings.Contains(buf.String(), "rejected=") {
+		t.Fatalf("拒绝日志应当带上区间内的被拒次数:\n%s", buf.String())
+	}
+}
+
+// syncBuffer 是并发安全的 bytes.Buffer（accept goroutine 与测试 goroutine 同时访问）。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestOversizedFrameDropsOnlyThatConnection：声明超过单帧上限的长度前缀
