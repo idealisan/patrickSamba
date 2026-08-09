@@ -28,6 +28,28 @@ $:
         - name: ready
           script: echo "云原生开发环境已就绪"
 
+        # 云原生开发环境每次重建都会装回原版 CodeBuddy，补丁随之丢失，所以要在
+        # vscode 事件里自动打一遍。补丁本身的作用见 scripts/env/patch-codebuddy.sh
+        # 与 docs/troubleshooting-codebuddy.md（AGENTS.md §7.5 那个会卡死主 TUI 的
+        # 高危命令确认面板）。
+        #
+        # 为什么前台 + 后台各跑一次：CodeBuddy 可能在本 stage 结束之后才被装上，
+        # 那时前台这次是打不中的。后台那次 `--wait 600` 会盯十分钟，装上就补。
+        #
+        # 为什么 `|| true` 和 `exit 0` 两道兜底都要：这是**开发环境便利设施，不是门禁**，
+        # 任何情况下都不许它把 vscode 环境的启动搞失败。补丁没打上最多是面板还会卡，
+        # 环境起不来则是彻底不能干活 —— 失败方向必须选前者。
+        #
+        # ⚠ `setsid nohup ... &` 能否在 stage 结束后活下来（CNB 会不会连同进程组一起
+        # 收走）**尚未实测**。原样保留 env-patch 交付的写法；真不行也只是后台那次失效，
+        # 前台那次照旧生效，不影响任何其他事情。
+        - name: 打 CodeBuddy 高危命令面板补丁
+          script: |
+            sh scripts/env/patch-codebuddy.sh || true
+            setsid nohup sh scripts/env/patch-codebuddy.sh --wait 600 \
+              > /tmp/patch-codebuddy.log 2>&1 < /dev/null &
+            exit 0
+
   # ---------------------------------------------------------------- 校验门禁
   #
   # push 与 pull_request 走同一套 stage（YAML 锚点复用，避免两边漂移）。
