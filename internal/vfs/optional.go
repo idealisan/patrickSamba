@@ -17,7 +17,11 @@ package vfs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+// pathSeparator 是宿主机路径分隔符的字符串形式（"/" 或 "\\"）。
+const pathSeparator = string(filepath.Separator)
 
 // DeleteOnCloser 让已打开的句柄可以**事后**被标记为「关闭时删除」。
 //
@@ -58,10 +62,13 @@ type SparseFile interface {
 	// （客户端最多多读一遍零），少报会让客户端以为数据丢了。
 	AllocatedRanges(off, length int64) ([]Range, error)
 
-	// SetSparse 标记/取消稀疏文件（FSCTL_SET_SPARSE）。
+	// SetSparse 标记/取消稀疏文件（FSCTL_SET_SPARSE，MS-FSCC §2.3.69）。
 	//
-	// POSIX 上文件天然稀疏、没有这个开关，实现为无操作返回 nil ——
-	// 返回 ErrNotSupported 会让 macOS 在建 .sparsebundle 时直接放弃。
+	// POSIX 后端上这个操作是**不对称**的：
+	//   v=true  → nil（文件天然可稀疏，客户端要的效果已经成立）
+	//   v=false → ErrNotSupported（做不到，且不能假装做到）
+	// 理由见 sparse_unix.go 的 platformSetSparse。Windows/NTFS 两个方向
+	// 都真实生效。
 	SetSparse(v bool) error
 }
 
@@ -135,6 +142,28 @@ type DirAppleMetadata interface {
 	// ErrInvalidPath —— 这是安全边界，不能因为「反正是内部调用」就省掉
 	// （AGENTS.md §8）。
 	AppleInfoAt(name string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)
+
+	// AppleInfoAtBatch 是 AppleInfoAt 的批量版本，语义**逐条完全一致**。
+	//
+	// 返回的切片长度恒等于 len(names)，第 i 项对应 names[i]；
+	// 单条目的失败记在该项的 Err 里，**不会**中断整批 ——
+	// 一个名字非法不该让整页 QUERY_DIRECTORY 失败。
+	// 返回的 error 只表示句柄级失败（ErrNotDir / ErrClosed），
+	// 此时结果切片为 nil。
+	//
+	// 相对逐条调用省掉的是每条一次的锁获取与 402 字节读缓冲分配
+	// （整批复用一个）。getxattr 本身省不掉：POSIX 没有批量扩展属性
+	// 接口，见 apple_bench_test.go 的实测结论。
+	AppleInfoAtBatch(names []string) ([]AppleInfoResult, error)
+}
+
+// AppleInfoResult 是 AppleInfoAtBatch 的单条结果。
+type AppleInfoResult struct {
+	FinderInfo [FinderInfoSize]byte
+	RsrcSize   int64
+	// Err 非 nil 表示这一条取失败（名字非法等）。注意「对象没有 Apple
+	// 元数据」不是错误：那种情况是零值 FinderInfo + RsrcSize 0 + nil。
+	Err error
 }
 
 var (
@@ -161,11 +190,16 @@ func (l *LocalFS) AppleInfo(p string) ([FinderInfoSize]byte, int64, error) {
 	if err != nil {
 		return fi, 0, err
 	}
+	// 这个 Lstat 不是多余的存在性检查：Resolver.resolveComponents
+	// **故意放行不存在的末级分量**（path.go:325「末级不存在是合法的」，
+	// FILE_CREATE / FILE_OPEN_IF 要用），所以 Resolve 成功不代表对象存在。
+	// 少了它，对不存在的路径查 Apple 元数据会返回全零 + nil，
+	// 上层会把「文件不存在」误当成「文件存在但没有 FinderInfo」。
 	if _, err := os.Lstat(host); err != nil {
 		return fi, 0, mapError(err)
 	}
 
-	return l.appleInfoAt(host, true)
+	return l.appleInfoAt(host, true, nil)
 }
 
 // AppleInfoAt 实现 DirAppleMetadata。
@@ -174,16 +208,7 @@ func (h *localHandle) AppleInfoAt(name string) ([FinderInfoSize]byte, int64, err
 	if !h.isDir {
 		return fi, 0, ErrNotDir
 	}
-	// 安全边界（AGENTS.md §8）：name 必须是单个**真实**分量。
-	//
-	// ValidateComponent 会拒掉空串、控制字符、'/'、'\\' 与 Windows 保留
-	// 设备名，但它**故意放行 "." 与 ".."**（SplitPath 另行处理它们），
-	// 所以这里必须单独拦一道 —— 否则 filepath.Join(host, "..") 会直接
-	// 拼出父目录，把 readdir_attr 变成一个目录穿越原语。
-	if name == "." || name == ".." {
-		return fi, 0, ErrInvalidPath
-	}
-	if err := ValidateComponent(name); err != nil {
+	if err := validateChildName(name); err != nil {
 		return fi, 0, err
 	}
 
@@ -202,17 +227,84 @@ func (h *localHandle) AppleInfoAt(name string) ([FinderInfoSize]byte, int64, err
 	}
 	h.mu.Unlock()
 
-	return h.fs.appleInfoAt(filepath.Join(host, name), probeRsrc)
+	return h.fs.appleInfoAt(filepath.Join(host, name), probeRsrc, nil)
 }
 
-// appleInfoAt 是两个入口共用的实现：宿主机路径 → FinderInfo + 资源派生大小。
+// AppleInfoAtBatch 实现 DirAppleMetadata。
+func (h *localHandle) AppleInfoAtBatch(names []string) ([]AppleInfoResult, error) {
+	if !h.isDir {
+		return nil, ErrNotDir
+	}
+
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil, ErrClosed
+	}
+	host := h.host
+	// 快照期间记下的 ._ 集合。这里把 map 引用**带出锁**是安全的：
+	// snapshotLocked 重新枚举时是整个换一个新 map，从不原地改旧的，
+	// 所以我们手上这一份不会被并发写。
+	var dotUnder map[string]struct{}
+	snapped := h.dirNames != nil
+	if snapped {
+		dotUnder = h.dotUnder
+	}
+	h.mu.Unlock()
+
+	// host 是 filepath.Join 的产物（已 Clean，无尾分隔符），唯一例外是
+	// 共享根恰好是 "/" 或 "C:\" 这种本身以分隔符结尾的路径。
+	prefix := host
+	if !strings.HasSuffix(prefix, pathSeparator) {
+		prefix += pathSeparator
+	}
+
+	out := make([]AppleInfoResult, len(names))
+	// 整批复用一个读缓冲 —— 这正是批量接口相对逐条调用的收益所在。
+	scratch := make([]byte, adMetaSize)
+
+	for i, name := range names {
+		if err := validateChildName(name); err != nil {
+			out[i].Err = err
+			continue
+		}
+		probeRsrc := true
+		if snapped {
+			_, probeRsrc = dotUnder[name]
+		}
+		// 直接拼接而不是 filepath.Join：name 已经过 validateChildName，
+		// 不含分隔符也不是 "."/“..”，无需再走一遍 Clean。
+		out[i].FinderInfo, out[i].RsrcSize, out[i].Err =
+			h.fs.appleInfoAt(prefix+name, probeRsrc, scratch)
+	}
+	return out, nil
+}
+
+// validateChildName 是目录句柄内按名字寻址的安全边界（AGENTS.md §8）。
+//
+// ValidateComponent 会拒掉空串、控制字符、'/'、'\\' 与 Windows 保留
+// 设备名，但它**故意放行 "." 与 ".."**（SplitPath 另行处理它们），
+// 所以这里必须单独拦一道 —— 否则 filepath.Join(host, "..") 会直接
+// 拼出父目录，把 readdir_attr 变成一个目录穿越原语。
+func validateChildName(name string) error {
+	if name == "." || name == ".." {
+		return ErrInvalidPath
+	}
+	return ValidateComponent(name)
+}
+
+// appleInfoAt 是三个入口共用的实现：宿主机路径 → FinderInfo + 资源派生大小。
 //
 // probeRsrc=false 表示调用方已经确知没有 ._ 旁路文件，跳过那次探测。
-func (l *LocalFS) appleInfoAt(host string, probeRsrc bool) ([FinderInfoSize]byte, int64, error) {
+// scratch 是可复用的 metadata 读缓冲，传 nil 则内部自行分配。
+func (l *LocalFS) appleInfoAt(host string, probeRsrc bool, scratch []byte) ([FinderInfoSize]byte, int64, error) {
 	var fi [FinderInfoSize]byte
-	// 两者都是「没有就算了」：缺 FinderInfo 或缺资源派生都是正常状态。
-	if ai, err := l.readAfpInfo(host); err == nil {
-		fi = ai.FinderInfo
+	// 两者都是「没有就算了」：缺 FinderInfo 或缺资源派生都是正常状态，
+	// 磁盘上的 blob 损坏也一样（一个坏掉的 FinderInfo 不该让整条目录项失败）。
+	if blob, err := readMetaXattrFast(host, scratch); err == nil {
+		if got, err := parseMetaXattr(blob); err == nil {
+			fi = *got
+		}
 	}
 	if !probeRsrc {
 		return fi, 0, nil

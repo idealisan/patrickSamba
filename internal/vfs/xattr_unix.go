@@ -96,6 +96,46 @@ func (x *unixXattr) get(name string, dest []byte) (int, error) {
 	return unix.Getxattr(x.path, name, dest)
 }
 
+// netatalkMetaHostName 是 netatalkMetaXattr 在宿主机上的名字
+// （Linux 上带 "user." 前缀）。encodeName 每次调用都要拼一次字符串，
+// 而 readdir_attr 是每条目录项调一次的热路径，这里算一次存下来。
+var netatalkMetaHostName = encodeName(netatalkMetaXattr)
+
+// readMetaXattrFast 用**一次** getxattr 把 netatalk metadata blob 读进 scratch。
+//
+// 与 XattrAccessor.Get 的区别：Get 是通用接口，必须先问长度再分配
+// （资源叉可以有几十 MB）。但 metadata blob 的长度是规范固定的
+// 402 字节（AD_DATASZ_XATTR），可以直接开一个够用的缓冲一趟读完 ——
+// 在 readdir_attr 的十万级目录上省掉的是「一次 syscall + 一次分配」× 条目数。
+//
+// 返回的切片指向 scratch，**下一次调用会覆盖它**，调用方必须在返回前用完。
+// 属性不存在时返回 ErrNotFound（对应「这个对象没有 FinderInfo」）。
+func readMetaXattrFast(host string, scratch []byte) ([]byte, error) {
+	if cap(scratch) < adMetaSize {
+		scratch = make([]byte, adMetaSize)
+	}
+	dest := scratch[:adMetaSize]
+
+	n, err := unix.Getxattr(host, netatalkMetaHostName, dest)
+	if err != nil {
+		if err == unix.ERANGE {
+			// blob 比 402 大 —— 规范外的写入者（未来版本的 Netatalk、
+			// 或别的实现塞了额外 entry）。退回两趟读法而不是报错。
+			x, xerr := newXattrAccessor(host, nil)
+			if xerr != nil {
+				return nil, xerr
+			}
+			return x.Get(netatalkMetaXattr)
+		}
+		return nil, mapXattrError(err)
+	}
+	if n > len(dest) {
+		// 内核不应返回超过 len(dest) 的值；防御性截断而不是越界切片。
+		n = len(dest)
+	}
+	return dest[:n], nil
+}
+
 func (x *unixXattr) Set(name string, value []byte) error {
 	n := encodeName(name)
 	var err error

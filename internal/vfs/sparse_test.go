@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -273,14 +274,23 @@ func TestSetSparse(t *testing.T) {
 	writeFile(t, fs, "f", "x")
 	_, sf := openSparse(t, fs, "f", true)
 
-	// POSIX 上是无操作；Windows 上 NTFS 会真的置位。
-	// 无论哪种，对一个可写的普通文件都不应报错 ——
-	// 报错会让 macOS 放弃创建 .sparsebundle。
-	if err := sf.SetSparse(true); err != nil && !errors.Is(err, ErrNotSupported) {
-		t.Errorf("SetSparse(true) = %v", err)
+	// SetSparse(true)：POSIX 上是无操作，Windows 上 NTFS 真的置位。
+	// 两边都必须成功 —— 报错会让 macOS 放弃创建 .sparsebundle。
+	if err := sf.SetSparse(true); err != nil {
+		t.Errorf("SetSparse(true) = %v；必须成功", err)
 	}
-	if err := sf.SetSparse(false); err != nil && !errors.Is(err, ErrNotSupported) {
-		t.Errorf("SetSparse(false) = %v", err)
+
+	// SetSparse(false)：POSIX 上做不到，必须**如实报不支持**而不是
+	// 谎称成功 —— SPARSE 属性位是由 Alloc<Size 现算的，谎称取消会让
+	// 客户端查属性时照样看到 SPARSE，视图自相矛盾。
+	// Windows 上 NTFS 能真的清标志位，那里应当成功。
+	err := sf.SetSparse(false)
+	if runtime.GOOS == "windows" {
+		if err != nil {
+			t.Errorf("windows 上 SetSparse(false) = %v；NTFS 应支持", err)
+		}
+	} else if !errors.Is(err, ErrNotSupported) {
+		t.Errorf("POSIX 上 SetSparse(false) = %v；期望 ErrNotSupported", err)
 	}
 
 	// 只读共享必须拒绝。

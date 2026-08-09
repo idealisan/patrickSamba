@@ -180,7 +180,12 @@ func TestAfpInfoStreamFixedLength(t *testing.T) {
 }
 
 // TestAfpInfoStreamRejectsGarbage：客户端写进来的必须是合法 AfpInfo，
-// 否则落盘时拒绝并保留磁盘上的旧值（Samba 的 validate_afpinfo 行为）。
+// 否则拒绝并保留磁盘上的旧值（Samba 的 validate_afpinfo 行为）。
+//
+// 注意这里断言的是**写时**拒绝。本测试原先断言「写入被接受、校验推迟到
+// 落盘」，那正是被 info agent 在真实链路上抓到的 bug：ErrBadAfpInfo 只能
+// 从 Close 出去，而 SMB2 CLOSE 响应没有地方承载它，于是非法写入表现为
+// 「一路成功但数据蒸发」。详见 afpinfo_write_test.go。
 func TestAfpInfoStreamRejectsGarbage(t *testing.T) {
 	fs := newTestFS(t, false)
 	requireXattr(t, fs)
@@ -194,11 +199,12 @@ func TestAfpInfoStreamRejectsGarbage(t *testing.T) {
 	}
 	junk := make([]byte, AfpInfoSize)
 	copy(junk, "NOPE")
-	if _, err := h.WriteAt(junk, 0); err != nil {
-		t.Fatalf("写入本身应被接受（校验推迟到落盘）: %v", err)
+	if _, err := h.WriteAt(junk, 0); !errors.Is(err, ErrBadAfpInfo) {
+		t.Fatalf("整块写非法 AfpInfo 应当场回 ErrBadAfpInfo，得到 %v", err)
 	}
-	if err := h.Close(); !errors.Is(err, ErrBadAfpInfo) {
-		t.Errorf("落盘坏 AfpInfo 应报 ErrBadAfpInfo，得到 %v", err)
+	// 写被拒之后 Close 干净收尾：没有脏缓冲要落，也就没有错误可报。
+	if err := h.Close(); err != nil {
+		t.Errorf("写入已被拒，Close 应成功，得到 %v", err)
 	}
 }
 

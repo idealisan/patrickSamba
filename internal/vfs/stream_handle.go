@@ -225,6 +225,27 @@ func (h *streamHandle) WriteAt(p []byte, off int64) (int, error) {
 		if off+int64(len(p)) > AfpInfoSize {
 			return 0, ErrInvalidArg
 		}
+
+		// 整块写（客户端的常规写法就是 offset=0、长度 60）**当场校验**。
+		//
+		// 为什么不能等到 flush：校验错误只能从 Sync/Close 返回，而
+		// SMB2 CLOSE 响应没有地方承载它 —— 于是一次非法写入会表现为
+		// 「WRITE 成功 → CLOSE 成功 → xattr 根本没建 → 后续 GET 报
+		// OBJECT_NAME_NOT_FOUND」，数据无声蒸发，极难排查。
+		// 写时报错才能让 SMB2 WRITE 当场回 STATUS_INVALID_PARAMETER。
+		//
+		// 对齐 Samba 的 fruit_pwrite_meta_stream：它只接受
+		// offset==0 && length==60 的写，其余一律 EINVAL。我们比它宽松，
+		// 保留分段写的缓冲能力（见下方），但只要某次写覆盖了完整的
+		// [0,60) 区间就必须立刻验。
+		if off == 0 && int64(len(p)) == AfpInfoSize {
+			if _, err := ParseAfpInfo(p); err != nil {
+				// 缓冲保持原值不动：一次非法写入不该破坏磁盘上的旧
+				// FinderInfo，也不该污染后续的合法分段写。
+				return 0, ErrBadAfpInfo
+			}
+		}
+
 		copy(h.buf[off:], p)
 		h.dirty = true
 		return len(p), nil
