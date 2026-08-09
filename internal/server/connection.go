@@ -152,9 +152,7 @@ func (c *Connection) handleFrame(frame []byte) ([]byte, error) {
 		return c.handleSMB1(frame)
 
 	case isTransform(frame):
-		// TODO(M5): SMB3 TRANSFORM_HEADER 解密。
-		// 在实现之前收到加密消息只能断连 —— 回明文错误会被客户端当成攻击。
-		return nil, fmt.Errorf("%w: 尚未实现 SMB3 加密", errUnknownFrame)
+		return c.handleEncrypted(frame)
 
 	default:
 		return nil, fmt.Errorf("%w: 首 4 字节 % x", errUnknownFrame, frame[:min(4, len(frame))])
@@ -182,6 +180,52 @@ func (c *Connection) handleSMB1(frame []byte) ([]byte, error) {
 	}
 	c.log.Debug("以 SMB2 应答 SMB1 多协议协商", "dialects", dialects)
 	return out, nil
+}
+
+// handleEncrypted 处理一条 SMB3 加密帧（外层是 TRANSFORM_HEADER）。
+//
+// MS-SMB2 §3.1.4.3：先按本会话的 C2S 密钥解密，得到内部明文 SMB2 消息
+// （可能是复合请求链），走普通处理；响应再用本会话的 S2C 密钥重新加密后返回。
+// SMB3 加密是**逐会话**的，nonce 取自会话级单调递增计数器（同密钥下绝不重复，
+// 否则 CCM/GCM 会直接泄露明文异或值）。
+func (c *Connection) handleEncrypted(frame []byte) ([]byte, error) {
+	h, err := crypto.ParseTransformHeader(frame)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errUnknownFrame, err)
+	}
+	sess := c.state.Session(h.SessionID)
+	if sess == nil {
+		return nil, fmt.Errorf("%w: 加密帧引用了未知会话 %#x", errUnknownFrame, h.SessionID)
+	}
+	cipher := crypto.Cipher(c.state.Cipher)
+	if cipher == 0 {
+		return nil, fmt.Errorf("%w: 会话未协商加密算法", errUnknownFrame)
+	}
+
+	plain, err := crypto.Decrypt(cipher, sess.DecryptKey(), frame)
+	if err != nil {
+		c.log.Warn("SMB3 解密失败", "session", h.SessionID, "err", err)
+		return nil, fmt.Errorf("%w: %v", errUnknownFrame, err)
+	}
+	if !wire.IsSMB2(plain) {
+		return nil, fmt.Errorf("%w: 解密结果不是合法 SMB2 消息", errUnknownFrame)
+	}
+
+	resp, err := c.handleSMB2Chain(plain)
+	if err != nil {
+		return nil, err
+	}
+	if len(resp) == 0 {
+		return nil, nil
+	}
+
+	enc, err := crypto.Encrypt(cipher, sess.EncryptKey(),
+		sess.NextEncryptNonce()[:], h.SessionID, resp)
+	if err != nil {
+		c.log.Error("SMB3 加密响应失败", "session", h.SessionID, "err", err)
+		return nil, fmt.Errorf("%w: %v", errUnknownFrame, err)
+	}
+	return enc, nil
 }
 
 // respMsg 记录复合响应链中一条消息的位置与后处理需求。
