@@ -1,0 +1,56 @@
+# stupidSamba —— 官方容器镜像内置的**试用**配置。
+#
+# 这份文件被烤进镜像的 /etc/stupidsamba/config.yaml，作用只有一个：
+# 让 `docker run` 一条命令就能跑起来，不用先写配置。
+#
+# ⚠️ 它开着 guest（匿名读写），**不是给生产用的**。
+#    README「用 Docker 运行」一节里的第一条命令刻意把端口发布在回环地址上
+#    （`-p 127.0.0.1:4445:445`），所以照抄它不会把一个匿名可写的共享暴露到局域网。
+#    要让局域网里的机器连进来，请**挂载你自己的配置**覆盖本文件：
+#
+#      docker run -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro ...
+#
+#    完整字段说明见 configs/example.yaml（每个字段都有注释）。
+
+server:
+  name: STUPIDSAMBA
+  domain: WORKGROUP
+
+listen:
+  # 刻意**留空 addresses**：容器的 IP 由 Docker 分配、每次都可能不同，
+  # 写死任何地址都会 bind 失败。留空表示监听全部地址（Go 的 tcp 监听是双栈的）。
+  #
+  # 容器内固定用 445。要以非 root 运行时不要改这里 —— 改宿主侧的端口映射
+  # （`-p 445:445` 换成把容器内端口也调高，见 docs/docker.md「非 root 运行」）。
+  port: 445
+
+auth:
+  # 试用配置的核心妥协：允许匿名访问，否则镜像里就得内置一个公开的默认口令 ——
+  # 那更糟，公开的默认口令看起来像有安全性但没有，而且没人会去改。
+  # guest 至少是自明的不安全：服务端启动时会打 WARN，Windows 10/11 默认也拒绝
+  # guest 登录，等于多一层天然保险。
+  allow_guest: true
+
+shares:
+  - name: public
+    # 镜像里声明了 VOLUME /data，所以不挂载任何东西时它也存在（匿名卷）。
+    # 正常用法是 `-v /你的目录:/data`。
+    path: /data
+    comment: "stupidSamba (Docker 试用配置，匿名可写)"
+    read_only: false
+    guest_ok: true
+
+mdns:
+  # 默认**关闭**，这是刻意的。
+  #
+  # 桥接网络（Docker 默认）下 mDNS 没有意义：组播报文出不了 docker0 网桥，
+  # 局域网里没人收得到；就算收到了，广播出去的也是容器内部的 172.17.x.x 地址，
+  # 客户端照着连必然失败。广播一个连不上的服务比不广播更坏。
+  #
+  # 要让 Finder / 资源管理器自动发现本服务，用 `--network host` 起容器，
+  # 并挂载一份把这里改成 true 的配置。
+  enabled: false
+
+log:
+  level: info
+  format: text
