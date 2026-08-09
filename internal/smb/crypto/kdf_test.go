@@ -9,6 +9,10 @@ import (
 
 // KDF 的输入拼装必须是 [i]_32 || Label || 0x00 || Context || [L]_32。
 // 这里用手工拼装的字节串独立算一遍 HMAC-SHA256 来交叉验证。
+//
+// 注意：本测试只能证明"实现与它自己的描述一致"，**证明不了描述本身是对的**
+// —— 如果 Label 后面到底要不要再加一个 0x00 分隔符搞错了，实现和测试会一起错。
+// 真正的锚点是下面 TestDerivedKeys_SambaVectors 那组跨实现向量。
 func TestKDF_InputLayout(t *testing.T) {
 	ki := mustHex(t, "000102030405060708090a0b0c0d0e0f")
 	label := []byte("SMB2AESCMAC\x00")
@@ -62,6 +66,99 @@ func TestKDFLabels(t *testing.T) {
 		if string(tc.got) != tc.want {
 			t.Errorf("label %q != %q", tc.got, tc.want)
 		}
+	}
+}
+
+// TestDerivedKeys_SambaVectors 是**跨实现**的已知答案测试。
+//
+// 向量来自与真实 Samba 4 客户端（smbclient）的实际握手：用
+//
+//	smbclient //127.0.0.1/pub -U alice%pass -m SMB3_11 \
+//	    --option="debug encryption=yes" -d5
+//
+// 让 smbclient 打印它**自己独立派生**的 Session/Signing/App/ServerIn/ServerOut
+// 密钥，再与我们用同一个 SessionKey + preauth hash 算出的结果逐字节比对。
+//
+// 这组向量的价值在于它来自另一套独立实现：只要 Label 少一个 NUL、
+// 分隔符 0x00 多一个少一个、"ServerIn " 漏掉结尾空格、或者 S2C/C2S 方向搞反，
+// 这里立刻就会红。MS-SMB2 §3.1.4.2 本身没有给 worked example，
+// 抓真实客户端是唯一可行的钉法（AGENTS.md §3 / §9）。
+//
+// Samba 的命名与我们的对应关系（**方向极易搞反**）：
+//
+//	Samba "ServerIn Key"  = C2S = 服务端**解密**用 = ServerInKey()
+//	Samba "ServerOut Key" = S2C = 服务端**加密**用 = ServerOutKey()
+func TestDerivedKeys_SambaVectors(t *testing.T) {
+	cases := []struct {
+		name       string
+		dialect    uint16
+		keyLen     int
+		sessionKey string
+		preauth    string
+		sign       string
+		app        string
+		serverIn   string
+		serverOut  string
+	}{
+		{
+			// 协商结果 cipher=AES-128-GCM。
+			name:       "3.1.1 AES-128",
+			dialect:    DialectSMB311,
+			keyLen:     16,
+			sessionKey: "4a8f04462de7ae80d0a0567c40e79ef0",
+			preauth: "3e9167552e7990b0f7aee088d35965caa969f03162602c5ffe4fa58272a36eca" +
+				"9a6219187a1c6acca417aab4f66f426baa43ba6144091c348c648a724f79c433",
+			sign:      "27eea77a8c485435d23b447834f73018",
+			app:       "9e079a85ddba552a5f0da1014e51ff0a",
+			serverIn:  "b343dd5198cb43fcf66ede5dc0a94170",
+			serverOut: "91c8dcf53dd40439af08cf0d3958942c",
+		},
+		{
+			// 协商结果 cipher=AES-256-GCM，走 L=256 的分支。
+			name:       "3.1.1 AES-256",
+			dialect:    DialectSMB311,
+			keyLen:     32,
+			sessionKey: "b4e755302eec96d67ff18816fc04d5a3",
+			preauth: "071c668a8b20b31d2f7144ad3ff720e1200f53ea11b425672528c4ea502a1fdd" +
+				"fb11aa4b4c8218330502546eb434fd9c0a6bff8dfe9e98fd409fb4096b6118e4",
+			sign:      "99143824488064bc1e898e35dc4009e5",
+			app:       "54160243fb5b8ebbc50bd1c17ca214f5",
+			serverIn:  "6acdc61f5ee81f38a186e4fc2057d4a2ef8ccbf45160b437af4938b45a7b8959",
+			serverOut: "00d4806f6c3d8620c719e39164abb4bf8b43aa98f1caeb3313124eae8fe39127",
+		},
+		{
+			// 3.0.2 走另一整套 Label/Context（"SMB2AESCMAC"/"SmbSign"、
+			// "SMB2APP"/"SmbRpc"、"SMB2AESCCM"/"ServerOut"/"ServerIn "），
+			// 与 preauth hash 无关。这条路径此前没有任何互操作测试覆盖。
+			name:       "3.0.2",
+			dialect:    DialectSMB302,
+			keyLen:     16,
+			sessionKey: "f75f5aa54972ae7b06e1b400222d8833",
+			sign:       "22d874e060e0108434a7c8cd35b7a0b4",
+			app:        "4cbb6c92ba1f413e0c58450a8e5d85c9",
+			serverIn:   "2e223d7b7001772828d65191e3411654",
+			serverOut:  "4bc9db157d6afcafe11d7dce53577811",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sk := mustHex(t, tc.sessionKey)
+			var ph []byte
+			if tc.preauth != "" {
+				ph = mustHex(t, tc.preauth)
+			}
+			check := func(what string, got []byte, want string) {
+				t.Helper()
+				if w := mustHex(t, want); !bytes.Equal(got, w) {
+					t.Errorf("%s = %x, want %x（Samba 独立派生值）", what, got, w)
+				}
+			}
+			check("SigningKey", SigningKey(tc.dialect, sk, ph), tc.sign)
+			check("ApplicationKey", ApplicationKey(tc.dialect, sk, ph), tc.app)
+			check("ServerInKey", ServerInKey(tc.dialect, sk, ph, tc.keyLen), tc.serverIn)
+			check("ServerOutKey", ServerOutKey(tc.dialect, sk, ph, tc.keyLen), tc.serverOut)
+		})
 	}
 }
 
