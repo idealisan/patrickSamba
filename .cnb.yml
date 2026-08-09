@@ -1,3 +1,20 @@
+# CNB 云原生构建配置。
+#
+# 结构约定（踩过坑，写在这里免得再犯）：
+#   顶层键 = **分支名**（或 `$` 兜底），第二层 = **事件名**。
+#   本文件早先把 `main:` 写在 `$:` 下面当第二层，但 `main` 不是事件名，
+#   于是整段被静默忽略 —— 向 main 推了几十个 commit，一次校验都没跑过
+#   （构建历史里只有 2 条记录，且都是 vscode 事件）。
+#   现在统一放在 `$` 兜底分支下，用真正的事件名 push / pull_request /
+#   tag_push / vscode。`$` 覆盖所有分支，配合「每人独立分支 + PR」的协作方式，
+#   任何分支的推送都会过一遍门禁。
+#
+#   注意 tag_push 是**仓库级事件**，只能挂在 `$` 下，写成 `"v*": tag_push:`
+#   会被判为非法（官方 schema 校验器会报错）。
+#
+# 改完务必用官方校验器过一遍，别靠肉眼：
+#   node <cnb-pipeline skill>/validator/validate.js .cnb.yml
+
 $:
   vscode:
     - runner:
@@ -11,33 +28,42 @@ $:
         - name: ready
           script: echo "云原生开发环境已就绪"
 
-  # 推送到 main 与 PR 时执行的校验
-  main:
+  # ---------------------------------------------------------------- 校验门禁
+  #
+  # push 与 pull_request 走同一套 stage（YAML 锚点复用，避免两边漂移）。
+  push:
     - runner:
         cpus: 4
       docker:
         image: golang:1.25
       stages:
-        - name: 校验禁用 CGO 可构建 (AGENTS.md C1)
+        - &gate_build
+          name: 校验禁用 CGO 可构建 (AGENTS.md C1)
           script: CGO_ENABLED=0 go build -v ./...
-        - name: go vet
+        - &gate_vet
+          name: go vet
           script: CGO_ENABLED=0 go vet ./...
-        - name: gofmt 检查
+        - &gate_gofmt
+          name: gofmt 检查
           script: |
             out=$(gofmt -l .)
             if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi
-        - name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
+        - &gate_constraints
+          name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
           script: sh scripts/check-constraints.sh
-        - name: 单元测试
+        - &gate_test
+          name: 单元测试
           script: CGO_ENABLED=0 go test -race -count=1 ./...
-        - name: 交叉编译校验 (AGENTS.md C7)
+        - &gate_cross
+          name: 交叉编译校验 (AGENTS.md C7)
           script: |
             set -e
             for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
               echo ">>> $t"
               GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./...
             done
-        - name: 校验产物为静态链接 (AGENTS.md C2)
+        - &gate_static
+          name: 校验产物为静态链接 (AGENTS.md C2)
           script: |
             CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
             if ldd /tmp/stupidsamba 2>&1 | grep -qv "not a dynamic executable"; then
@@ -47,7 +73,8 @@ $:
         # 示例配置是大多数人接触本项目的第一份文件，它错了等于开箱即坏。
         # 曾经真的错过：addresses 写成 [0.0.0.0, "::"]，照抄的人一启动就 bind 失败。
         # 这里用**真二进制**跑一遍 -check，与 internal/config 里的单元测试形成双保险。
-        - name: 示例配置必须能通过校验
+        - &gate_example_config
+          name: 示例配置必须能通过校验
           script: |
             set -e
             CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
@@ -58,7 +85,8 @@ $:
         # 优雅退出只有端到端能验：真二进制 + 真信号 + 真客户端连接。
         # 防的是「代码里写了 Shutdown 和超时但一行没生效」这类接线错误 ——
         # 每个函数单独看都对，错的是它们怎么被接到一起的，单元测试看不出来。
-        - name: 优雅退出冒烟
+        - &gate_smoke
+          name: 优雅退出冒烟
           script: CGO_ENABLED=0 go test -tags smoke -count=1 -v -timeout 120s ./cmd/stupidsamba/
 
   pull_request:
@@ -67,17 +95,64 @@ $:
       docker:
         image: golang:1.25
       stages:
-        - name: 校验禁用 CGO 可构建
-          script: CGO_ENABLED=0 go build -v ./...
-        - name: go vet
-          script: CGO_ENABLED=0 go vet ./...
-        - name: 单元测试
-          script: CGO_ENABLED=0 go test -race -count=1 ./...
-        - name: 示例配置必须能通过校验
-          script: |
-            set -e
-            CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
-            mkdir -p /srv/share/public /srv/share/docs /srv/share/private /srv/share/backup
-            /tmp/stupidsamba -config configs/example.yaml -check
-        - name: 优雅退出冒烟
-          script: CGO_ENABLED=0 go test -tags smoke -count=1 -timeout 120s ./cmd/stupidsamba/
+        - *gate_build
+        - *gate_vet
+        - *gate_gofmt
+        - *gate_constraints
+        - *gate_test
+        - *gate_cross
+        - *gate_static
+        - *gate_example_config
+        - *gate_smoke
+
+  # ---------------------------------------------------------------- 发布
+  #
+  # 推 tag 即发布。流程：先过与 push 完全相同的门禁（发出去的东西不能比
+  # 日常提交更宽松），再出四平台产物，然后建 Release、传附件。
+  #
+  # 几个已核实的事实，改这段前先看：
+  #   - tag_push 事件下 $CNB_BRANCH 就是 tag 名（不是分支名）。
+  #   - git:release 内置任务不负责附件，附件要靠 cnbcool/attachments 插件；
+  #     插件在 tag_push 下默认把附件挂到 $CNB_BRANCH 对应的 Release 上，
+  #     所以顺序必须是「先 git:release 建出 Release，再上传」。
+  #   - git:release 默认 overlying=false，即同名 Release 已存在时先删后建 ——
+  #     重跑流水线会把之前传上去的附件一起清掉，然后重新传，是自洽的。
+  #   - 本流水线对**任何** tag 都会触发（tag_push 不支持按 tag 名过滤，
+  #     `"v*": tag_push:` 是非法写法）。所以不要往仓库推非发布用途的 tag。
+  #
+  # preRelease 目前硬编码为 true：v0.1.0 系列一律按内测发布，由项目所有者
+  # 明确要求。等真要发第一个正式版时，改这一行（preRelease: false、
+  # latest: true），不要靠 tag 名猜 —— 猜错就是把内测包挂成正式版。
+  tag_push:
+    - runner:
+        cpus: 4
+      docker:
+        image: golang:1.25
+      stages:
+        - *gate_build
+        - *gate_vet
+        - *gate_gofmt
+        - *gate_constraints
+        - *gate_test
+        - *gate_cross
+        - *gate_static
+        - *gate_example_config
+        - *gate_smoke
+        # build-release.sh 自己会逐产物自检（CGO 关没关、-trimpath 生效没、
+        # GOOS/GOARCH 对不对、版本号有没有真注进去、linux 产物是不是静态链接），
+        # 任一不过直接非零退出，发布就停在这里。
+        - name: 构建四平台发布产物
+          script: VERSION=$CNB_BRANCH sh scripts/build-release.sh
+        - name: 创建 Release（预发布）
+          type: git:release
+          options:
+            descriptionFromFile: CHANGELOG.md
+            preRelease: true
+            latest: false
+        - name: 上传四平台产物到 Release
+          image: cnbcool/attachments:latest
+          settings:
+            attachments:
+              - "./dist/*.tar.gz"
+              - "./dist/*.zip"
+              - "./dist/SHA256SUMS"
