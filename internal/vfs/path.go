@@ -443,7 +443,7 @@ func (r *Resolver) contains(p string) bool {
 // 而且错在两处：ResolveParent 当时根本没做精确匹配（无条件全扫），
 // 创建新文件也必然走到这里。留此记录，免得下一个人再被误导。
 func lookupCaseInsensitive(dir, name string) (string, bool) {
-	f, err := os.Open(dir)
+	f, err := openHostFile(dir, os.O_RDONLY, 0)
 	if err != nil {
 		return "", false
 	}
