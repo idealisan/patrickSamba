@@ -32,8 +32,29 @@ git fetch -q origin && git merge-base --is-ancestor <自己的提交> origin/mai
 分叉从一开始就不会存在。真要强推，先 `git diff --numstat origin/<我的分支> HEAD -- <我负责的文件>`
 确认自己那几个文件**只增不减**（补上第 29 行那条「远端独有提交全是自己的」核对）。
 
+**第三张面孔：rebase 完了才发现 main 又前进了，此时 `git diff origin/main` 会吓死人**
+（2026-08-09 19:11，ci-trigger 亲踩）。rebase 到 `62332cd` 完成、正准备推送时，
+`git diff --stat origin/main` 报出 **19 个文件、删除 2006 行**（AGENTS.md、docs/、memory/
+整片消失）。第一反应是「我 rebase 把队友的文档全干掉了」——**完全是假象**：
+`origin/main` 在这几分钟内已被别人推到 `526944f`（4 个新提交），
+`git diff origin/main` 比的是「我的树 vs **当下的** origin/main」，
+于是别人刚加的内容在我这边显示为「被删除」。
+
+判据三连（别看着 diff 就慌，也别看着 diff 就强推）：
+
+```sh
+git merge-base --is-ancestor <我的rebase基线> origin/main   # 是 → 无重复 SHA 风险，安全
+git log --oneline <我的基线>..origin/main                   # main 新增了什么
+git log --oneline <我的基线>..origin/main -- <我改的文件>    # 空 → 再 rebase 一次零冲突
+```
+
+第三条为空时直接再 `git rebase origin/main`，`git diff --stat origin/main` 立刻收敛回
+「只有我那一个文件」。**「删除几千行」这个数字本身不是证据，它只说明基线不同。**
+
 **How to apply**：
 - 团队合并节奏快时，rebase 前先查一次祖先关系，别默认「我的东西还没合」。
+- **`git diff origin/main` 出现大片删除时，先怀疑基线漂移，不要怀疑自己删了东西**；
+  跑上面三连判定，别急着报警（§7.3.4：指控别人前先排除自己，这条同样适用于指控自己）。
 - **先判断这次 rebase 有没有必要**；纯文档/记忆类改动几乎永远不需要跟进 main。
 - 强推自己分支前，先 `git log --format='%h %an %s' origin/<我的分支> ^HEAD` 核对
   远端独有的提交**全是自己的**；再 `git for-each-ref --contains <旧sha>` 看有没有队友
