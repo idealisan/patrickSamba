@@ -42,7 +42,7 @@ func buildEnumAllReq(callID, level uint32) []byte {
 
 func buildGetInfoReq(callID uint32, netName string, level uint32) []byte {
 	e := dcerpc.NewNdrEnc(binary.LittleEndian)
-	e.Ptr(func() { e.WString("") })   // ServerName
+	e.Ptr(func() { e.WString("") })      // ServerName
 	e.Ptr(func() { e.WString(netName) }) // NetName
 	e.U32(level)
 	return dcerpc.MarshalRequest(callID, 0, opnumNetShareGetInfo, e.Bytes())

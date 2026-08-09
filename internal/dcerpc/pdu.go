@@ -15,19 +15,19 @@ import (
 
 // PTYPE —— PDU 类型（C706 §12.3 / MS-RPCE §2.2.2.1）。
 const (
-	PTYPERequest           uint8 = 0  // 客户端发起请求
-	PTYPEPing              uint8 = 1  // 保留
-	PTYPEResponse          uint8 = 2  // 服务端应答
-	PTYPEFault             uint8 = 3  // 异常应答（含 NCA 状态码）
-	PTYPEWorking           uint8 = 4  // 保留
-	PTYPENocall            uint8 = 5  // 保留
-	PTYPEReject            uint8 = 6  // 保留（非标准）
-	PTYPEOrphaned          uint8 = 7  // 保留
-	PTYPEBind              uint8 = 11 // 绑定请求
-	PTYPEBindAck           uint8 = 12 // 绑定应答
-	PTYPEBindNak           uint8 = 13 // 绑定拒绝
-	PTYPEAlterContext      uint8 = 14 // 上下文变更请求
-	PTYPEAlterContextResp  uint8 = 15 // 上下文变更应答
+	PTYPERequest          uint8 = 0  // 客户端发起请求
+	PTYPEPing             uint8 = 1  // 保留
+	PTYPEResponse         uint8 = 2  // 服务端应答
+	PTYPEFault            uint8 = 3  // 异常应答（含 NCA 状态码）
+	PTYPEWorking          uint8 = 4  // 保留
+	PTYPENocall           uint8 = 5  // 保留
+	PTYPEReject           uint8 = 6  // 保留（非标准）
+	PTYPEOrphaned         uint8 = 7  // 保留
+	PTYPEBind             uint8 = 11 // 绑定请求
+	PTYPEBindAck          uint8 = 12 // 绑定应答
+	PTYPEBindNak          uint8 = 13 // 绑定拒绝
+	PTYPEAlterContext     uint8 = 14 // 上下文变更请求
+	PTYPEAlterContextResp uint8 = 15 // 上下文变更应答
 )
 
 // PFC 标志位（MS-RPCE §2.2.2.1 pfc_flags）。
@@ -102,7 +102,7 @@ type PDU struct {
 	AllocHint uint32
 	ContextID uint16
 	Opnum     uint16
-	CancelCnt uint8 // response/fault 的 cancel_count
+	CancelCnt uint8  // response/fault 的 cancel_count
 	Stub      []byte // request/response 的 stub 数据
 
 	// bind
@@ -217,10 +217,10 @@ const headerSize = 16
 
 // 各类 PDU 体最小长度（不含 16 字节头），用于长度校验。
 const (
-	requestBodyMin = 8 // alloc_hint(4)+context_id(2)+opnum(2)
-	responseBodyMin = 8 // alloc_hint(4)+context_id(2)+cancel_count(1)+reserved(1)
-	bindBodyMin = 12    // max_xmit(2)+max_recv(2)+assoc(4)+n_ctx(1)+reserved(1)+reserved(2)
-	bindAckBodyMin = 10 // max_xmit(2)+max_recv(2)+assoc(4)+sec_addr_len(2)
+	requestBodyMin  = 8  // alloc_hint(4)+context_id(2)+opnum(2)
+	responseBodyMin = 8  // alloc_hint(4)+context_id(2)+cancel_count(1)+reserved(1)
+	bindBodyMin     = 12 // max_xmit(2)+max_recv(2)+assoc(4)+n_ctx(1)+reserved(1)+reserved(2)
+	bindAckBodyMin  = 10 // max_xmit(2)+max_recv(2)+assoc(4)+sec_addr_len(2)
 )
 
 // ParsePDU 解析一个完整（单分片）DCERPC PDU。先做整体长度校验，再按 PType 细化。
@@ -513,10 +513,10 @@ func MarshalRequest(callID uint32, contextID uint16, opnum uint16, stub []byte) 
 // MarshalFault 构造 fault PDU（MS-RPCE §2.2.2.12），status 为 NCA 状态码。
 func MarshalFault(callID uint32, status uint32) []byte {
 	body := make([]byte, 0, 12)
-	body = append(body, le32(12)...)  // alloc_hint
-	body = append(body, le16(0)...)   // context_id
-	body = append(body, 0)            // cancel_count
-	body = append(body, 0)            // reserved
+	body = append(body, le32(12)...)     // alloc_hint
+	body = append(body, le16(0)...)      // context_id
+	body = append(body, 0)               // cancel_count
+	body = append(body, 0)               // reserved
 	body = append(body, le32(status)...) // status（NCA 码）
 
 	h := NewHeader(PTYPEFault, callID)
