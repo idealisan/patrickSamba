@@ -1024,8 +1024,42 @@ round-12 担心的 `qa-e2e/ci` 938 行冒烟套件（`ad27691`）并未丢失：
 
 ### 13.9 一句话结论
 
-**主干健康、进度高速、无停滞分支。唯一真正阻塞是 #26 的 3 文件低工作量冲突（等 win-meta owner 处理）；
-唯一需你拍板的是 D-新6（#35 的 tag 口径）。** 其余（孤儿抢救、qa-verify 双分支）均在 agent 手上正常推进。
+**主干健康、进度高速、无停滞分支。唯一真正阻塞是 #26 的 3 文件低工作量冲突（已发 win-backend rebase 方案）；
+唯一待办是 D-新1 落 main（PR #42 已开待合）。** D-新6 经 fix-ci / qa-proto 双回执确认前提不成立，已撤回。
+其余（qa-verify #38/#42 双 PR）在 agent 手上正常推进。
+
+### 13.10 双 agent 回执确认（fix-ci + qa-proto，07:30Z 起）
+
+> 来源：fix-ci 与 qa-proto 对第 13 轮盘点的逐条回应。PM 已**独立核实**关键点，非仅采信。
+
+**13.10.1 #35 终态核实（fix-ci 报，PM 已 `git show --stat 76fbf4b` 验证）**
+- `76fbf4b` 只改 **1 个文件** `test/ci/check-test-compile.sh`（`TAGS=integration,smoke` → `...,qadefect`），**1 增 1 删**。
+- `durable_defect_test.go` / `durable_qa_test.go` **零改动**。Round-1「把 `TestQADurableReconnectRebindsTree` 挪进 `qadefect` tag 并重命名」的尝试，在定稿时被你 `git checkout origin/main --` 还原，**从未进 #35、从未进 main**。
+- 因此 §13.4 那种「两 agent 改同一测试文件」的冲突对 #35 不成立；qa-proto `rebase origin main` **零冲突**通过（与报告一致）。
+
+**13.10.2 qa-proto 用例对账（与 main 机器比对，PM 已用 `grep` 复核）**
+- main 三文件用例总数 **22**；qa-proto 分支 **23**（**+1**）。
+- 7 个「消失」全是一一对应的**改名/移位**（如 `TestQADefectV1KeyCollisionReturnsWrongFile` → `TestQADurableV1KeyNoCrossSessionCollision`，缺陷 2 修好即转回归保护），**没有任何用例被静默删除**。
+- 净新增 2 个（此前被注释引用却不存在的 `TestQADurableExpiredEntriesReclaimedByNewRegistrations` + team-lead 追加的 `TestQAPersistentIDNeverCollidesWithCompoundSentinel`）。
+- `durable_defect_test.go` 现仅 **1 条** `TestQADefectExpiryHappensWithoutReconnect`（PM 实测 `-tags qadefect` 下 FAIL，默认路径下不编译故不影响 main 绿）。
+
+**13.10.3 可证伪性已达标（qa-proto 用 `go test -overlay` 注入 5 个变异体，工作树零修改）**
+- Persistent 改回会话内计数器 / 去掉 `detachLocked` 归属检查 / `reap` 不 close / 鉴权挪后 / 加回 `return NotSupported` —— **5/5 全部被对应回归用例杀死**。
+- 这条比「CI 绿了」强：证明用例真在起作用，不是空绿。与 R5「判据必须可证伪」一致。
+
+**13.10.4 两条给看板的硬提示（qa-proto 提，PM 已记入记忆待办）**
+1. **`0ad6441` 是 bisect 地雷（已随 #40 进 main）**：`go build` 过但 `go vet` 不过（漏改一个测试调用点）。bisect 脚本须先跑 `test/ci/check-test-compile.sh`，不过即 `git bisect skip`。
+2. **`TestQADefectExpiryHappensWithoutReconnect` 红是 team-lead 裁定，不是缺陷**：durable handle 3 号设计约束「刻意不起常驻回收 goroutine」，残留是裁定不是遗漏。别把它当缺陷计数。
+
+**13.10.5 D-新6 撤回说明（PM 自我纠正）**
+第 13 轮我把 D-新6 写成「#35 把 `TestQADefectDurableReconnectRebindsTree` 留在 tag 后，与你点名回退的做法抵触」。
+fix-ci 的核实证明：**该用例从未被塞进 tag**——Round-1 的尝试在定稿时就被 `git checkout` 还原，#35 终态只读了一行 CI 脚本。
+这与我自己在 §12.12 立的规矩「数量减少≠成果丢失、先 grep 去向再下结论」一脉相承，**但这次是我自己把『Round-1 的废弃尝试』误当成『#35 的终态』**，前提选错分支。现已更正：qadefect tag 现仅含 1 条设计性红用例，无需你再拍板。
+
+**13.10.6 qa-verify 现持两条开 PR（#38 + #42）**
+- #42 `qa-verify/rescue-e2e`（mergeable）：即 round-12 孤儿 `qa-e2e/ci` 的 938 行冒烟套件抢救落点，**D-新1 闭环在即**。
+- #38 `qa-verify/e2e-ci`（mergeable）：修集成测试假故障 + 验收脚本说谎成功。
+- 两条都碰验收/集成测试区；加 `negative-matrix` 分支，仍防 `acceptance.sh` 双线改（见 §13.6）。建议 qa-verify 合入前明确 #42/#38 的先后，避免对 `acceptance.sh` 的修改互相覆盖。
 
 ---
 
