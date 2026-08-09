@@ -44,6 +44,13 @@ const (
 
 	// shutdownPollInterval 是优雅关闭时轮询连接数的间隔。
 	shutdownPollInterval = 20 * time.Millisecond
+
+	// rejectLogInterval 是"连接数超限"告警的最小间隔。
+	//
+	// 超限往往是连接洪水造成的，一条连接一行日志会把磁盘写满 ——
+	// 那等于把一次拒绝服务放大成第二次。这里改成节流输出，
+	// 并在日志里带上区间内被拒的总次数，信息量反而更完整。
+	rejectLogInterval = 10 * time.Second
 )
 
 // ErrServerClosed 在 Serve 因 Shutdown/Close 正常返回时给出。
@@ -133,6 +140,11 @@ type Server struct {
 	conns     map[*Connection]struct{}
 	closed    bool
 	doneCh    chan struct{}
+
+	// rejected 统计因超出并发上限被拒的连接，配合 rejectLogInterval 节流。
+	rejectMu      sync.Mutex
+	rejectedSince int
+	rejectLogAt   time.Time
 
 	// wg 覆盖 accept goroutine 与每条连接的 serve goroutine。
 	wg sync.WaitGroup
@@ -297,12 +309,35 @@ func (s *Server) acceptLoop(ctx context.Context, l net.Listener) {
 
 		if !s.trackConn(ctx, conn) {
 			// 超出并发上限：直接断开。SMB 没有"服务器忙"的传输层表达，
-			// 关闭连接是唯一选择。
-			s.log.Warn("并发连接数已达上限，拒绝新连接",
-				"remote", conn.RemoteAddr().String(), "max", s.opts.maxConnections())
+			// 关闭连接是唯一选择 —— 但必须**立刻**关，不能挂着让客户端干等。
+			s.logRejected(conn.RemoteAddr().String())
 			_ = conn.Close()
 		}
 	}
+}
+
+// logRejected 记录一次"超出并发上限"的拒绝，按 rejectLogInterval 节流。
+//
+// 拒绝必须可见（静默拒绝会让运维完全查不出"为什么连不上"），
+// 但也不能一条连接一行日志，否则连接洪水会顺带把磁盘写满。
+func (s *Server) logRejected(remote string) {
+	s.rejectMu.Lock()
+	s.rejectedSince++
+	now := time.Now()
+	if !s.rejectLogAt.IsZero() && now.Sub(s.rejectLogAt) < rejectLogInterval {
+		s.rejectMu.Unlock()
+		return
+	}
+	n := s.rejectedSince
+	s.rejectedSince = 0
+	s.rejectLogAt = now
+	s.rejectMu.Unlock()
+
+	s.log.Warn("并发连接数已达上限，拒绝新连接",
+		"remote", remote,
+		"max", s.opts.maxConnections(),
+		"rejected", n,
+		"log_interval", rejectLogInterval)
 }
 
 // trackConn 登记连接并启动其服务 goroutine。超出上限时返回 false。
