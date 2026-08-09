@@ -82,6 +82,30 @@ origin/main 最后一次前进：12:34:06（PR #8）
 > **只要按批次走，8 个 PR 里只有 #13 一个人需要 rebase。**
 > 若乱序合并，`vfs/local.go` 三方混战会让 tm-vfs 连做三次 rebase。
 
+### 2.2 ⚠️ PR #7 的 764 行目前**零产品调用点**（合并前必读）
+
+逐个函数查调用点（排除 `_test.go`）：
+
+```
+internal/vfs/winpath.go : validateWindowsName   → 非测试调用点 0
+internal/vfs/winopen.go : isNameSurrogateTag    → 非测试调用点 0
+internal/vfs/winopen.go : winOpenParamsFor      → 非测试调用点 0
+```
+
+`ValidateComponent`（`path.go:178`）仍在用旧的、按作者自己注释「不如 winpath.go 全」的
+`reservedNames`（`path.go:200`）。作者知情——`winpath_test.go:186` 注释原话：
+「这条是为接线（`ValidateComponent` 改调本函数）准备的回归网」。
+
+这命中本项目反复出现的 bug 形态**「被架空的逻辑」**：代码好、测试全、CI 绿，
+但生产路径一次都不走；合进 `main` 后从 diff 完全看不出来。
+
+**处置**：`#7` 可以合（纯新增文件、零冲突），但**不得据此判定「Windows 名字词法规则已完成」**，
+CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两步还是漏做；
+若是拆两步，「接线 PR」将作为独立条目进入关键路径。
+
+> 附带更正：team-lead 任务描述里的「删除死变量 `reservedNames`」**不成立**——
+> 它在 `path.go:200` 有真实使用，不是死变量。
+
 ---
 
 ## 3. 逐人盘点（第 2 轮）
@@ -187,6 +211,7 @@ win-meta: bbolt 三项合规核验 ──► internal/meta 能否提 PR ──�
 | R6 | 容器 2C4G，V8 堆上限触发 SIGABRT | 已有 `scripts/devenv.sh` 削峰（PR #1 已合） | 全员 `. scripts/devenv.sh`、输出加 `\| head -N` |
 | **R7** | **无主分支**：作者已退出、代码未提 PR（tm-handle +1677、r-infra +600） | 🔴 新增 | §4.3 / §4.4，指派他人代开 PR |
 | **R8** | **PR 堆积期越长，热点文件 rebase 代价越高** | 🟠 新增 | 按 §2.1 分批合，不要乱序 |
+| **R9** | **「被架空的逻辑」**：PR #7 新增 764 行，三个函数全部零产品调用点 | 🔴 新增，已查实 | §2.2；**今后凡新增函数零调用点，一律在合并前问一句** |
 
 ---
 
@@ -198,6 +223,7 @@ win-meta: bbolt 三项合规核验 ──► internal/meta 能否提 PR ──�
 | D2 | bbolt 依赖是否批准（纯 Go / License / 零 CGO 三项核验由谁出结论） | `win-meta`、`win-vfs` |
 | D3 | `tm-handle` / `r-infra` 是否已关闭？其分支由谁代为开 PR？ | `pm`、Time Machine 块整体 |
 | D4 | `qa` 是否还活着？`save.sh` 历史改写 bug 要不要插队进第 1 批？ | 全队（它会改写别人 PR 的历史） |
+| D5 | PR #7 的接线是刻意拆两步还是漏做？合并时如何措辞才不误判为「已完成」？ | `win-vfs`、CHANGELOG |
 
 > D1 的对照实验已做完（`git diff --name-only` 逐分支比对），不是推测，可直接执行。
 
