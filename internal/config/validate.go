@@ -14,7 +14,49 @@ import (
 
 // isAbsPath 判断是否为**本平台**的绝对路径。
 // 用 filepath 而非 path，以便 Windows 上 "C:\share" 也算绝对路径（AGENTS.md C7）。
+//
+// 适用于必须在**本机**存在的路径（share.path、log.file）——这些路径要被
+// os.Stat / os.OpenFile 真正打开，用本平台语义判断才有意义。
+// 只对**目标平台**有意义的路径（metadata_path）请用 isAbsPathOn。
 func isAbsPath(p string) bool { return filepath.IsAbs(p) }
+
+// isAbsPathOn 按**指定平台**的语义判断路径是否绝对。
+//
+// 存在的理由：metadata_path 是一个"只在 Windows 上生效"的字段，它的绝对性
+// 必须按 Windows 语义判断，而不是按当前运行平台。filepath.IsAbs 在 Linux 上
+// 编译进来的是 POSIX 版本，会把 "C:\ProgramData\x" 判成相对路径 —— 这正是
+// 本函数要避免的误判。同时平台作为参数传入（而非读 runtime.GOOS），
+// 使得在 Linux 上也能测到 Windows 分支。
+func isAbsPathOn(p string, windows bool) bool {
+	if !windows {
+		return strings.HasPrefix(p, "/")
+	}
+	return isAbsWindowsPath(p)
+}
+
+// isAbsWindowsPath 判断 Windows 绝对路径。
+//
+// 认两种形式（与 Go 的 path/filepath windows 版 IsAbs 对齐）：
+//   - 盘符根：`C:\foo` / `C:/foo`（注意 `C:foo` 是**盘符相对**路径，不算绝对）
+//   - 双分隔符开头：UNC `\\server\share\foo` 与扩展前缀 `\\?\C:\foo`
+//
+// 刻意比 filepath.IsAbs 宽松一点：不校验 UNC 的 `host\share` 两段是否齐全。
+// 本函数的职责是拦住"明显写错的相对路径"这类配置笔误，
+// UNC 细节留给运行时真正打开失败时报错，避免在校验层制造假阴性。
+func isAbsWindowsPath(p string) bool {
+	if len(p) >= 2 && isWindowsSlash(p[0]) && isWindowsSlash(p[1]) {
+		return true
+	}
+	// 盘符必须是 ASCII 字母，冒号后必须紧跟分隔符。
+	if len(p) >= 3 && p[1] == ':' && isWindowsSlash(p[2]) {
+		c := p[0]
+		return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+	}
+	return false
+}
+
+// isWindowsSlash：Windows 上正反斜杠都是路径分隔符。
+func isWindowsSlash(c byte) bool { return c == '\\' || c == '/' }
 
 // quotaMinWarn 是 quota_bytes 的建议下限（1 GiB）。
 // 低于此值的卷容量上报对 Time Machine 不实用（会反复失败、空间抖动），
@@ -88,12 +130,20 @@ const ShareNameMaxLen = 80
 // Validate 校验配置。调用前应先执行 ApplyDefaults。
 //
 // 返回的 error 若非 nil，其动态类型一定是 ValidationErrors。
-func Validate(c *Config) error {
+func Validate(c *Config) error { return validateOn(c, runtime.GOOS) }
+
+// validateOn 是 Validate 的可注入平台版本。
+//
+// hostOS 取 runtime.GOOS 的取值域（"windows" / "linux" / "darwin" …）。
+// 把平台做成参数而不是在判定点直接读 runtime.GOOS，是为了让"Windows 专属字段"
+// 的两条分支都能在**任意**平台上被测到 —— 否则 Windows 分支在 CI（Linux）里
+// 永远跑不到，等于没有测试。
+func validateOn(c *Config, hostOS string) error {
 	var errs ValidationErrors
 
 	validateServer(c, &errs)
 	validateListen(c, &errs)
-	validateShares(c, &errs)
+	validateShares(c, hostOS, &errs)
 	validateAuth(c, &errs)
 	validateMDNS(c, &errs)
 	validateLog(c, &errs)
@@ -221,7 +271,7 @@ func validateListen(c *Config, errs *ValidationErrors) {
 	}
 }
 
-func validateShares(c *Config, errs *ValidationErrors) {
+func validateShares(c *Config, hostOS string, errs *ValidationErrors) {
 	if len(c.Shares) == 0 {
 		errs.add("shares", "至少要配置一个共享目录，否则服务没有任何可用内容")
 		return
@@ -233,7 +283,7 @@ func validateShares(c *Config, errs *ValidationErrors) {
 		prefix := fmt.Sprintf("shares[%d]", i)
 		validateShareName(s, i, prefix, seen, errs)
 		validateSharePath(s, prefix, errs)
-		validateShareMetadataPath(s, prefix, errs)
+		validateShareMetadataPath(s, prefix, hostOS, errs)
 
 		if s.TimeMachine && s.ReadOnly {
 			errs.add(prefix+".time_machine", "共享 %q 标记为 Time Machine 目标但同时是只读，备份会失败", s.Name)
@@ -303,12 +353,26 @@ func validateSharePath(s *Share, prefix string, errs *ValidationErrors) {
 // validateShareMetadataPath 校验 POSIX 元数据旁路存储路径（仅 Windows 生效）。
 //
 // 只校验"路径本身写得对不对"，文件存不存在由 vfs 层在启动时创建。
-func validateShareMetadataPath(s *Share, prefix string, errs *ValidationErrors) {
+//
+// **非 Windows 平台完全不校验。** 该字段在这些平台上会被运行时忽略
+// （AGENTS.md §5 P7：旁路存储只在 Windows 编译进来），Warnings 里已有一条
+// WARN 说明这一点，那是它在非 Windows 上**唯一**的出口。
+// 曾经的做法是无论什么平台都用本平台语义卡绝对路径，后果是：一份给 Windows
+// 写的配置（metadata_path: C:\ProgramData\...）拿到 Linux 上，POSIX 版
+// filepath.IsAbs 判它不是绝对路径 → 硬报错 → 服务根本起不来，而那条
+// "会被忽略" 的 WARN 永远走不到。一个声称被忽略的字段却能拦住启动，
+// 这是自相矛盾的行为，也让配置无法跨平台复用。
+func validateShareMetadataPath(s *Share, prefix string, hostOS string, errs *ValidationErrors) {
 	if s.MetadataPath == "" {
 		return
 	}
+	if hostOS != "windows" {
+		return
+	}
 	field := prefix + ".metadata_path"
-	if !isAbsPath(s.MetadataPath) {
+	// 按 Windows 语义判断，不用 isAbsPath —— 后者在交叉编译/测试场景下
+	// 拿到的是宿主平台语义，正是上面那个 bug 的根源。
+	if !isAbsPathOn(s.MetadataPath, true) {
 		errs.add(field, "共享 %q 的 metadata_path 必须是绝对路径，当前 %q", s.Name, s.MetadataPath)
 		return
 	}
@@ -468,7 +532,10 @@ func validateLog(c *Config, errs *ValidationErrors) {
 // Warnings 返回配置合法但值得提醒用户的问题。
 //
 // 与 Validate 分开：这些不阻止启动，但必须在日志里以 WARN 级别打出来。
-func Warnings(c *Config) []string {
+func Warnings(c *Config) []string { return warningsOn(c, runtime.GOOS) }
+
+// warningsOn 是 Warnings 的可注入平台版本，理由同 validateOn。
+func warningsOn(c *Config, hostOS string) []string {
 	var w []string
 
 	// 445 是特权端口，非 root 且无 CAP_NET_BIND_SERVICE 时 bind 会失败，
@@ -476,7 +543,7 @@ func Warnings(c *Config) []string {
 	//
 	// Windows 没有特权端口的概念（也没有 euid，os.Geteuid 恒返回 -1），
 	// 在那里提示会是纯噪音，因此跳过。
-	if c.Listen.Port < 1024 && runtime.GOOS != "windows" && os.Geteuid() != 0 {
+	if c.Listen.Port < 1024 && hostOS != "windows" && os.Geteuid() != 0 {
 		w = append(w, fmt.Sprintf(
 			"listen.port=%d 是特权端口（<1024），当前不是 root。"+
 				"请以 root 运行，或执行 setcap 'cap_net_bind_service=+ep' <二进制>，"+
@@ -502,9 +569,12 @@ func Warnings(c *Config) []string {
 			continue
 		}
 		// POSIX 元数据旁路存储只在 Windows 编译进来（AGENTS.md §5 P7）。
-		if runtime.GOOS != "windows" {
+		//
+		// 这条 WARN 是该字段在非 Windows 平台上的**唯一**出口：
+		// validateShareMetadataPath 在这些平台上完全不校验，配置照常启动。
+		if hostOS != "windows" {
 			w = append(w, fmt.Sprintf("shares[%d] %q 设置了 metadata_path，但该字段仅在 Windows 上生效，当前平台（%s）会忽略它",
-				i, s.Name, runtime.GOOS))
+				i, s.Name, hostOS))
 		}
 		if isUnderDir(s.MetadataPath, s.Path) {
 			w = append(w, fmt.Sprintf("shares[%d] %q 的 metadata_path 位于共享目录内部，客户端会看到这个数据库文件，建议放到共享之外",
