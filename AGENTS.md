@@ -227,9 +227,17 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 
 ### 7.1 并行分工（**强制**，不是可选项）
 
-**任何非平凡的推进都必须组建 3~5 个子 agent 的团队并行做，禁止 team-lead 一个人串行写。**
+**任何非平凡的推进都必须组建子 agent 团队并行做，禁止 team-lead 一个人串行写。**
 这是项目所有者反复强调过的要求（原话：「现在的工作速度太慢了，你必须使用 3~5 个子 agent，
 分工合作形成团队去完成工作」）。串行开发在本项目被明确判定为不可接受。
+
+**团队规模：下限 3 人，上限 10 人**（上限由项目所有者于 v0.2.0 期间从 5 人上调至 10 人）。
+超过 5 人时 §7.1 末尾的文件所有权表**必须**先落到文件级再开工，否则人越多互相覆盖越狠。
+
+**必须有一名专职 PM**（角色名 `pm`，项目所有者要求：「添加一个项目团队成员，专职做项目管理，
+从而避免项目进度问题」）。PM **不写产品代码**，只做进度跟踪、阻塞识别、决策催办，
+维护 `docs/status-<版本>.md` 进度板。设立原因：team-lead 在并行 5+ 人时会被技术评审吃满，
+进度问题（谁没开工、谁在等谁、哪个决策卡着）无人盯，实际发生过 5 人零分支而无人察觉。
 
 分工按 §5 的分层切分，模块之间**通过接口契约解耦**，先定接口再并行实现。
 
@@ -279,11 +287,20 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 4. 大致每完成一个文件、或每 10~15 分钟有产出，就提交推送一次。
 5. 如果发现自己已经改了很多但还没提交 —— **立刻停下来提交**。
 
-推荐提交命令：
+推荐提交命令（**必须显式写出分支名**，理由见下）：
 
 ```sh
-CGO_ENABLED=0 go build ./... && git add -A && git commit -m "<模块>: <做了什么>" && git push
+CGO_ENABLED=0 go build ./... && git add -A \
+  && git commit -m "<模块>: <做了什么>" \
+  && git push origin "$(git branch --show-current)"
 ```
+
+> **⚠️ 血泪教训：推送的 refspec 必须是自己的分支，不能写死也不能省略。**
+> 多个 worktree **共享同一份 `.git`**，所以在自己 worktree 里执行 `git push origin main`
+> 推的是**本地 main 分支**（别人的），不是你的工作。它会照常打印成功、
+> **不报任何错**，而你的提交一个都没出去，等容器崩了才发现。
+> `scripts/save.sh` 曾长期写死 `git push -q origin main`，实际就是这个坑（已修）。
+> 自查命令：`git log --oneline origin/$(git branch --show-current)..HEAD`，有输出就是还没推。
 
 ### 7.3 独立工作目录 + 独立分支 + PR（**v0.1.0 之后强制**）
 
@@ -437,10 +454,27 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
 
 1. **Go 不在 PATH**：每个新 shell 都要 `export PATH=$PATH:/usr/local/go/bin`。
    真没了就重装 `go1.25.0.linux-amd64.tar.gz` 到 `/usr/local/go`。
-2. **`mount.cifs` 在本容器永远跑不通** —— 缺 `CAP_SYS_ADMIN`，报
-   `Unable to apply new capability set`。这是环境限制不是服务端 bug，
-   `scripts/acceptance.sh` 已把它做成 skip(rc=77)。§3 要求的「至少三种第三方客户端通过」
-   由 **smbclient + impacket + go-smb2** 三家满足。不要因为它 fail 就判定验收不通过。
+2. **`mount.cifs` 在本容器永远跑不通** —— **注意：真死因不是缺 `CAP_SYS_ADMIN`**，
+   本条曾长期归因错误，2026-08-09 由 r-infra 用决定性实验推翻，现修正如下。
+
+   实验：`docker run --cap-add SYS_ADMIN` 起 Debian 12，装 cifs-utils，
+   `docker cp` 二进制进去，服务端客户端同容器走 127.0.0.1 —— **仍然**
+   `mount error(1): Operation not permitted`。继续排除：
+   - `/proc/filesystems` 里**有** `cifs` 和 `smb3` → 不是缺内核模块；
+   - `mount -t tmpfs` **成功** → mount() 系统调用本身通的（这是反向对照，
+     排除了「seccomp 全局禁 mount」这个假设）；
+   - `cat /proc/self/uid_map` = `0 1000 1` → **我们在一个非初始 user namespace 里**。
+
+   结论：非初始 user namespace 内，内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统
+   （tmpfs / proc / sysfs / devpts / fuse…），**cifs 没有这个标志**，所以返回 EPERM，
+   **与持不持有 `CAP_SYS_ADMIN` 无关**。`--privileged`、任何 `--cap-add` 都救不了。
+   FUSE 逃生通道也堵死：`fuse` 已注册但 `/dev/fuse` 设备节点不存在，
+   `mknod` 被 device cgroup 拦。
+
+   实践含义不变：这是环境限制不是服务端 bug，`scripts/acceptance.sh` 已把它做成
+   skip(rc=77)，不要因为它 fail 就判定验收不通过。**但不要再浪费时间去加 capability
+   或换 docker 参数** —— 那条路在数学上就是死的。§3 要求的「至少三种第三方客户端通过」
+   由 **smbclient + impacket + go-smb2** 三家满足（第四家见第 10 条 smbtorture）。
 3. **impacket 用 apt 装，不要用 pip**：`apt-get install python3-impacket`
    （pip 装会和已有的 cryptography 版本冲突）。
 4. **致命坑一：`pkill -f <路径>` 会自杀**。该模式会匹配到执行它的 shell 自己的命令行，
