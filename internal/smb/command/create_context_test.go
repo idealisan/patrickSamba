@@ -234,28 +234,28 @@ const (
 // 这正是"字节一致"这个结论的检验点。
 // ---------------------------------------------------------------------------
 
-// goldenParse 走一遍请求侧解析，返回会让 CREATE 失败的错误。
+// goldenParse 走一遍请求侧解析（注册表的 Parse 阶段），返回会让 CREATE
+// 失败的错误。重构前后只有这一层换实现，golden 常量与用例表原样不动。
 func goldenParse(t *testing.T, ctx *Context, req *wire.CreateRequest) error {
 	t.Helper()
-	if _, err := negotiateAAPL(ctx, req); err != nil {
-		return err
-	}
-	if _, err := parseMxAcRequest(req); err != nil {
+	if _, err := newCreateContexts(ctx, req); err != nil {
 		return err
 	}
 	return nil
 }
 
-// goldenRespond 走一遍完整流程并返回响应 context 链。
+// goldenRespond 走一遍完整流程（注册表的 Parse + Respond 阶段）并返回响应
+// context 链。Respond 需要一个完整的 *Open —— 但 QFid/MxAc/AAPL 这三个
+// handler 只用 attr 与 ctx.Tree，不碰 open 的具体字段，故传最小实例即可。
 func goldenRespond(t *testing.T, ctx *Context, req *wire.CreateRequest, attr *vfs.Attr) []wire.CreateContext {
 	t.Helper()
-	aapl, err := negotiateAAPL(ctx, req)
+	cc, err := newCreateContexts(ctx, req)
 	if err != nil {
-		t.Fatalf("negotiateAAPL: %v", err)
+		t.Fatalf("newCreateContexts: %v", err)
 	}
-	mxac, err := parseMxAcRequest(req)
-	if err != nil {
-		t.Fatalf("parseMxAcRequest: %v", err)
+	resp := &wire.CreateResponse{}
+	if err := cc.respond(ctx, &Open{}, resp, attr); err != nil {
+		t.Fatalf("respond: %v", err)
 	}
-	return createResponseContexts(req, attr, aapl, mxac, mxAcMaximalAccess(ctx.Tree, attr))
+	return resp.Contexts
 }
