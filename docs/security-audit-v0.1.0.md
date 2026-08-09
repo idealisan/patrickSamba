@@ -75,3 +75,59 @@ TWINE_PASSWORD = <h=1578f30c len=27>   ← 同一个值
 `CNB_BUILD_USER_ID`（均为 19 位数字）、`CNB_BRANCH_SHA`、`VSCODE_NONCE`。
 
 敏感度低（不是凭据），但确实对外暴露了内部 org / repo 的数字 ID。
+
+---
+
+## 3. 判定「没有第二处」的依据
+
+这是本报告最需要可证伪的一条结论，方法如下：
+
+1. 从两个已知泄漏 blob 中提取真实凭据值（仅在进程内存中，从不输出）。
+2. 以该值为 needle，对**全部 6055 个 blob** 做字面量比对。
+3. 命中集合 = **恰好那 2 个 blob**，无第三个。
+
+同时确认：全历史中只存在过这 **2 个** `shell-snapshots/` blob，
+不存在「曾提交过、后来被删」的第三个快照。
+
+**为什么这一步不可省**：模式扫描只能发现「长得像凭据的字符串」，
+无法发现「同一个凭据换了个不像凭据的变量名」。§2.1 的 `TWINE_PASSWORD`
+正是靠这一步才发现的——它的变量名里没有 `TOKEN` 字样。
+
+---
+
+## 4. 按类型分类的结论
+
+| 类型 | 确认真凭据 | 疑似 | 确认测试向量 / 误报 |
+|---|---|---|---|
+| CNB token | **1** | 0 | — |
+| AWS / 云厂商密钥 | 0 | 0 | 全历史 **0 命中** |
+| GitHub `ghp_*` / GitLab `glpat-*` | 0 | 0 | 全历史 **0 命中** |
+| Slack / Google API Key / JWT | 0 | 0 | 全历史 **0 命中** |
+| SSH / PGP / PEM 私钥 | 0 | 0 | 1 处标记，见 §4.1 |
+| 数据库连接串口令 | 0 | 0 | 口令位均为占位词 |
+| NT hash | 0 | 0 | 2 处，见 §4.2 |
+| 通用 `key=value` 赋值 | 0 | 0 | 148 条，均为代码标识符 |
+
+### 4.1 唯一的私钥标记 = 文档占位符
+
+`docs/.codebuddy/plugins/marketplaces/.../k8s-manifest-generator/SKILL.md`
+含 `-----BEGIN PRIVATE KEY-----`，但其后紧接字面量 `...` 再接 `-----END`，
+**无任何密钥体**。判定：文档占位符，非泄漏。
+
+### 4.2 NT hash 两处均非泄漏
+
+- `configs/example.yaml`、`internal/config/testdata/good.yaml`：
+  `31d6cfe0d16ae931b73c59d7e0c089c0` —— 这是**空口令**的 NT hash，
+  公开常量（MD4 of empty UTF-16LE string），不是任何人的真实口令。
+- `internal/config/testdata/many_errors.yaml`：4 字符、单一字符重复，
+  是**故意构造的非法 hex**，用于覆盖 `isHex32` 的错误分支。
+
+### 4.3 148 条 `key=value` 命中为何全是误报
+
+去重后为 148 个不同值，逐个核查后归类：
+
+- 绝大多数是**代码标识符**：`process.env.X_SECRET`、`get_api_key(`、
+  `hashPassword(`、`os.environ[` 等，正则把函数名/属性名当成了「值」。
+- 全部落在 `docs/.codebuddy/plugins/marketplaces/` 下的**上游插件模板**中，
+  非本项目代码。
+- 两个 `.env.example` / `.env.template` 的值全部形如 `your_xxx_here`。
