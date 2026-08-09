@@ -547,3 +547,22 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 待 open_windows.go 
 | 有无在 `/workspace` 改文件 | ❎ 无。`/workspace` 干净且停在 `main` | ❎ 无（pm 只在 `/work/pm` 改看板） |
 | 有无「已验证」缺反向对照 | 本轮无新增 ✅ 档条目，暂不适用 | ⚠️ **R4 假绿陷阱**：bbolt 合规不带 `-tags metabolt` 全绿但没验，已记入 §4.1 |
 | worktree 隔离是否生效 | ✅ 12 个 worktree 各自独立，本轮未发生 §10.3 第 6 条那类串扰 | ✅ 仍生效 |
+
+---
+
+## 9. 第 7 轮（PM 收 win-meta 三报，2026-08-09 ~13:40）
+
+win-meta 三条报告（bolt.go 主动 revert / R4 通过 / PR #26 已 open 且 rebase）已逐条核对仓库真实状态，结论：
+
+- **R2 反证 + 误报撤除确认**：bolt.go 的 modified 是 win-meta 主动做的变异实验（subtreeSkipByte `0x30`→`0x2F`），被 `TestGetDir` 在 `-tags metabolt` 下杀出死循环 90s 超时后已 revert，工作树干净。非崩溃吞没，是刻意丢弃。R2 风险表维持「已解除」。
+- **R4（bbolt 合规）：通过，建议关闭**。结论见 §4.1 / PR #26 描述（纯 Go/零 CGO、MIT+BSD-3 非 AGPL、四平台零 CGO 交叉编译 OK）。
+- **PR #18 已 closed/merged**（13:18 那批 9 个 PR 之一），从待合清单移除。
+- **记忆同步已进 main**：team-lead 把 win-meta 那批记忆直接提交进 main（commit `8481aae`，HEAD），并新增 `memory/project_metadata_store_consolidation.md`。win-meta 提议的 `win-meta/memory-sync` 快车道分支**不必开**——记忆没卡在 PR #26 后面。
+- **D6（R11 双 bbolt 撞车）：决策已下** → 以 `internal/meta` 为唯一真源，vfs 依赖它、删 `metadata_windows.go` 的 bbolt（已写入 `project_metadata_store_consolidation.md`；task #17 completed，task #16 实施中）。
+  - 分工：win-meta 拥有 `internal/meta`（PR #26，1611 行，draft 维持不合）；**win-vfs 拥有 vfs 适配层 + 删除 + CI**（task #16）。
+  - 对接要点：vfs 新建 `windows||metabolt` 适配文件调 `meta.Open`，`metaAdapter` 互转并记录 `GetDir`/`Reap`；删 vfs bbolt；新 bucket `posix2` + 旧 posix 迁移 shim（保留不删）；`metadata_other.go` 改 `!windows&&!metabolt`。
+
+**仍开着的真实缺口（已指派，等 team-lead 批准）**：
+- **CI `.cnb.yml` 从不带 `-tags metabolt`**（`grep metabol .cnb.yml` 为空）→ `internal/meta` 的 393 行 bolt.go（占 PR #26 约 64%）与 vfs 适配层在 Linux CI 从不编译/测试，是假绿洞。PM 已正式指派 **win-vfs** 在 `.cnb.yml` 加 `go build -tags metabolt ./...` 与 `go test -tags metabolt ./internal/meta/...`。**请 team-lead 批准该指派**（win-meta 明确超出其归属、要授权才动），作为 PR #26 解阻塞前置。
+
+**进度总览**：完成 12 项；进行中 1 项（#16 双实现对接）；pending 4 项（#11 winopen 消费方 / #13 durable 验证 / #14 ValidateComponent 绕过核查 / #15 e2e 冒烟）——均与原计划一致，无新增阻塞。PR #26 维持 draft，等 win-vfs 适配层 + CI 步骤落地后收尾合入。
