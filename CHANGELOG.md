@@ -5,9 +5,9 @@
 
 ---
 
-## Unreleased（v0.2.0 开发中）
+## v0.2.0（2026-08-09，release）
 
-> **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实）：
+> **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实；本节保留作为历史）：
 >
 > 1. **功能没合入 `main` 之前，一个字都不写进这里。** 分支上跑通了不算，PR open 着也不算。
 > 2. **打折要写在句子主干里。** 「已支持 X（但 Y 未实现）」是坏写法；
@@ -15,9 +15,24 @@
 > 3. **区分三档置信度，不要混为一谈**：**已实测验证** / **只交叉编译过** /
 >    **只读代码推断**。例：`F_FULLFSYNC` 的 darwin 分支属于第二档（开发容器是
 >    Linux，从没真跑过），写的时候必须点明。
-> 4. **Time Machine 定级在相关能力合入 `main` 之前保持不变**（当前 **C 档**，
->    依据见 [`docs/timemachine-status.md`](docs/timemachine-status.md)）。
->    durable handle / oplock-lease / quota 的改动正在各自分支上，未合入前不动结论。
+> 4. **v0.2.0 已将下列此前「在各自分支上」的能力合入 `main`**：durable handle
+>    （v1/v2）、ShareAccess、oplock/lease 断连通道、per-share quota、Windows 路径
+>    junction 逃逸修复、`internal/meta` 旁路存储。Time Machine 定级据此上调，见
+>    [`docs/timemachine-status.md`](docs/timemachine-status.md)。
+
+### 发布物形态
+
+- **裸静态二进制**：`CGO_ENABLED=0 go build` 通过，产物静态链接（`ldd` 报告
+  "not a dynamic executable"），符合 C1/C2 硬约束。四平台交叉编译通过：
+  linux/amd64、linux/arm64、darwin/arm64、windows/amd64。
+- **多架构 Docker 镜像**：`FROM scratch` 基础镜像，**零 `RUN` 指令**（仅 `COPY`，
+  无需 QEMU 模拟），内嵌 `stupidsamba` 二进制 + `configs/docker.yaml`，监听 445/tcp
+  与 5353/udp。由 `docker buildx` 构建 `linux/amd64` + `linux/arm64` 双架构 manifest。
+- 镜像**未推送**至远端仓库：最终 tag 与镜像推送由 team-lead 在全部 PR 合入、
+  CI 全绿后执行。本地已构建并验证 manifest 含 amd64 + arm64 两架构。
+- 端到端镜像验证脚本 [`scripts/verify-image.sh`](scripts/verify-image.sh)：用
+  `smbclient` + `impacket` 对容器做 8 项可证伪校验（启动、静态可执行、读写往返、
+  共享不存在被拒的反向对照、数据落到命名卷、guest 警告、mDNS 关闭），均通过。
 
 ### 开发流程与工具（不影响运行时行为）
 
@@ -40,14 +55,52 @@
 
 ### 协议与功能
 
-- 新增 oplock / lease 相关的三个 NTSTATUS 常量；`handleOplockBreak` 改回返回
-  `STATUS_INVALID_OPLOCK_PROTOCOL`（此前误用 `STATUS_INVALID_PARAMETER`）。
-  属协议状态机内部修正，不改变对外可观察行为。
+- **durable / persistent handle（v0.2.0 头号新增，PR #119）**：实现持久句柄 v1/v2，
+  断网重连后可恢复已打开的句柄。**已实测验证**：`create_context_durable_test.go`
+  覆盖 reconnect 签名；但**尚无真实 macOS Time Machine 长跑断线恢复**的端到端证据
+  （开发环境无 macOS），置信度属「已实测验证握手与重连路径」，而非「真实备份过程不中断」。
+- **ShareAccess（PR #34）**：`CREATE` 现在解析并强制 `ShareAccess` 共享模式
+  （R/W/D 互斥/共享），违反时返回 `STATUS_SHARING_VIOLATION`。
+- **CREATE context 注册表**：`AAPL` / `AlSi` / `MxAc` / `QFid` + durable 上下文统一登记，
+  不再散落硬编码。
+- **oplock / lease 断连通道（PR #103）**：`handleOplockBreak` 已接线并返回正确的
+  `STATUS_INVALID_OPLOCK_PROTOCOL`，新增相关 NTSTATUS 常量。但**服务端仍不宣告
+  `SMB2_GLOBAL_CAP_LEASING`、仍一律授予 `NONE` oplock**——对外可观察行为无变化，
+  客户端继续不缓存。属内部修正，为后续真实 oplock 铺路。
+- **per-share quota（PR #42）**：`quota_bytes` 向客户端上报卷容量（Time Machine 限容
+  的唯一有效手段），现已按共享粒度生效。
+- **VFS 修复（PR #38）**：路径安全与属性映射若干修正。
+- **Windows 路径 junction 逃逸修复（PR #44）**：防御 `..` 经 junction/符号链接逃逸。
+  **置信度：仅交叉编译 + 单元测试通过**，无 Windows 真机验证（开发容器是 Linux）。
 - Windows 旁路 POSIX 元数据存储（随 PR #26 合入，`internal/meta`）改用新 bucket 名
   `posix.v2`。v0.1.0 时期由 `internal/vfs/metadata_windows.go` 写入的 `posix` bucket
   记录（若存在）本版本**不再读取**，回退到默认属主/权限——这是有意的、无迁移的改名：
   v0.1.0 的 Windows 后端从未被真机执行过、库里没有真实数据，为不存在的数据写迁移逻辑
   收益为零且引入第二个不可验证路径。详见 `internal/meta/bolt.go` 的 bucketName 注释。
+
+### 安全
+
+- **Windows junction 逃逸修复（PR #44）**：见上「协议与功能」。属服务端路径穿越防御的
+  加固，置信度为「仅交叉编译 + 单测」，无 Windows 真机证明。
+
+### 配置
+
+- 路径字段按**运行平台**判定绝对性：`metadata_path` 等路径在错误平台上填绝对路径会直接
+  启动失败（而非静默忽略），跨平台校验语义已在 v0.1.0 的 README/example.yaml 修正中落地。
+
+### 内部
+
+- **`internal/meta`（PR #26，v0.3.0 准备）**：纯 Go 嵌入式 KV 旁路存储已合入，但
+  **当前产品代码尚未引用**——它要到 v0.3.0 的 `oscap` builtin 适配器落地后才真正启用。
+  本版本只是把底座就位，不做功能承诺。
+
+### 已知问题 / 未实现（v0.2.0）
+
+- **`CHANGE_NOTIFY` 仍返回 `STATUS_NOT_SUPPORTED`**：客户端降级为定时轮询，目录列表
+  不会自动刷新（需手动刷新）。异步变更通知未实现。
+- **真实 oplock / lease 能力仍未对外生效**：见「协议与功能」。
+- **Time Machine 仍未通过 macOS 真机端到端验收**：durable handle 已就位但无真机断线
+  恢复证据；详见 [`docs/timemachine-status.md`](docs/timemachine-status.md)。
 
 ---
 
