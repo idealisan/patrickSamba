@@ -266,12 +266,17 @@ func (s *Session) RemoveTree(id uint32) status.Status {
 	}
 	delete(s.trees, id)
 
-	// 摘出属于该树的句柄，锁外关闭（Close 可能阻塞在 IO 上）。
+	// 摘出属于该树的句柄：持久句柄搬进 waiting 表（不断开底层文件），
+	// 其余锁外关闭（Close 可能阻塞在 IO 上）。
 	var doomed []*Open
 	for vid, o := range s.opens {
 		if o.Tree == t {
 			delete(s.opens, vid)
-			doomed = append(doomed, o)
+			if o.Durable != nil && o.Durable.Granted && !o.Durable.Invalidated {
+				durableRegistry.disconnect(o)
+			} else {
+				doomed = append(doomed, o)
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -352,6 +357,12 @@ func (s *Session) Close() {
 	s.mu.Unlock()
 
 	for _, o := range opens {
-		o.close()
+		// 持久句柄不能随会话销毁而关闭——它们要进 waiting 表等重连。
+		// 普通句柄正常关闭底层文件。
+		if o.Durable != nil && o.Durable.Granted && !o.Durable.Invalidated {
+			durableRegistry.disconnect(o)
+		} else {
+			o.close()
+		}
 	}
 }
