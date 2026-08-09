@@ -1,6 +1,6 @@
 ---
 name: macOS SMB 客户端的两个反直觉行为（私用区字符 / xattr 当 ADS 发）
-description: 流名里的冒号是 U+F03A 不是裸冒号；macOS 把扩展属性当 named stream 发过来——两条都在 MS 规范里查不到
+description: 流名里的冒号是 U+F022（不是裸冒号、也不是 U+F03A）；macOS 把扩展属性当 named stream 发过来——两条都在 MS 规范里查不到
 type: reference
 ---
 
@@ -12,9 +12,32 @@ type: reference
 > OS X maps NTFS illegal characters to the Unicode private range in SMB requests.
 > —— `vfs_fruit(8)` 手册
 
-映射规则是 `U+F000 + ASCII`。最要命的是冒号：macOS 真实用的流名
-`com.apple.metadata:kMDItemFinderComment` 里那个冒号，**线上发的是 U+F03A**，
-不是裸 `:`（0x3A）。
+最要命的是冒号：macOS 真实用的流名 `com.apple.metadata:kMDItemFinderComment`
+里那个冒号，线上发的**不是**裸 `:`（0x3A），而是一个私用区字符。
+
+> **⚠️ 更正（2026-08-09，apple）：映射规则不是 `U+F000 + ASCII`，冒号是 U+F022 不是 U+F03A。**
+>
+> 本条目原先写的 `U+F000 + ASCII`（→ 冒号 U+F03A）是老 SFM（Services for Macintosh）
+> 的约定，被想当然套到了 macOS 上。权威表在 Samba `source3/lib/string_replace.c:186`
+> 的 `macos_string_replace_map`，是一张**紧凑分配**表，后 8 个字符接着控制字符
+> 顺序往下排，与字符自身码点无关：
+>
+> ```
+> 0x01..0x1F 控制字符 → U+F001..U+F01F
+> 0x22 "  → U+F020      0x2A *  → U+F021
+> 0x3A :  → U+F022      0x3C <  → U+F023
+> 0x3E >  → U+F024      0x3F ?  → U+F025
+> 0x5C \  → U+F026      0x7C |  → U+F027
+> ```
+>
+> 定性依据（不是猜的）：`vfs_fruit.c:1354` 把这张表直接喂给 **`catia:mappings`**
+> （`if (config->encoding == FRUIT_ENC_NATIVE) lp_do_parameter(..., "catia:mappings",
+> macos_string_replace_map)`）。catia 做的正是「线上名 ↔ 磁盘名」翻译，
+> 表项 `0x3a:0xf022` 即「磁盘上的 `:` ↔ 线上的 U+F022」。
+>
+> **影响面有限但真实**：因为我们（和 Samba 默认的 `fruit:encoding = private` 一样）
+> **原样存不翻译**，存储侧不受这个值影响；但凡是**硬编码码点的测试**、
+> 以及将来若实现 `native` 翻译，用错就会全盘错位。
 
 **Why 重要：** 冒号同时是 SMB 流名的分隔符（`path:stream:$DATA`）。
 看起来矛盾，实际不冲突 —— 正因为客户端做了私用区编码，按裸冒号切分才是对的。
@@ -25,8 +48,9 @@ type: reference
 - 反过来，**任何地方都不许把私用区字符当非法字符过滤掉** ——
   那会毙掉整类 `com.apple.metadata:*`。ValidateStreamName 只拒 ASCII 非法字符，
   私用区字符（UTF-8 三字节，无一 < 0x20）自然放行，这是对的。
-- 写测试时流名要用 `"a\uF03Ab"` 这种**线上真实形态**，不要用裸冒号 ——
-  用裸冒号会得到一个 ErrInvalidPath，让人误以为自己的校验太严。
+- 写测试时流名要用 `"a\uF022b"` 这种**线上真实形态**（注意是 F022，见上方更正），
+  不要用裸冒号 —— 用裸冒号会得到一个 ErrInvalidPath，让人误以为自己的校验太严。
+  真实例子：`"com.apple.metadata" + "\uF022" + "kMDItemFinderComment"`。
 - 存储侧选择「原样存，不还原成 ASCII」：Samba 的 `fruit:encoding` 默认值就是
   `private`（保留私用区字符），`native`（还原）是可选项，且手册明确警告它
   "is known to not fully work with fruit:metadata=stream or fruit:resource=stream"。
