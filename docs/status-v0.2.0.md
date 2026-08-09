@@ -104,9 +104,7 @@ grep "reservedNames" path.go  →  NONE（已删除）
 正是本项目「被架空逻辑」bug 类的真身——**只靠查非测试调用点抓得住**。`winpath` 那半已被我
 自己的复核查实已补，所以这次净抓到一个真缺口（winopen），不是两个。
 
-> **owner 待定**：win-meta 回函说等拍板期间会继续写 `open_windows.go`（解决 winopen 缺口），
-> 但截至本期**无对应 PR**。建议把它作为独立关键路径条目，owner 落到 win-vfs / win-meta 之一，
-> 由 team-lead 定。
+> **owner 已定 = win-vfs**（第 8/9 轮）：原设想的消费方 `open_windows.go` 由 win-vfs 以单点 build-tag 分裂接缝 `openhost_windows.go` 取代（PR #30，分支 `win-vfs/openhost-seam`），与 unix 侧 `openhost_unix.go` 一起构成 `openHostFile` 接缝。win-meta 明确不碰 `internal/vfs`（team-lead 边界）。第一步接缝已完成：7 处宿主打开收口到 `openHostFile`，`winOpenParamsFor`/`isNameSurrogateTag` 调用点以 TODO 标出；第二步真接 `CreateFileW` 被 team-lead 暂缓（无 Windows runner 验 `os.NewFile(handle)` 的 Seek/ReadAt/WriteAt/Truncate 互操作——不可静态验的存亡假设，不赌）。整条链都在 vfs，win-meta 无需另起一份，无重复造风险。
 
 ### 6.3 win-meta 的 `bolt.go`「消失」是误报——已澄清
 
@@ -490,7 +488,7 @@ tm-handle: create context 注册表重构（+1677，无 PR）──► tm-lease 
 win-meta: bbolt 合规✅(带-tags metabolt) ──► internal/meta PR #26(draft)
           ──► ⚠️ 与 vfs/metadata_windows.go 同 bucket "posix" 撞车(R11)
           ──► 处置已定（D6）：vfs 依赖 meta、删 vfs bbolt、bucket 改名 posix→posix2 不迁移、CI 归 qa-e2e
-win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 待 open_windows.go 消费方（owner 待定，§6.2）
+win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 由 `openhost_windows.go` 接缝消费（owner=win-vfs，PR #30，第二步 CreateFileW 暂缓）
 ```
 
 **当前瓶颈（按紧迫度，第 6 轮）**：
@@ -500,7 +498,7 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 待 open_windows.go 
    这是当前唯一会「合了反而更糟」的 PR。
 2. **评审吞吐**：现仅 4 个开 PR（#24/#25/#26/#27）。建议先合零冲突的 #25（团队纪律）、#27（名字词法相关），
    #24（本看板）我排最后。#26 在 R11 解决前勿合。
-3. **winopen 缺口**：`winOpenParamsFor`/`isNameSurrogateTag` 仍零生产调用点，需 `open_windows.go`，owner 待定。
+3. **winopen 缺口**：`winOpenParamsFor`/`isNameSurrogateTag` 已由 win-vfs 的 `openhost_windows.go` 接缝收口（owner=win-vfs，PR #30），第二步 `CreateFileW` 暂缓。
 4. **qa / acceptance 正式开动**：save.sh 修复已随 #22 进 main，qa 接下来跑 `qa/acceptance-v020`（v0.2.0 验收）。
 
 ---
@@ -517,7 +515,7 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 待 open_windows.go 
 | R6 | 容器 2C4G，V8 堆上限触发 SIGABRT | 已有 `scripts/devenv.sh` 削峰（PR #1 已合） | 全员 `. scripts/devenv.sh`、输出加 `\| head -N` |
 | **R7** | **无主分支**：作者已退出、代码未提 PR（tm-handle +1677、r-infra +600） | 🟠 已代开 PR（#20/#21 已合） | §4.3 / §4.4 已闭环 |
 | **R8** | **PR 堆积期越长，热点文件 rebase 代价越高** | 🟢 已收敛：现仅 4 个开 PR | 按 §6.4 顺序合 |
-| **R9** | **「被架空的逻辑」**：PR #7 新增 764 行 | 🟠 **半关闭（第 6 轮）**：`validateWindowsName` 已接线（`path.go:203`，PR #19）；`winOpenParamsFor`/`isNameSurrogateTag` 仍零生产调用点，待 `open_windows.go` | §6.2；**今后凡新增函数零调用点，合并前必问一句** |
+| **R9** | **「被架空的逻辑」**：PR #7 新增 764 行 | 🟢 **已闭环（第 9 轮）**：`validateWindowsName` 已接线（`path.go:203`，PR #19）；`winOpenParamsFor`/`isNameSurrogateTag` 已由 win-vfs `openhost_windows.go` 接缝预留调用点（TODO），待第二步 `CreateFileW` 接线（owner=win-vfs，PR #30），非死代码失控 | §6.2；**今后凡新增函数零调用点，合并前必问一句** |
 | **R10** | **CI「假红」**：旧 `.cnb.yml` 致 push 构建必红，与代码无关 | 🟢 已不阻塞：各分支已 rebase 拿到新 `.cnb.yml` | §2.4。**别拿 push 的红拦 PR** |
 | **R11** | **🔴 新增·双 bbolt 实现撞车**：`internal/meta`（PR #26）与 `internal/vfs/metadata_windows.go` 同写 bucket `posix`、记录布局不同 → 静默数据损坏（见 §4.1） | 🟢 **已决（第 8 轮）**：vfs 依赖 meta、删 vfs bbolt、bucket 改名 `posix`→`posix2` 不迁移；PR #26 待合 | PR #26 保持 draft 勿合；处置：rename posix→posix2、不迁移、CI 归 qa-e2e |
 
@@ -531,7 +529,7 @@ win-vfs: winopen.go 的 winOpenParamsFor/isNameSurrogateTag 待 open_windows.go 
 | D2 | bbolt 依赖是否批准（纯 Go / License / 零 CGO 三项核验由谁出结论） | `win-meta`、`win-vfs` | **第 6 轮已核验通过（带 `-tags metabolt`；不带 tag 假绿）**，无需再批；但引出 R11 |
 | D3 | `tm-handle` / `r-infra` 是否已关闭？其分支由谁代为开 PR？ | `pm`、Time Machine 块整体 | ✅ 已闭环：#20 / #21 已合入 |
 | D4 | `qa` 是否还活着？`save.sh` 历史改写 bug 要不要插队进第 1 批？ | 全队（它会改写别人 PR 的历史） | ✅ 已闭环：save.sh 修复随 PR #22 合入 main |
-| D5 | PR #7 的接线是刻意拆两步还是漏做？合并时如何措辞才不误判为「已完成」？ | `win-vfs`、CHANGELOG | **第 6 轮已答**：`validateWindowsName` 漏了、已 PR #19 接线；`winOpenParamsFor`/`isNameSurrogateTag` 刻意拆，待 `open_windows.go`（owner 待定，§6.2） |
+| D5 | PR #7 的接线是刻意拆两步还是漏做？合并时如何措辞才不误判为「已完成」？ | `win-vfs`、CHANGELOG | **第 6 轮已答**：`validateWindowsName` 漏了、已 PR #19 接线；`winOpenParamsFor`/`isNameSurrogateTag` 刻意拆，由 `openhost_windows.go` 接缝收口（owner=win-vfs，PR #30） |
 | **D6** | ⚠️ **R11 双 bbolt 撞车如何处置？** `internal/meta`(PR #26) 与 `vfs/metadata_windows.go` 谁留谁删、bucket 改名、CI 归属 | `win-meta`、`win-vfs`、`qa-e2e`、`team-lead` | **已决（第 8 轮订正）**：vfs 依赖 meta、删 vfs bbolt；**bucket `posix`→`posix2`，不写迁移代码**（vfs 那份 12 字节实现 build tag=windows，项目从未在真实 Windows 跑过、库文件从未被创建；v0.1.0 私密 prerelease 无外部用户；迁移码不可测试=静默失败形态）；**CI（`.cnb.yml`/`test/ci`）归 qa-e2e**，vfs 适配层归 win-vfs。PR #26 待 team-lead 合（win-meta 已实装 CI 修复，绿） |
 
 > D1 的对照实验已做完（`git diff --name-only` 逐分支比对），不是推测，可直接执行。
@@ -599,5 +597,12 @@ team-lead 就我转给 win-vfs 的对接要点下发两处订正，且 win-meta 
 
 ### 10.5 当前待合 PR（新增）
 - **qa-vfs/verify（`db03c4d`）**：team-lead 即开 PR，加进待合清单。
-- 仍在待合：PR #26（win-meta，绿，待合，受 10.3 两处不一致待拍板）、PR #27（win-vfs，IsWindowsSlash）、PR #24（本看板，待 team-lead 合，sha `986b1e0`）。
+- 仍在待合：PR #26（win-meta，绿，待合，受 10.3 两处不一致待拍板）、PR #27（win-vfs，IsWindowsSlash）、PR #24（本看板，待 team-lead 合，sha `986b1e0`）、**PR #30（`win-vfs/openhost-seam`，openhost_windows.go 接缝，R9 收口第一步）**。
+
+### 10.6 `open_windows.go` 归属落定 = win-vfs（第 9 轮）
+- win-meta 明确**不接** `open_windows.go`（team-lead 两封「元数据库归属裁决 D」「拍板」明令 win-meta 不得动 `internal/vfs/` 任何文件；他已在 #11 描述记「win-meta 不得动 internal/vfs」边界）。早先「等拍板期间去写它」的话在边界划定前说的，现已撤回。
+- win-vfs 以**单点 build-tag 分裂接缝**方案取代原 `open_windows.go`：新增 `openHostFile(host, flag, perm)`，Unix 侧 `openhost_unix.go` 薄包 `os.OpenFile`，Windows 侧 `openhost_windows.go` 最终接 `winOpenParamsFor`+`CreateFileW`+`os.NewFile`。整条链都在 vfs，全归 win-vfs，**win-meta 无需另起一份，无重复造风险**（符合 AGENTS §7.3.3）。
+- **进度**：接缝第一步完成并开 **PR #30（`win-vfs/openhost-seam`）**——7 处宿主文件打开全收口到 `openHostFile`，`openhost_windows.go` 当前原样转调 `os.OpenFile`，`winOpenParamsFor` 调用点以 TODO 标出。第二步真接 `CreateFileW` 被 team-lead **暂缓**：无 Windows runner 验 `os.NewFile(handle)` 的 `Seek/ReadAt/WriteAt/Truncate` 互操作——属不可静态验的存亡假设，不赌。故 `winOpenParamsFor`/`isNameSurrogateTag` 现处「接缝里预留、待第二步接线」状态，**非死代码失控**（R9 由 🟠 半关闭改为 🟢 已闭环）。
+- 看板 `owner 待定` 三条（§6.2 / §5 / §9 / D5）已全部改为 win-vfs；task #11 已更新：第一步接缝完成，转为跟踪第二步 CreateFileW 接入。
+- 附注：win-vfs 确认我早先对 team-lead 的「reservedNames 不是死变量」误报已撤回并经其复核无误，此条无需再跟；「先查调用点再动手」方法论本次又抓到 winopen 真缺口，沿用。
 
