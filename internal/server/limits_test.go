@@ -306,10 +306,10 @@ func TestMalformedFrameDropsOnlyThatConnection(t *testing.T) {
 
 	// 一堆畸形帧，每条一个新连接。
 	bad := [][]byte{
-		{0x00},                                     // 1 字节，连 SMB 魔数都不完整
-		{0xFE, 'S', 'M', 'B'},                      // 只有魔数，没有头
-		{0xFD, 'S', 'M', 'B', 0x01, 0x02},          // TRANSFORM 魔数 + 垃圾
-		{0xFF, 'S', 'M', 'B', 0x72, 0x00, 0x00},    // SMB1 魔数 + 截断
+		{0x00},                                  // 1 字节，连 SMB 魔数都不完整
+		{0xFE, 'S', 'M', 'B'},                   // 只有魔数，没有头
+		{0xFD, 'S', 'M', 'B', 0x01, 0x02},       // TRANSFORM 魔数 + 垃圾
+		{0xFF, 'S', 'M', 'B', 0x72, 0x00, 0x00}, // SMB1 魔数 + 截断
 		append(realNegotiate(t)[:20], 0xFF, 0xFF, 0xFF, 0xFF), // NextCommand 撒谎
 	}
 	for i, b := range bad {
