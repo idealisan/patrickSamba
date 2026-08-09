@@ -62,6 +62,10 @@ type Transport struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 
+	// hardReadDeadline 是一个**绝对**读期限，零值表示没有。
+	// 生效时与 readTimeout 取更早者，见 SetHardReadDeadline。
+	hardReadDeadline time.Time
+
 	// hdr 是复用的读头缓冲，避免每帧分配。
 	hdr [TransportHeaderSize]byte
 	// whdr 是复用的写头缓冲。
@@ -82,6 +86,16 @@ func (t *Transport) SetTimeouts(read, write time.Duration) {
 	t.writeTimeout = write
 }
 
+// SetHardReadDeadline 设置一个**绝对**的读期限；传零值 time.Time 取消。
+//
+// 与 SetTimeouts 的 read 参数取**更早者**生效。两者不能互相替代：
+// readTimeout 是"每次读之间最多能沉默多久"的滑动窗口，可以被
+// "每隔 timeout-1 秒发一个字节" 无限续期；hardReadDeadline 是死线，
+// 到点必断。认证前的握手期限必须用后者。
+//
+// 只允许由读 goroutine 调用（与 ReadFrame 同一条 goroutine）。
+func (t *Transport) SetHardReadDeadline(d time.Time) { t.hardReadDeadline = d }
+
 // MaxFrameSize 返回本端接受的单帧上限。
 func (t *Transport) MaxFrameSize() int { return t.maxFrame }
 
@@ -101,10 +115,8 @@ func (t *Transport) Close() error { return t.conn.Close() }
 //
 // 对端正常关闭时返回 io.EOF；读到一半断开返回 io.ErrUnexpectedEOF。
 func (t *Transport) ReadFrame() ([]byte, error) {
-	if t.readTimeout > 0 {
-		if err := t.conn.SetReadDeadline(time.Now().Add(t.readTimeout)); err != nil {
-			return nil, err
-		}
+	if err := t.applyReadDeadline(); err != nil {
+		return nil, err
 	}
 
 	if _, err := io.ReadFull(t.conn, t.hdr[:]); err != nil {
@@ -137,6 +149,23 @@ func (t *Transport) ReadFrame() ([]byte, error) {
 		return nil, err
 	}
 	return buf, nil
+}
+
+// applyReadDeadline 把 readTimeout 与 hardReadDeadline 中更早的那个装到
+// 底层连接上。两者都没有时清除既有 deadline。
+//
+// 期限覆盖「读 4 字节头 + 读完整 body」整个过程 —— 只在读头之前设一次，
+// 所以一个把 1 MiB body 一个字节一个字节挤出来的客户端同样会被淘汰。
+func (t *Transport) applyReadDeadline() error {
+	var dl time.Time
+	if t.readTimeout > 0 {
+		dl = time.Now().Add(t.readTimeout)
+	}
+	if !t.hardReadDeadline.IsZero() && (dl.IsZero() || t.hardReadDeadline.Before(dl)) {
+		dl = t.hardReadDeadline
+	}
+	// dl 为零值时 SetReadDeadline 语义就是"清除期限"，正是我们想要的。
+	return t.conn.SetReadDeadline(dl)
 }
 
 // WriteFrame 写出一个 Direct TCP 帧。payload 不含 4 字节头。

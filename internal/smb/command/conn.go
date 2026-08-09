@@ -202,3 +202,19 @@ func (c *Conn) SessionCount() int {
 	defer c.mu.RUnlock()
 	return len(c.sessions)
 }
+
+// HasEstablishedSession 报告本连接上是否已经有**认证成功**的会话。
+//
+// 传输层用它区分"未认证连接"与"已认证连接"，从而对前者施加更苛刻的
+// 握手期限（见 server.DefaultHandshakeTimeout）。注意仅仅 NewSession
+// 成功不算数 —— NTLM 多轮握手中途的会话还没通过校验。
+func (c *Conn) HasEstablishedSession() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, s := range c.sessions {
+		if s.Established() {
+			return true
+		}
+	}
+	return false
+}
