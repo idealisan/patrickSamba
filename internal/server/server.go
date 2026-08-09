@@ -30,6 +30,18 @@ const (
 	// DefaultWriteTimeout 是单次写出的超时，用于淘汰慢客户端。
 	DefaultWriteTimeout = 60 * time.Second
 
+	// DefaultHandshakeTimeout 是**从建链到认证完成**的总时长上限。
+	//
+	// 未认证连接必须比已认证连接苛刻得多。DefaultIdleTimeout 有 15 分钟，
+	// 如果未认证连接也能占住这么久，任何人都能用几百条一言不发的 TCP 连接
+	// 把并发槽位占光（slowloris），且完全不需要凭据 —— 服务对外表现就是
+	// "连不上"。真实客户端从建链到 SESSION_SETUP 成功通常在 1 秒内完成，
+	// 30 秒已经极其宽松。
+	//
+	// 注意这是**绝对**期限而不是每次读的超时：后者可以被"每 29 秒发一个
+	// 字节"绕过，永远占着槽位。
+	DefaultHandshakeTimeout = 30 * time.Second
+
 	// shutdownPollInterval 是优雅关闭时轮询连接数的间隔。
 	shutdownPollInterval = 20 * time.Millisecond
 )
@@ -54,6 +66,9 @@ type Options struct {
 	// IdleTimeout / WriteTimeout 为 0 时使用默认值，负数表示不设超时。
 	IdleTimeout  time.Duration
 	WriteTimeout time.Duration
+	// HandshakeTimeout 是认证完成前的连接存活上限，0 表示
+	// DefaultHandshakeTimeout，负数表示不限（不建议：见该常量的注释）。
+	HandshakeTimeout time.Duration
 	// MaxFrameSize 是单帧上限，0 表示 DefaultMaxFrameSize。
 	MaxFrameSize int
 
@@ -83,6 +98,17 @@ func (o *Options) idleTimeout() time.Duration {
 		return DefaultIdleTimeout
 	default:
 		return o.IdleTimeout
+	}
+}
+
+func (o *Options) handshakeTimeout() time.Duration {
+	switch {
+	case o.HandshakeTimeout < 0:
+		return 0
+	case o.HandshakeTimeout == 0:
+		return DefaultHandshakeTimeout
+	default:
+		return o.HandshakeTimeout
 	}
 }
 

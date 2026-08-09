@@ -9,6 +9,7 @@ import (
 	"net"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/smb/command"
 	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
@@ -49,6 +50,10 @@ type Connection struct {
 	// writeMu 串行化写出。当前只有读循环会写，但异步响应（M4+）会用到。
 	writeMu sync.Mutex
 
+	// handshakeDone 表示本连接已经有过认证成功的会话，握手期限已解除。
+	// 只由读 goroutine 读写。
+	handshakeDone bool
+
 	closeOnce sync.Once
 }
 
@@ -60,7 +65,7 @@ func newConnection(s *Server, nc net.Conn) *Connection {
 	tr := NewTransport(nc, s.opts.MaxFrameSize)
 	tr.SetTimeouts(s.opts.idleTimeout(), s.opts.writeTimeout())
 
-	return &Connection{
+	c := &Connection{
 		srv:     s,
 		nc:      nc,
 		tr:      tr,
@@ -68,6 +73,29 @@ func newConnection(s *Server, nc net.Conn) *Connection {
 		state:   command.NewConn(s.opts.Settings, remote, local),
 		credits: NewCredits(DefaultMaxCredits),
 	}
+
+	// 认证完成前施加一个短得多的**绝对**期限：未认证连接同样占着
+	// MaxConnections 槽位，若也享受 15 分钟的空闲超时，几百条一言不发的
+	// TCP 连接就能在不出示任何凭据的情况下让服务对外不可用（slowloris）。
+	if ht := s.opts.handshakeTimeout(); ht > 0 {
+		tr.SetHardReadDeadline(time.Now().Add(ht))
+	} else {
+		c.handshakeDone = true
+	}
+	return c
+}
+
+// onSessionEstablished 在本连接第一次出现认证成功的会话时解除握手期限，
+// 让连接回落到常规的空闲超时。
+//
+// 只由读 goroutine 调用。
+func (c *Connection) onSessionEstablished() {
+	if c.handshakeDone {
+		return
+	}
+	c.handshakeDone = true
+	c.tr.SetHardReadDeadline(time.Time{})
+	c.log.Debug("认证完成，解除握手期限")
 }
 
 // Close 关闭连接并释放其全部会话/树/句柄。可重复调用。
@@ -107,6 +135,9 @@ func (c *Connection) serve(ctx context.Context) {
 		if err != nil {
 			c.log.Warn("处理帧失败，断开连接", "err", err)
 			return
+		}
+		if !c.handshakeDone && c.state.HasEstablishedSession() {
+			c.onSessionEstablished()
 		}
 		if len(resp) == 0 {
 			continue
