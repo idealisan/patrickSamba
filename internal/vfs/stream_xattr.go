@@ -55,6 +55,11 @@ const (
 	// 也不要在 Linux 上写出两个被内核截断成同名的不同流。
 	maxXattrNameLen = 255
 
+	// xattrUserNamespace 是 Linux 上非特权进程唯一可写的命名空间前缀。
+	// 这里只用来算长度预算，实际拼接由 encodeName 负责（且它是 unix 专有的，
+	// 不能在跨平台代码里调用）。
+	xattrUserNamespace = "user."
+
 	// maxDosStreamSize 是单个通用流的大小上限。
 	//
 	// ext4/xfs 的单个 xattr 值上限是 64 KiB，但真正能用多少取决于
@@ -64,15 +69,20 @@ const (
 	maxDosStreamSize = 64 * 1024
 )
 
-// maxDosStreamNameLen 是通用流名的最大字节数。
+// maxDosStreamNameLen 是通用流名的最大字节数（算出来是 234）。
 //
 // 完整 xattr 名是 "user." + "DosStream." + <流名> + ":$DATA"，
-// 必须整体不超过 maxXattrNameLen。算出来是 234 字节。
+// 必须整体不超过 maxXattrNameLen。
+//
+// **总是按最长的平台前缀（Linux 的 "user."）算预算**，即使在
+// macOS/Windows 上前缀更短或不存在。理由：同一份数据可能在平台之间
+// 迁移，如果各平台的上限不同，一个在 macOS 上写得进去的流名到 Linux
+// 上就会突然写不进去 —— 那种「换个机器就坏」的行为极难排查。
 //
 // **绝不能静默截断**：截断会让两个不同的长流名映射到同一个 xattr，
 // 后写的那个会把先写的悄悄覆盖掉。超长一律 ErrInvalidPath。
-var maxDosStreamNameLen = maxXattrNameLen -
-	len(encodeName(dosStreamPrefix)) - len(dosStreamSuffix)
+const maxDosStreamNameLen = maxXattrNameLen -
+	len(xattrUserNamespace) - len(dosStreamPrefix) - len(dosStreamSuffix)
 
 // dosStreamXattrName 把流名映射成 xattr 名（不含命名空间前缀，
 // 由 encodeName 在实际调用时补齐）。
