@@ -164,10 +164,7 @@ func TestCompoundRelated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create body: %v", err)
 	}
-	cl, err := (&wire.CloseRequest{FileID: wire.CompoundFileID}).Append(nil)
-	if err != nil {
-		t.Fatalf("close body: %v", err)
-	}
+	cl := (&wire.CloseRequest{FileID: wire.CompoundFileID}).Append(nil)
 	parts := []compoundPart{
 		{cmd: wire.CommandCreate, body: cr},
 		{cmd: wire.CommandClose, body: cl, related: true},
@@ -212,7 +209,7 @@ func TestCompoundRelatedPostFailure(t *testing.T) {
 		CreateOptions:      wire.FileNonDirectoryFile,
 		Name:               "comp-fail.txt",
 	}).Append(nil)
-	cl, _ := (&wire.CloseRequest{FileID: wire.CompoundFileID}).Append(nil)
+	cl := (&wire.CloseRequest{FileID: wire.CompoundFileID}).Append(nil)
 	parts := []compoundPart{
 		{cmd: wire.CommandCreate, body: cr},
 		{cmd: wire.CommandClose, body: cl, related: true},
