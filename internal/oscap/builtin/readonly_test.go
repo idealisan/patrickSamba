@@ -16,7 +16,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
-func TestReadOnlyRejectsEveryWrite(t *testing.T) {
+func TestPortableReadOnlyRejectsEveryWrite(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.bin", bytesRepeat(0xAA, 2*zeroBlockSize))
 
@@ -126,11 +126,11 @@ func TestReadOnlyRejectsEveryWrite(t *testing.T) {
 	}
 }
 
-// TestReadOnlyWithoutExistingStore 覆盖「只读共享 + 库文件根本不存在」。
+// TestPortableReadOnlyWithoutExistingStore 覆盖「只读共享 + 库文件根本不存在」。
 //
 // 这是真实场景（只读导出的共享从来没被写过），实现必须**不创建任何文件**，
 // 读一律「查不到」、写一律 ErrReadOnly，而不是启动失败。
-func TestReadOnlyWithoutExistingStore(t *testing.T) {
+func TestPortableReadOnlyWithoutExistingStore(t *testing.T) {
 	e := &env{t: t, root: t.TempDir(), meta: t.TempDir() + "/never-created.db"}
 	e.open(true)
 	ref := e.file("a.txt", []byte("x"))

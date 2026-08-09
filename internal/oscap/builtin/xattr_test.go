@@ -9,7 +9,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
-func TestXattrRoundTrip(t *testing.T) {
+func TestPortableXattrRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.txt", []byte("hello"))
 
@@ -87,11 +87,11 @@ func TestXattrRoundTrip(t *testing.T) {
 	}
 }
 
-// TestXattrPrefixIsolation 盯的是 key 拼接：前缀相同的两个路径不能互相看到属性。
+// TestPortableXattrPrefixIsolation 盯的是 key 拼接：前缀相同的两个路径不能互相看到属性。
 //
 // 这不是假想问题 —— key 是 pathKey+分隔符+name 拼出来的，
 // 分隔符选错（比如用 '/'）时 "a" 的前缀扫描会扫到 "a/b" 上去。
-func TestXattrPrefixIsolation(t *testing.T) {
+func TestPortableXattrPrefixIsolation(t *testing.T) {
 	e := newEnv(t)
 	dir := e.file("dir", nil)
 	nested := e.file("dir2/x.txt", nil)
@@ -104,7 +104,7 @@ func TestXattrPrefixIsolation(t *testing.T) {
 	}
 }
 
-func TestXattrEmptyName(t *testing.T) {
+func TestPortableXattrEmptyName(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.txt", nil)
 	if err := e.set.Xattr.SetXattr(ref, "", []byte("x")); !errors.Is(err, oscap.ErrInvalidArg) {
