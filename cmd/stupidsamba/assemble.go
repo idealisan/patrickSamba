@@ -112,6 +112,8 @@ func buildShares(cfg *config.Config) ([]*command.Share, error) {
 			// UID/GID 留 0：config.Share 不提供属主标签，
 			// 且这些数字**不做系统用户解析**（AGENTS.md §1.1 C8）。
 			MetadataPath: s.MetadataPath,
+			// 向客户端上报的卷容量上限（0=不限）；真正生效依赖 vfs.LocalConfig 的对应字段。
+			QuotaBytes: s.QuotaBytes,
 		})
 		if err != nil {
 			closeShares(out)
