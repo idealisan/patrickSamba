@@ -112,29 +112,34 @@ func (t *lockTable) remove(path string, owner *Open, offset, length uint64) bool
 	return false
 }
 
-// releaseAll 释放某个句柄持有的全部锁。
+// releaseAll 释放某个句柄在 path 上持有的全部锁。
 //
 // CLOSE、LOGOFF、TREE_DISCONNECT、连接断开都要走到这里，
 // 否则一个崩掉的客户端会把文件永久锁死（MS-SMB2 §3.3.5.10）。
-func (t *lockTable) releaseAll(owner *Open) {
+//
+// 只扫 path 一个桶就够：锁登记时用的 key 恒为 open.Path（见 handleLock），
+// 一个 Open 的路径在其生命周期内不变，所以它不可能在别的桶里留下锁。
+func (t *lockTable) releaseAll(path string, owner *Open) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for path, locks := range t.byPath {
-		kept := locks[:0]
-		for _, l := range locks {
-			if l.owner != owner {
-				kept = append(kept, l)
-			}
+	locks := t.byPath[path]
+	if len(locks) == 0 {
+		return
+	}
+	kept := locks[:0]
+	for _, l := range locks {
+		if l.owner != owner {
+			kept = append(kept, l)
 		}
-		if len(kept) == 0 {
-			delete(t.byPath, path)
-		} else {
-			t.byPath[path] = kept
-		}
+	}
+	if len(kept) == 0 {
+		delete(t.byPath, path)
+	} else {
+		t.byPath[path] = kept
 	}
 }
 
@@ -199,7 +204,8 @@ func handleLock(ctx *Context) error {
 		}
 	}
 
-	table := ctx.Tree.Share.lockTable()
+	// 锁表是 Share 的零值可用字段，直接取地址，不额外抽访问器。
+	table := &ctx.Tree.Share.locks
 	table.mu.Lock()
 	defer table.mu.Unlock()
 
