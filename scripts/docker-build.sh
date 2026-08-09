@@ -162,10 +162,20 @@ out=
 
 info "构建镜像 $IMAGE:$VERSION  平台 $PLATFORMS"
 # shellcheck disable=SC2086
+#
+# --provenance=false / --sbom=false：
+#   默认 buildx 会在推送的 manifest list 里额外塞两条 "unknown/unknown"
+#   的 attestation-manifest（provenance + SBOM）。这些条目不是真实可运行
+#   架构，却会让某些 registry 客户端把镜像当成「多架构里混进了未知平台」，
+#   也违背我们「镜像只含真实可运行架构」的承诺。
+#   本项目镜像内容完全由我们自己的产物决定，不需要 buildkit 自动生成的
+#   来源/物料清单数据，故显式关掉（见 verify-image.sh 的 manifest-clean 反向对照）。
 docker buildx build \
     --platform "$PLATFORMS" \
     $tag_args \
     $out \
+    --provenance=false \
+    --sbom=false \
     --build-arg "VERSION=$VERSION" \
     --build-arg "COMMIT=$commit" \
     --build-arg "BUILD_DATE=$build_date" \

@@ -258,6 +258,48 @@ case "$logs" in
     *) fail "mdns-off" "日志里没有「mDNS 未启用」这一行，内置配置的 mdns.enabled:false 可能失效" ;;
 esac
 
+# ------------------------------------------------------------------ 用例 5：manifest 里不得出现 unknown/unknown 平台
+#
+# 这是 buildx 默认未禁用 attestation 时的典型产物：推上去的 manifest list 除了
+# 真正的 linux/amd64 / linux/arm64 之外，还会多两条 Platform 为 "unknown/unknown"
+# 的 attestation-manifest（provenance + SBOM）。它们不是真实可运行架构，却会让
+# 某些 registry 客户端把镜像当成「多架构里混进了未知平台」，也违背我们
+# 「镜像只含真实可运行架构」的承诺。docker-build.sh 已显式加
+# --provenance=false --sbom=false 关掉它们。
+#
+# 反向对照（falsifiable，必须满足）：
+#   - 在 v0.2.0-rc0（未禁用 attestation）的镜像上，本用例必须 FAIL；
+#   - 在补上 --provenance=false --sbom=false 重建的镜像上，本用例必须 PASS。
+# 一个永远 PASS 的断言和没有断言是一回事——所以这条必须有上述两端的证据。
+
+info "检查 manifest 是否混入 unknown/unknown 平台"
+probe="$IMAGE"
+
+tmp_manifest=/tmp/verify-manifest.$$
+manifest_ok=0
+# 优先问 registry 的 manifest list（我们想验的就是远端产物）；
+# 带不出版本信息时退回 docker manifest inspect；都失败则跳过本用例。
+#
+# ⚠️ 不能直接用「tmp_manifest 非空」当成功标志：inspect 失败时错误文本也会被
+# 重定向进同一个文件，于是文件非空 → 落到下面被误判成 pass（假绿洞）。
+# 必须用显式 manifest_ok 区分「真拿到 manifest」与「只拿到一段报错」。
+if docker buildx imagetools inspect "$probe" >"$tmp_manifest" 2>&1; then
+    manifest_ok=1
+elif docker manifest inspect "$probe" >"$tmp_manifest" 2>&1; then
+    manifest_ok=1
+else
+    skip "manifest-clean" "imagetools/manifest inspect 无法解析 $probe（本地非 --push 构建？）"
+fi
+
+if [ "$manifest_ok" = 1 ]; then
+    if grep -q 'unknown/unknown' "$tmp_manifest"; then
+        fail "manifest-clean" "manifest 出现 unknown/unknown 平台（未禁用 provenance/SBOM attestation）"
+    else
+        pass "manifest-clean" "manifest 仅含真实可运行架构（无 unknown/unknown）"
+    fi
+fi
+rm -f "$tmp_manifest"
+
 # ------------------------------------------------------------------ 汇总
 
 printf '\n'
