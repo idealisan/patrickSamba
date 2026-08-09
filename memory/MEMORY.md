@@ -18,4 +18,5 @@
 - [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — metadata_path 那条已修（跳过+平台形参+平台化判定函数三件套）；example.yaml 在 Windows 上仍跑不起来
 - [查 CNB 流水线状态的正确姿势与「假红」陷阱](reference_cnb_ci_status.md) — 没有 statuses API 用 /-/build/logs?sourceRef=；push 与 pull_request 事件跑不同 .cnb.yml，结论可相反
 - [metadata 存储双实现冲突的定夺](project_metadata_store_consolidation.md) — vfs 与 internal/meta 撞同一文件/bucket 静默吐垃圾；定夺由 internal/meta 单一化（posix2 桶+迁移），并暴露 -tags metabolt 的 CI 假绿洞
+- [git worktree remove --force 会静默删未提交工作](feedback_worktree_remove_force.md) — 删工作树前先 git status；绝不带脏状态 --force 删，否则未 git add 的工作永久丢失
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
