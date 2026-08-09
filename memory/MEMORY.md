@@ -14,7 +14,7 @@
 - [验收判据必须可证伪](feedback_falsifiable_assertions.md) — 加密曾用「能读到内容」判定而漏掉明文旁路；探针要有反向对照，失败用例不许 skip
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
-- [CNB PR API 的调用方式与七个坑](reference_cnb_pr_api.md) — 合并 PUT、更新 PATCH、merge_style、commit_title 必填、都要 Accept；merged=null 与 squash 下祖先判定双双假阴性，判合并要比内容
+- [CNB PR API + null 陷阱 + 判合并三条命令的分工](reference_cnb_pr_api.md) — 合并 PUT、更新 PATCH、merge_style、commit_title 必填、都要 Accept；null=「不回答」不是「否」（merged/latest）；squash 下判合并只能比内容
 - [不要把失败用例搬到 build tag 后面来止血](feedback_no_hiding_failing_tests.md) — 根因已有人在修时用例应留在默认路径裸奔；加 tag 藏起来和删除是同一类动作
 - [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 七个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 后的代码从未编译/go build 不编译 _test.go
 - [durable handle 的四条设计约束](project_durable_handle_design.md) — Persistent 全局唯一（含哨兵不变量）、加锁次序铁律、不起常驻回收 goroutine；第 4 条是刻意推迟到 v0.2.1+ 的欠账
@@ -29,6 +29,10 @@
 - [跨 agent 的 sha/计数出厂即过期 + 批量扫描要抽验](feedback_stale_sha_refetch_and_batch_spotcheck.md) — 决策前先自己 fetch；批量结论随机抽 1 个用精确方法复验，别换简单命令
 - [两个 CodeBuddy 进程可同挂一个 session](project_dual_codebuddy_session.md) — codebuddy -c 不查占用；「双进程=两套同名 agent 共写 /work」是机制推演，本次实测**未发生**（跨 owner 写冲突 0 次），当危险信号看、别当事故成因；附自检命令与「崩溃丢什么/不丢什么」判据
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
+- [Time Machine 真机验收在 v0.2.0 降为可选](project_timemachine_optional.md) — 2026-08-09 所有者决定；代码保留，但文档不许宣称「支持 TM」，未验收就如实写「尚未验收」
+- [CI 额度每月 160 核心小时，必须抠门](feedback_ci_quota_frugality.md) — 单条流水线 ≈0.14 核时；本地门禁跑完再 push，commit≠push，探针用 overlay 别开分支
 - [墙钟耗时不能当 CI 判据](project_timing_criteria_flaky.md) — 微秒级比值在共享 runner 必假红；改数事件次数；附 GOGC=5 复现配方与 overlay 配对对照
+- [在陈旧 main 上 rebase 会造出「已合并提交」的重复 SHA](project_rebase_onto_stale_main.md) — rebase 前先查祖先关系；队友分支可能正基于被你重写掉的旧 SHA
+- [别人正在写文件时的保命提交：rescue ref 手法](project_rescue_ref_inflight.md) — 独立 GIT_INDEX_FILE + commit-tree 推 refs/rescue/*，不碰对方 index/HEAD 且零流水线；ls-remote 才查得到
 - [CNB Release API 与 tag_push 发布链路实测](reference_cnb_release_api.md) — 判最新版看 is_latest（latest 恒 null）；git:release 的 options 不吃变量，分渠道要两个互斥 stage + if:；整条发布 0.16~0.19 核时，付得起真跑
 - [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 谎报未完成/队友转述的实测其实在别的分支/已知问题清单最易腐烂/注释里「见 X」而 X 不存在；附 A~D 证据强度分档

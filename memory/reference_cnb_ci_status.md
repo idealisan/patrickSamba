@@ -17,7 +17,35 @@ curl -sS -H "Authorization: Bearer $CNB_TOKEN" \
 
 返回 `.data[]`，每条含 `status`（`success` / `error` / `pending`）、`sha`、
 **`event`（`push` 或 `pull_request`）**。仓库里已有封装：`scripts/ci-status.sh`
-（退出码 0=绿 1=红 2=跑着 3=无记录 4=调用失败，可直接用在 `&&` 里）。
+（退出码 0=绿 1=红 2=跑着 3=无记录 4=调用失败
+**5=按 `ifModify` 设计上就不跑**，可直接用在 `&&` 里）。
+
+## 第四种形态：**0 条 pipeline 执行，看板照样绿**（PR #143 之后必看）
+
+PR #143 给 `.cnb.yml` 的 `push` / `pull_request` 加了 `ifModify` 排除法：
+纯文档变更（`*.md` / `docs/**` / `memory/**` / `history/**`）不再触发门禁。
+**被跳过的构建不是「没有记录」，而是一条 `status=success` 的记录**：
+
+```
+跳过：success，pipelineSuccessCount=0，failCount=0，duration≈0.3s
+真跑：success，pipelineSuccessCount=1，failCount=0，duration≈120s
+```
+
+所以**判据必须用计数，不能用 `status`，也不能用耗时阈值**（耗时会随机器快慢误判）。
+`ci-status.sh` 已特判并返回 **rc=5** —— 刻意选非 0，因为**跳过 ≠ 通过**，
+否则 `ci-status.sh && merge` 会把「一关都没跑」当成「全关通过」。
+
+**两个反直觉的实测点**（2026-08-09，分支 `ci/p4-mixed`，证据在 PR #143 描述里）：
+
+1. **新分支的首次 push 没有 base commit，`ifModify` 被整个忽略、照常全跑。**
+   同一个纯文档变更：首次推送 135s 跑满，第二次推送 0.302s 跳过。
+   → **验证这类配置是否生效，必须在分支的第二次及以后的推送上做**，
+   拿首次推送去测会得到「没生效」的假象。
+2. 混合提交（同一 commit 既改 `.md` 又改 `.go`）**照常全跑**（1/0/1，119s），
+   与紧邻的纯文档推送（0/0/1，0.302s）构成对照。
+
+**How to apply**：看到某分支「没有构建记录」或「0.3 秒就绿了」，先判断变更是不是纯文档 ——
+是的话**不用等，等不到东西**，直接走人工评审；不是的话说明排除列表写错了，去查 `.cnb.yml`。
 
 ## 「假红」陷阱（**同一个 commit 会有两条结论相反的记录**）
 
