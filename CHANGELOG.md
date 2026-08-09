@@ -66,8 +66,14 @@ QUERY_DIRECTORY、IOCTL、CANCEL、CHANGE_NOTIFY、OPLOCK_BREAK。未实现命�
 - `readdir_attr`：目录项携带 FinderInfo 与资源派生大小（客户端请求且后端能提供
   Apple 元数据时启用）。
 - `FLUSH` 走强制刷盘（`F_FULLFSYNC` 语义），并在 `time_machine` 共享上宣告
-  `SUPPORTS_FULL_SYNC`。
+  `SUPPORTS_FULL_SYNC`。`F_FULLFSYNC` 的 Linux / Windows 分支实测通过；Darwin 分支
+  在本开发容器里编不了也跑不了，仅以交叉编译通过做保证。
+- 命名流 / Alternate Data Stream（`AFP_AfpInfo` / `AFP_Resource` 与任意 `:name:$DATA`，
+  文件与目录上均支持，`FILE_NAMED_STREAMS` 已在卷属性中宣告）—— `.sparsebundle` 依赖此能力。
 - 稀疏文件 FSCTL 三件套已支持 `.sparsebundle` 打洞与回收。
+- **修复**（`bc0a38e`）：畸形 `AFP_AfpInfo` 写入曾**静默丢失数据**，现已拒绝非法结构并保留既有内容。
+- **优化**（`5132cfd`）：判断 `.sparsebundle` band 是否存在从约 22.9 ms 降到约 0.76 ms（约 30 倍），
+  大目录枚举不再随 band 数量线性变慢。
 
 ### 配置与运维
 
@@ -87,11 +93,23 @@ QUERY_DIRECTORY、IOCTL、CANCEL、CHANGE_NOTIFY、OPLOCK_BREAK。未实现命�
 
 ### Time Machine 状态
 
-Time Machine 端到端「备份并成功恢复」的验收仍在进行（由 `tmverify` 专项负责），
-**本版本不做最终结论**。已具备的前置能力：AAPL 协商与 `SUPPORTS_FULL_SYNC`、
-稀疏文件 FSCTL 三件套、`quota_bytes` 卷容量上报、`_adisk._tcp` 广播、`readdir_attr`。
-暂未实现 `resolveID`（AAPL，macOS 在未被告知该能力时不会使用）与真实 oplock/lease。
-普通文件共享功能不受 Time Machine 验收进度影响。最终定级以 tmverify 报告为准。
+**定级：C 档。** Apple SMB 扩展（AAPL create context、`readdir_attr`、命名流 / Alternate
+Data Stream、稀疏文件 FSCTL、`_adisk._tcp` 广播）已实现，Time Machine 所需的服务端前置
+能力已具备，并经非 macOS 客户端（impacket 低阶 SMB2）逐项实测通过。
+
+但 **v0.1.0 尚未通过 macOS 真机端到端备份与恢复验收**——开发环境没有 macOS，「备份并成功
+恢复」一次都没有跑过。且以下能力**未实现**，可能导致备份不稳定甚至失败：
+
+- **durable / persistent handle** —— 影响最大：一次备份动辄数小时，断网后已打开的句柄无法
+  恢复，网络抖动会导致备份中断重来。
+- **oplock / lease** —— 服务端不声明 `SMB2_GLOBAL_CAP_LEASING`、不授予任何 oplock，
+  客户端退化为不缓存，band 文件密集写吞吐受损。
+- **AAPL `resolveID`** —— 对 Time Machine 本身无实际影响（不宣告则客户端不会使用），
+  仅 Finder 别名 / 最近项目按 file id 反查退化为按路径查找。
+
+**请勿用于唯一备份。** 详细逐项验证证据见仓库
+[`docs/timemachine-status.md`](docs/timemachine-status.md)。普通文件共享功能不受
+Time Machine 验收进度影响。
 
 ### 已知问题 / 未实现
 
