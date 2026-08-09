@@ -297,7 +297,25 @@ func (h *streamHandle) WriteAt(p []byte, off int64) (int, error) {
 		return 0, ErrReadOnly
 	}
 
-	if h.f == nil {
+	if h.kind == streamKindXattr {
+		// 通用流是**变长**的：按需扩容缓冲，Close/Sync 时整体回写 xattr。
+		end := off + int64(len(p))
+		if end > maxDosStreamSize {
+			// 超过 xattr 能装下的量。如实报错而不是截断 ——
+			// 截断会让客户端以为整条流都写进去了。
+			return 0, ErrTooLarge
+		}
+		if end > int64(len(h.buf)) {
+			grown := make([]byte, end)
+			copy(grown, h.buf)
+			h.buf = grown
+		}
+		copy(h.buf[off:], p)
+		h.dirty = true
+		return len(p), nil
+	}
+
+	if h.kind == streamKindAfpInfo {
 		// AFP_AfpInfo 是**定长**的：写超出 60 字节的部分直接拒绝，
 		// 而不是悄悄扩容 —— Samba/Apple 的服务器都按定长处理，
 		// 让缓冲变长会写出一个对端解析不了的 blob。
@@ -372,7 +390,19 @@ func (h *streamHandle) Truncate(size int64) error {
 }
 
 func (h *streamHandle) truncateLocked(size int64) error {
-	if h.f == nil {
+	switch h.kind {
+	case streamKindXattr:
+		// 通用流变长，任意长度都合法（受 xattr 上限约束）。
+		if size > maxDosStreamSize {
+			return ErrTooLarge
+		}
+		grown := make([]byte, size)
+		copy(grown, h.buf)
+		h.buf = grown
+		h.dirty = true
+		return nil
+
+	case streamKindAfpInfo:
 		// AFP_AfpInfo 定长，只接受截到 0（等价于清空 FinderInfo）
 		// 或者截到 60（无操作）。
 		switch size {
@@ -400,8 +430,8 @@ func (h *streamHandle) Sync(full bool) error {
 	if err := h.flushLocked(); err != nil {
 		return err
 	}
-	if h.f == nil {
-		// AFP_AfpInfo 落在 xattr 上，flushLocked 已经写下去了；
+	if h.kind != streamKindResource {
+		// 缓冲模式的流落在 xattr 上，flushLocked 已经写下去了；
 		// xattr 的持久化跟随基础文件的元数据，没有独立的 fsync 通道。
 		return nil
 	}
@@ -411,15 +441,25 @@ func (h *streamHandle) Sync(full bool) error {
 	return mapError(h.f.Sync())
 }
 
-// flushLocked 把 AFP_AfpInfo 的内存缓冲回写到 xattr。
+// flushLocked 把缓冲模式的流内容回写到 xattr。
 func (h *streamHandle) flushLocked() error {
-	if h.f != nil || !h.dirty {
+	if h.kind == streamKindResource || !h.dirty {
 		return nil
 	}
+
+	if h.kind == streamKindXattr {
+		if err := h.fs.writeDosStream(h.host, h.slot, h.buf); err != nil {
+			return err
+		}
+		h.dirty = false
+		return nil
+	}
+
 	ai, err := ParseAfpInfo(h.buf)
 	if err != nil {
-		// 客户端写进来的内容不是合法 AfpInfo。Samba 在这种情况下拒绝写入，
-		// 但我们已经把数据收下了，只能在落盘时拒绝并保留磁盘上的旧值。
+		// 客户端写进来的内容不是合法 AfpInfo。整块写在 WriteAt 就被拦了，
+		// 走到这里的只可能是分段写拼出来的非法内容 —— 拒绝落盘并保留
+		// 磁盘上的旧值。SMB2 FLUSH 能承载这个错误，CLOSE 不能。
 		return ErrBadAfpInfo
 	}
 	if err := h.fs.writeAfpInfo(h.host, ai); err != nil {
@@ -444,9 +484,13 @@ func (h *streamHandle) Stat() (*Attr, error) {
 	if err != nil {
 		return nil, err
 	}
-	if h.f == nil {
+	switch h.kind {
+	case streamKindAfpInfo:
+		// 定长，恒为 60。
 		a.Size = AfpInfoSize
-	} else {
+	case streamKindXattr:
+		a.Size = int64(len(h.buf))
+	default:
 		fi, err := h.f.Stat()
 		if err != nil {
 			return nil, mapError(err)
@@ -457,6 +501,15 @@ func (h *streamHandle) Stat() (*Attr, error) {
 			a.Size = 0
 		}
 	}
+
+	// 流不是目录，即使基础对象是目录也不能带 DIRECTORY 位 ——
+	// 客户端看到一个「是目录」的流会拿它去做 QUERY_DIRECTORY。
+	// .sparsebundle 上的 com.apple.FinderInfo 正是这种情况。
+	a.FileAttributes &^= FileAttributeDirectory
+	if a.FileAttributes == 0 {
+		a.FileAttributes = FileAttributeArchive
+	}
+
 	a.Alloc = allocSizeFallback(a.Size)
 	return a, nil
 }

@@ -1,0 +1,10 @@
+{
+  "subject": "修复 AFP_AfpInfo 非法内容被静默丢弃",
+  "description": "stream_handle.go flushLocked 把校验推迟到 Close，ErrBadAfpInfo 顺着 CLOSE 出去无处上报，数据无声蒸发。改为在 WriteAt 覆盖完整 0..60 区间时立刻 ParseAfpInfo 校验，失败返回 ErrBadAfpInfo 让 SMB2 WRITE 当场回 INVALID_PARAMETER。",
+  "activeForm": "修复 AfpInfo 静默丢弃",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "43",
+  "createdAt": 1786238468827,
+  "updatedAt": 1786239161045
+}

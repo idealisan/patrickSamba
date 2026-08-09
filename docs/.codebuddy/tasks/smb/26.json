@@ -2,9 +2,9 @@
   "subject": "补齐 LOCK / CHANGE_NOTIFY / OPLOCK_BREAK",
   "description": "LOCK 最小语义（无冲突即成功），CHANGE_NOTIFY 与 OPLOCK_BREAK 至少给出有注释的明确返回。",
   "activeForm": "补齐缺失命令",
-  "status": "in_progress",
+  "status": "completed",
   "id": "26",
   "createdAt": 1786236947885,
-  "updatedAt": 1786238271741,
+  "updatedAt": 1786239395639,
   "owner": "server"
 }

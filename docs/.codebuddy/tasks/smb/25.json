@@ -2,9 +2,9 @@
   "subject": "签名强制 MS-SMB2 §3.3.5.2.4",
   "description": "查现状：会话要求签名后除 NEGOTIATE/SESSION_SETUP 外全部验签，失败回 ACCESS_DENIED 且不继续处理。",
   "activeForm": "核查签名强制",
-  "status": "in_progress",
+  "status": "completed",
   "id": "25",
   "createdAt": 1786236947880,
-  "updatedAt": 1786237722418,
+  "updatedAt": 1786239088560,
   "owner": "server"
 }

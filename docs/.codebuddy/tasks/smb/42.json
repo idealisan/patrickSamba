@@ -1,0 +1,10 @@
+{
+  "subject": "澄清编译状态并回应 info 的 SparseFile 接口提案",
+  "description": "vfs 的 AllocatedRanges/SetSparse/HardLinker 已于 12d9ec9+68a3637 落地，报告的 undefined 符号是中间态残影。向 team-lead/server/info 澄清，并说明最终签名与 info 提案的差异（挂在 SparseFile 而非拆成 SparseQuerier/SparseMarker；SetSparse(false) 返回 nil 而非 ErrNotSupported）。",
+  "activeForm": "澄清编译状态与稀疏接口签名",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "42",
+  "createdAt": 1786238455088,
+  "updatedAt": 1786239253695
+}

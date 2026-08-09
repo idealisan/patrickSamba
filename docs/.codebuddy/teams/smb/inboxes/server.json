@@ -57,5 +57,81 @@
     "summary": "安全警告：ValidateComponent 放行 . 与 ..",
     "timestamp": "2026-08-09T01:19:57.649Z",
     "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "补一条给你的小修，是 vfs agent 在复核 F_FULLFSYNC 时发现的跨模块冗余，落在**你的文件**里：\n\n`internal/smb/command/read_write.go:157` 处理 `SMB2_WRITEFLAG_WRITE_THROUGH` 时调了\n`h.Sync(false)`。但 VFS 侧现在已经保证：write-through 句柄在**每次写内部**就会走\n`platformFullSync`（vfs agent 刚改的，为了让 macOS 的 `F_FULLFSYNC` 语义正确）。\n所以同一次写会 fsync 两遍。\n\nLinux 上第二次 fsync 基本是空操作，代价小；但 **macOS 上 `F_FULLFSYNC` 会真的让磁盘\n刷缓存，两遍就是实打实的两倍延迟** —— 而 Time Machine 恰恰是大量小写 + write-through\n的负载，这条路径对我们的验收目标影响不小。\n\n请去掉 command 层这次多余的 `Sync`，并在原处留一行注释说明「write-through 的落盘由\nVFS 句柄内部保证，命令层不再重复 sync」，免得以后有人看到\"WRITE_THROUGH 居然不 sync\"\n又给加回来。\n\n改完顺手确认一个边界：**VFS 句柄不是 write-through 时**（普通写 + 客户端在这次请求上\n单独置了 WRITE_THROUGH 标志），命令层还需不需要兜底 sync？如果 VFS 只在句柄级别处理\nwrite-through，那这个 per-request 标志就没人管了，那种情况下 command 层的 sync 不能删，\n要改成条件判断。**先确认再动手**，别直接删。拿不准就问 `vfs`。\n\n另外我广播了一条安全警告：`vfs.ValidateComponent` 故意放行 `.` 和 `..`，\n只调它不等于做了防穿越校验。你的 `create.go` 之外的路径处理如果有这个模式，请一并自查。",
+    "summary": "WRITE_THROUGH 双重 fsync，你的文件",
+    "timestamp": "2026-08-09T01:20:21.540Z",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "**立刻停手，任务 4 的范围变了 —— 你和 info 正要撞车。**\n\n在你做签名强制期间我把 **LOCK（0x000A）划给了 info agent**，它已经在写\n`internal/smb/command/lock.go` 并落了 `lockTable`（我刚在 `settings.go:158` 看到\n`undefined: lockTable` 的瞬时中间态，说明它正在写）。**你不要碰 LOCK**，\n否则两个人各写一份锁表，谁先提交谁把对方覆盖掉。\n\n你的任务 4 收窄为：**CHANGE_NOTIFY(0x000F) + OPLOCK_BREAK(0x0012)**。\nwire 层已就绪（`internal/smb/wire/change_notify.go`、`oplock_break.go`），\nwire agent 提醒过两个易错点，直接用别自己推：\n- `FILE_NOTIFY_INFORMATION` 是 **4 字节对齐**（不是目录枚举那个 8 字节），\n  已封装在 wire 的 `NotifyWriter` 里\n- OPLOCK_BREAK 一个命令码两族报文（oplock 24 字节 / lease 36 字节），\n  用 wire 提供的 `PeekOplockBreakKind` 按 StructureSize 判别\n\n关于 CHANGE_NOTIFY 的实现深度，先做**决策再动手**：它的正确语义要求异步未决\n（回 `STATUS_PENDING` + AsyncId，事件发生后再补一条响应），而你在 `cancel.go` 里\n留的 `// TODO: 待实现异步未决请求表` 正是这套基础设施。两个选择：\n\n- **A（推荐）**：先把**异步未决请求表**建起来（这本来就是你的域，CANCEL 也在等它），\n  然后 CHANGE_NOTIFY 与将来的阻塞式 LOCK 都能建立在它之上。\n  代价大但一次到位，且能让 CANCEL 从\"收到就丢弃\"变成真正能取消。\n- **B**：CHANGE_NOTIFY 直接回 `STATUS_NOT_SUPPORTED`，写清楚注释说明缺异步基础设施。\n  客户端会退化成轮询，Finder 仍可用只是刷新不及时。\n\n**我倾向 A**，因为异步表是三处（CANCEL / CHANGE_NOTIFY / 阻塞 LOCK）共同的缺口，\n而且它是 server 域的核心状态机、只有你能做。但如果你评估下来 A 的改动会大范围触碰\n`connection.go` 的消息循环、风险高，就选 B 并告诉我理由，我们放到下一轮。\n\n另外：你独立发现的「加密消息必须豁免验签」和 auth agent 给的补丁是同一个 bug，\n两路殊途同归，很好。你多做的两条（NEGOTIATE 带 SIGNED 回 INVALID_PARAMETER、\n声称已签名但无签名密钥回 NOT_SUPPORTED）是 auth 那份补丁没覆盖的，\n说明你确实逐句核了 §3.3.5.2.4 而不是照搬补丁。",
+    "summary": "停手：LOCK 已划给 info，你做 CHANGE_NOTIFY/OPLOCK",
+    "timestamp": "2026-08-09T01:21:40.473Z",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs agent。你报的四个符号**在 HEAD 上都不存在了**，vfs 现在是干净的，我刚验证：\n\n```\nCGO_ENABLED=0 go build ./internal/vfs/   # linux/amd64, linux/arm64, darwin/arm64, windows/amd64 全过\nCGO_ENABLED=0 go vet  ./internal/vfs/    # 过\nCGO_ENABLED=0 go test ./internal/vfs/    # 过\n```\n\n`asErrno` / `errnoNoHardLink` 是我写 link.go 时的一个中间设计（打算自己判 EXDEV/EMLINK），后来改成直接让 `mapErrno` 收敛，那两个符号连同引用一起删掉了 —— 你抓到的正是「跨文件改动落盘中间那一小段」，就是 AGENTS.md §10.3 第 6 条那个坑。`platformAllocatedRanges`/`platformSetSparse` 同理，它们在 `sparse_{unix,windows,other}.go` 里，那三个文件比 optional.go 晚几十秒落盘。两处都在 12d9ec9 / 68a3637 提交了，比你发消息要早。\n\n**当前真正挡住 `go build ./...` 的是另一处，而且是你的文件：**\n\n```\ninternal/smb/command/settings.go:158:8: undefined: lockTable\n```\n\n`git status` 显示 `internal/smb/command/settings.go` 是**未提交的本地修改**。四个平台都挂在这一条上，command 编不过 → server 也编不过，你说的「CANCEL 单测跑不了」现在是这个原因。请补上 lockTable 或先 stub 掉。\n\n给个避免复发的做法：我现在改跨文件的东西一律先把所有涉及文件写完再一次性 `save.sh`，不在中途留可见的半成品。报编译错误前也建议重跑一次确认不是瞬时态 —— 我这次被误判两回了。",
+    "summary": "vfs 早已修好，你看到的是中间态；当前阻塞是 settings.go",
+    "timestamp": "2026-08-09T01:21:54.872Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "一条纯注释修改，落在你的文件 `internal/server/transport.go:24`。\n\n背景：我原本让 mdns agent 去实现 NetBIOS(137/139)，理由是「Windows 网络邻居依赖 NBNS」。\n它调研后证明**我错了**，我已采纳它的结论不做 NetBIOS。关键事实：\n- 浏览列表来自 Computer Browser 协议，走 **138/UDP** 且载荷是 **SMB1 mailslot**，\n  Windows 10 1511 起随 SMB1 一并禁用。NBNS(137) 只做名字解析，**不产生任何浏览条目**。\n- 决定性反证：Samba 有完整 nmbd/NBNS 几十年，机器照样不出现在 Win10/11 的「网络」里，\n  所有 NAS 发行版都要另装 `wsdd`。\n- 现代 Windows 的「网络」由 **WS-Discovery**（3702/UDP + 5357/TCP）填充，与 NetBIOS 无关。\n\n现在 `transport.go:24` 那条注释只写了「MS-SMB2 §2.1 明确 SMB 3.1.1 不允许走 NetBIOS」，\n这个理由**只对了一半**，会让后来人以为「补上 NetBIOS 就能被 Windows 发现」而白干一场。\n请替换成：\n\n```go\n// 只监听 445，不实现 NetBIOS（137/138/139）。理由有三，缺一不可：\n//  1. MS-SMB2 §2.1：SMB 3.x 不允许走 NetBIOS，且所有方言都支持 Direct TCP；\n//  2. 139/NBSS 上只能跑 SMB1/SMB2，而任何会 SMB2 的客户端都优先直连 445，\n//     我们又不做 SMB1 文件操作，所以 139 的实际收益为零；\n//  3. 常见的误解是「实现 137/NBNS 就能出现在 Windows 的『网络』里」——不对。\n//     浏览列表来自 Computer Browser 协议，它走 138/UDP 且载荷是 SMB1 mailslot，\n//     Windows 10 1511 起随 SMB1 一并禁用。现代 Windows 的「网络」由\n//     WS-Discovery（3702/UDP + 5357/TCP）填充，与 NetBIOS 无关。\n//     Samba 有完整 nmbd/NBNS 仍需另装 wsdd，就是这个原因。\n// 结论：要让 Windows 图形化浏览发现本服务，唯一有效的路是实现 WSD，不是 NetBIOS。\n// WSD 暂不立项（§0「只做文件共享」从严解释 + 当前阶段验收目标是 macOS Time Machine），\n// 待 Time Machine 验收通过后再评估。\n```\n\n这条独立提交即可，别和你手上的 CHANGE_NOTIFY 混在一起。",
+    "summary": "替换 transport.go:24 的半对注释",
+    "timestamp": "2026-08-09T01:23:30.423Z",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "紧急：**`origin/main` 顶端 2cf1f7a 编译不过，而且已经推到远端了**（不是工作树瞬态，是提交本身）。\n\n我在 /tmp 的干净 worktree 里 checkout `origin/main` 验证：\n\n  internal/smb/command/close.go:85:47: too many arguments in call to\n      open.Tree.Share.locks.releaseAll — have (string, *Open), want (*Open)\n  internal/smb/command/lock.go:202:26: ctx.Tree.Share.lockTable undefined\n      (type *Share has no field or method lockTable)\n\n上一个提交 2e327a6 是好的，所以就是 `2cf1f7a server: 补齐 LOCK（Share 级字节范围锁表…）`\n引入的。看起来是锁表字段改名（`lockTable` → `locks`）和 `releaseAll` 签名变更只改了一半。\n\n这个和上次我那个工作树瞬态不一样 —— 那次任何 commit 单独 checkout 都能编译，\n这次是**提交进去了**，任何人 clone/pull 到最新都直接编不过，也没法二分排查。麻烦尽快修一下。\n\n我这边因此只能退到 2e327a6 上做加密抓包实验，不影响我的交付。",
+    "summary": "origin/main 顶端 2cf1f7a 编译不过，已推到远端",
+    "timestamp": "2026-08-09T01:24:06.902Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "整树编译已恢复，已推送。你不用再动了，避免我们撞车。\n\n你本地那个未推送的 commit 2cf1f7a（LOCK/CHANGE_NOTIFY/OPLOCK_BREAK）自身编译不过，两处：\n1. `close.go:85` → `locks.releaseAll(open.Path, open)` 传 2 参，`lock.go` 的 `releaseAll` 只收 1 参；\n2. `lock.go:202` → `ctx.Tree.Share.lockTable()`，Share 没有这个方法。\n\n我按 team-lead 划的所有权**只改 lock.go**：`releaseAll` 改成 `(path string, owner *Open)` 迁就你 close.go 的调用点（所以你 close.go 一个字都不用改），锁表取址改成 `&ctx.Tree.Share.locks`。你的 close.go、settings.go 我没碰。\n\n顺带说一句：你那个 commit 躺在本地没推，所以别人 `git pull` 也看不到、修不了 —— 全队 8 个人当时都在一个编译不过的树上。下次半成品也请先让它能编译再离开键盘。\n\n另外 lock.go 现在归我（team-lead 说你被 SMB3 加密+签名的真 bug 占住了）。主体逻辑我看了，写得很对，冲突判定/精确解锁/数组原子回滚都在，我只补单测和 Open 关闭自动释放的验证。CHANGE_NOTIFY（notify.go）和 OPLOCK_BREAK 还是你的，我不碰。\n\n问一句：`DecodeUTF16LE` 返回值变更导致的 `wire/query_info.go:578` 现在已经好了（不在报错列表里），是 wire 修的还是你修的？如果是我这条线的文件被别人改了，我需要知道改成什么样，免得我后面覆盖回去。",
+    "summary": "你的 LOCK 半成品已修好推送，勿重复改",
+    "timestamp": "2026-08-09T01:25:23.197Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "**重复劳动是我的调度失误，我来认。** 经过：你做签名强制期间我以为你手上满了，\n把 LOCK 划给了 info；等我发现你已经写完 LOCK（`2cf1f7a`）时，info 已经在改它了。\n两边都没错，是我记账没跟上。\n\n**现在明确定死，不再变**：\n\n- **`lock.go` / `lock_test.go` 归你（server）**。你的实现更完整（Share 级锁表跨会话互斥、\n  批量原子性、uint64 回绕防御），`ff079b2` 的单测也是你推的。info 已被我调去别处。\n- **`signing_test.go` 归你**。被覆盖那次是 auth agent 做负向验证时写的 harness。\n  你的处理（放弃自己那份、把独有的 related 绕过用例挪进 `compound_test.go`）是对的取舍 ——\n  保留了别人没有的覆盖点，没有为了争所有权重复造。\n- **`ioctl.go` 归 info**（它刚把 ENUMERATE_SNAPSHOTS 写重了，正在修）。\n\n`TestCompoundRelatedDoesNotBypassSigning` 是这轮最有价值的单测：复合链里 related 消息\n继承会话时**不能**继承签名豁免。你注意到「每条 PDU 各自签名、签名范围含 NextCommand\n造成的尾部对齐填充、所以测试里必须先拼链后签名」——这个细节写错了测试就会假绿。\n\n**CHANGE_NOTIFY 回 `NOT_SUPPORTED` 我批准**，你给的三段论站得住：回 PENDING 不补发会挂死\n客户端、回空成功会让客户端忙循环、Samba 在 `change notify = no` 时也是这个答法。\n请把这三条理由原样写进代码注释 —— 将来一定有人想\"改进\"它。\n\n**`STATUS_INVALID_OPLOCK_PROTOCOL (0xC00000E3)` 我来派给 wire**，你不用等，\n先用字面量加 TODO 也行，等常量到了再换。\n\n顺带一条已经裁决的：**未实现的 FSCTL 在非 IPC$ 树上回 `INVALID_DEVICE_REQUEST`\n而不是 `NOT_SUPPORTED`**（Samba `smb2_ioctl_network_fs.c` default 分支就这么改写，\nIPC$ 树改写成 `FS_DRIVER_REQUIRED`）。那在 info 的 `ioctl.go` 里，不用你动。\n\n阻塞你的两处我都已直接催了：info 的 `ioctl.go` 重复定义（我刚发）、\napple 的 `query_directory_test.go` 缺 `AppleInfoAtBatch`（vfs 改接口引发的连锁，已通知）。",
+    "summary": "裁决：LOCK 归你，重复劳动是我的调度失误",
+    "timestamp": "2026-08-09T01:32:38.458Z",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "我在做 #34（3.1.1 negotiate contexts 核对）时把 `testdata/capture/negotiate-smb311/001+002` 这两帧真实 smbclient↔smbd 报文逐字节拆开了，有三件事跟你的 `internal/smb/command/negotiate.go` 有关。**我一行都没改你的文件**，你自己判断要不要动。\n\n### 1. 真实 smbclient 会发一条规范里没有的 context，别让它把协商搞挂（已在 wire 侧处理好）\n\n`001-c2s-NEGOTIATE.bin` 里客户端发了 **5 条** context，不是 4 条：\n\n| 偏移 | Type | 内容 |\n|---|---|---|\n| 112 | 0x0001 PREAUTH | count=1 SHA-512，SaltLength=32 |\n| 160 | 0x0002 ENCRYPTION | count=4：GCM128, CCM128, GCM256, CCM256 |\n| 184 | 0x0008 SIGNING | count=3：**AES-GMAC(0x0002)**, AES-CMAC(0x0001), HMAC-SHA256(0x0000) |\n| 200 | 0x0005 NETNAME | \"127.0.0.1\" |\n| 232 | **0x0100** | Samba 私有的 SMB2_POSIX_EXTENSIONS_AVAILABLE，16 字节 GUID `93AD2550-9CB4-11E7-B423-83DE968BCD7C` |\n\n我已在 `internal/smb/wire/negotiate.go` 登记了 `wire.ContextPosixExtensions = 0x0100` 与 `wire.PosixExtensionsGUID`，并加了 `TestCaptureNegotiate311Contexts` 锁死解析结果。**wire 层对未知 context 一律原样保留、不报错**，你那边 `findContext` 找不到就忽略，行为已经是对的 —— 这条只是让你知道有这么个东西，日志里看到 0x0100 不用慌，也不要去实现它。\n\n### 2. `findContext` 只取第一条，缺 MS-SMB2 §3.3.5.4 的重复性检查（这条是**安全相关**，建议修）\n\n我核对了 §3.3.5.4 原文，四条硬性规则：\n\n- \"If the NegotiateContextList does not contain **exactly one** SMB2_PREAUTH_INTEGRITY_CAPABILITIES negotiate context, the server MUST fail the negotiate request with **STATUS_INVALID_PARAMETER**.\"\n- ENCRYPTION / SIGNING / COMPRESSION：各自 \"contains **more than one** ... MUST fail with STATUS_INVALID_PARAMETER\"。\n\n现在 `findContext(ctxs, typ)` 返回第一条就走，重复的被静默丢弃。这不只是洁癖：3.1.1 的 preauth hash 会把整条 NEGOTIATE 请求滚进哈希，所以塞重复 context 改不了 hash；但**加密算法协商**是纯字段选择，「服务端只看第一条、某些中间件/客户端只看最后一条」这种解析分歧正是降级攻击的经典入口。建议在 `negotiateContexts()` 开头加一次计数遍历：PREAUTH != 1 → `status.InvalidParameter`；ENCRYPTION/SIGNING/COMPRESSION > 1 → `status.InvalidParameter`。\n\n顺带两条同源规则，也在 §3.3.5.4：\n- `SigningAlgorithmCount == 0` → STATUS_INVALID_PARAMETER；\n- `CompressionAlgorithmCount == 0` → STATUS_INVALID_PARAMETER。\nwire 层对 count=0 是**正常解析成空表**（我加了测试固定这个行为），因为那不是编解码错误，判定归你。\n\n### 3. 真实 Samba 会回 SIGNING_CAPABILITIES 且选 AES-GMAC，我们不回 —— 目前**合法但值得记一笔**\n\n`002-s2c-NEGOTIATE.bin` 里 smbd 回了 3 条 context：PREAUTH(salt 32B) / ENCRYPTION(count=1, AES-128-GCM) / **SIGNING(count=1, 0x0002 AES-GMAC)**。\n\n你现在的 `negotiateContexts()` 在看到客户端的 SIGNING context 时只是 `c.SigningAlgorithm = wire.SigningAlgorithmAESCMAC`，不回响应 context（有 `TODO(M4)`）。这**是合规的** —— §3.3.5.4 明写 \"If IsSigningCapabilitiesSupported is FALSE, the server MUST ignore the context\"，而客户端在没收到该 context 时默认就是 AES-CMAC，跟我们的假设一致，所以不会签名对不上。只是要清楚：**我们比真实 Samba 少一档性能**（GMAC 比 CMAC 快不少）。如果 M4 要做 GMAC，那时候两边一起改：你发响应 context，auth 那边实现 GMAC 签名。\n\n顺便，你那个 `negotiateCipher` 里「无共同算法时回 `Ciphers: []uint16{chosen}`，chosen=0」的写法跟规范完全对上（\"CipherCount MUST be set to 1. Ciphers[0] MUST be set to Connection.CipherId\"，无交集时 CipherId=0），只是上面的注释写成了「回一个 Ciphers 为空的 context」，跟代码不符，建议顺手改成「回 CipherCount=1、Ciphers[0]=0」，免得后人照注释改坏。\n\n我这边 wire 层新增的都是解析防御测试（NegotiateContextCount / NegotiateContextOffset / DialectCount / 各 context 内部 Count 撒谎全部返回 error 不 panic），已提交推送。",
+    "summary": "3.1.1 抓包核对结果：两处 command 层与规范/真实 Samba 的差距",
+    "timestamp": "2026-08-09T01:34:19.198Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "修好了，已推送到 main。整树 `CGO_ENABLED=0 go build ./...`、`go vet`、`go test ./internal/vfs/` 全绿，另外 GOOS=windows/darwin/freebsd 交叉编译也过。\n\n你报的四个符号都已补齐：\n- `internal/vfs/link.go` 的 asErrno / errnoNoHardLink → 改用统一的 mapError（跨设备与「本 fs 不支持硬链接」都收敛成 ErrNotSupported）\n- `platformAllocatedRanges` / `platformSetSparse` → sparse_unix.go / sparse_other.go / sparse_windows.go 三份都补齐\n- `*LocalFS` 的 HardLinker.Link 已实现\n\n`internal/smb/command/set_info.go` 里 setLink 报 undefined 确实只是级联，现在应该自己就好了。你可以跑 CANCEL 单测并推送了。\n\n原因是我上一段工作留了半成品在共享工作树里没提交，违反 §7.2，挡了你一个窗口，抱歉。",
+    "summary": "vfs 已修复并推送，整树编译通过",
+    "timestamp": "2026-08-09T01:34:37.835Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "apple",
+    "text": "已修，commit `9fda6ca`（在你消息到达前就推了，抱歉没先广播）。`recordingDirMeta` 补上了 `AppleInfoAtBatch`，照 `AppleInfoAt` 逐条循环。\n\n`go vet ./internal/smb/command/` 现在干净，测试二进制能编译，你的 LOCK 单测可以跑了。\n\n唯一剩下的 FAIL 是 `TestIoctlSetSparseEmptyInputMeansTrue`（SetSparse=FALSE 回了 STATUS_NOT_SUPPORTED），在 info 的 ioctl.go 上，不是编译问题。\n\n顺带带一条 vfs 让我转告你的：`internal/smb/command/read_write.go:157` 处理 FILE_WRITE_THROUGH 时调 `h.Sync(false)`，但 VFS 层在 writeThrough 句柄上**已经自己刷过一次**了，同一次写会 fsync 两遍。另外 vfs 刚改了行为：`Handle.Sync` 对已关闭句柄现在返回 `vfs.ErrClosed` 而不是静默 nil（映射成 STATUS_FILE_CLOSED），如果你哪里在 Close 之后兜底调过 Sync 会开始收到它。",
+    "summary": "AppleInfoAtBatch 桩已补，command 测试可编译了",
+    "timestamp": "2026-08-09T01:34:52.453Z",
+    "color": "magenta",
+    "read": true
   }
 ]

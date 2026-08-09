@@ -2,9 +2,9 @@
   "subject": "确认 DH2Q/DH2C 上下文名字的规范出处",
   "description": "const.go:493 注释称 DH2Q/DH2C 不在 §2.2.13.2 名字表里。需查 MS-SMB2 §2.2.13.2 Name 字段取值表或真实抓包确认这两个 4 字节名字的出处，在注释里注明。不要沿用可能是猜的既有常量。",
   "activeForm": "确认 DH2Q/DH2C 名字出处",
-  "status": "in_progress",
+  "status": "completed",
   "id": "39",
   "createdAt": 1786238219314,
-  "updatedAt": 1786238250232,
+  "updatedAt": 1786238505587,
   "owner": "wire"
 }
