@@ -234,9 +234,21 @@
   例如 xattr 在数据路径上是 `internal/vfs/xattr_unix.go`，而 `internal/oscap/native/xattr_posix.go`
   是另一份、当前无人调用。将来把 vfs 改为经由 port 取能力时**必须一并拆掉旧的那份**，
   否则会重演本版本 `internal/meta` 与 `internal/vfs/metadata_windows.go` 的双实现撞车（见下节 R11）。
-- ⚠️ **`configs/example.yaml:21-35` 对 `filesystem_mode` 的说明是按设计意图写的**
-  （「逐项探测宿主支持情况：支持就用宿主的，不支持就自动换成自带实现」），
-  **没有提示它在 v0.2.0 尚无运行期效果**。以本节为准，不要照那段注释下部署结论。
+- ⚠️ **`native` 档不兑现它自己报错文案里的承诺**。配置校验失败时打印的可选值说明写着
+  「native=强制原生、不支持则启动报错」，但既然没有消费方，这个报错**不会发生**：
+  实测 2026-08-09 18:35（Linux/amd64，`origin/main` 基线构建），`filesystem_mode: native`
+  正常启动、无任何告警（`timeout 3` 杀掉，rc=124）；反向对照填 `Native`（大写）
+  rc=1 报「非法取值」，说明这个探针有鉴别力、不是恒真。
+  **顺带一条接线后才会显现的事实**（写在这里免得日后被当成回归）：POSIX 平台对
+  `dos_attributes` 的探测恒为 `false`（`internal/oscap/probe_linux.go` /
+  `probe_darwin.go` 的 `CapDOSAttributes` 无条件 `return false`，因为 POSIX 没有存放
+  DOS 属性位的地方；macOS 上 `sparse_file` 目前同样恒 `false`），
+  而 `native` 档的契约是「有一项不支持就报错、不降级」——两者相乘意味着
+  **一旦接线，`native` 在 Linux/macOS 上会恒定启动失败，它实际只对 Windows 有意义**。
+- ⚠️ `configs/example.yaml` 对 `filesystem_mode` 的注释此前是按**设计意图**写的，
+  没提它当前无运行期效果，读者照着改会以为生效。**本版本已在该段补上「实际行为」
+  三条**（无消费方 + `go list -deps` 复算命令、`native` 不报错的实测、接线后 POSIX
+  上 `native` 必失败），两处口径现已一致。
 <!-- END-OSCAP-WIRING-STATUS -->
 
 ### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
@@ -264,6 +276,11 @@
   但定级的依据是 [`docs/timemachine-status.md`](docs/timemachine-status.md)，
   而该文档的 B 档要求包含「真机断线恢复证据」，本版本一条都没有（开发环境无 macOS）。
   **能力就位 ≠ 定级上调**，在真机跑过之前不动这个结论。**请勿用于唯一备份。**
+  **2026-08-09 项目所有者决定：TM 真机验收从 v0.2.0 的强制项降为可选项**，
+  不再是发布阻塞项，原因是没有可用真机环境与时间（AGENTS.md §2 阶段二已记录）。
+  **降的是验收要求，不是功能**：Apple 扩展代码全部保留、单测与协议级用例继续跑。
+  反过来说，这条也意味着**该定级短期内不会有新证据**——不要因为版本号往前走
+  就推断它变可靠了。
 - **`filesystem_mode` 三档目前等价**（接线状态见上节 `BEGIN-OSCAP-WIRING-STATUS` 块，
   那是单一真相块；本行不再重复判据）：port、`native/`、`builtin/`、portable CI 门禁
   **四块都已建成并有测试**，但**没有一处产品代码调用它们**，两个适配器根本没被链进发布二进制。
@@ -271,17 +288,29 @@
   （把 `internal/vfs` / `internal/server` 改为经由 port 取能力）—— 此事无版本承诺，
   以真正合入 `main` 的那一版为准。在接线之前不要根据这个开关下任何部署结论，
   尤其**不要因为「native 适配器已经写好了」就以为设成 `native` 会走原生路径**。
-- **6 个带 `!linux && !darwin && !windows` 约束的文件从未被任何一关编译过**：
+- ~~**6 个带 `!linux && !darwin && !windows` 约束的文件从未被任何一关编译过**~~
+  —— **已修复，本条不再是已知问题**（`e664a47`：`vfs: 判据抽成纯函数并补自身反向对照
+  + check-test-compile 补 freebsd 编译盲区`）。留下记录是因为它的**形态**值得记住：
   `internal/oscap/native/native_other.go`、`internal/oscap/probe_other.go`、
   `internal/vfs/attr_other.go`、`internal/vfs/sparse_other.go`、`internal/vfs/sys_other.go`
-  与 `internal/oscap/probe_helper_other_test.go`。原因是编译门禁
-  `test/ci/check-test-compile.sh:104` 的平台列表是
-  `linux/amd64 linux/arm64 darwin/arm64 windows/amd64`，**四个平台没有一个满足那个约束**。
-  这正是 AGENTS.md §1.2 点名的「薛定谔的实现」同型：写了，但没有任何一关看得见它。
-  本次审计**手工补跑过一次**：`GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet
-  -tags integration,smoke,metabolt,qadefect ./...` → rc=0，即这 6 个文件**当前是能编译的**；
-  但既然 CI 不看，它们随时会在无人察觉的情况下坏掉。
-  修法是在那份平台列表末尾追加一项 `freebsd/amd64`（一行改动）。
+  与 `internal/oscap/probe_helper_other_test.go` 六个文件，因为编译门禁
+  `test/ci/check-test-compile.sh` 的平台列表 `linux/amd64 linux/arm64 darwin/arm64
+  windows/amd64` **没有一个满足那个约束**，从进仓库起一行都没被编译过——
+  正是 AGENTS.md §1.2 点名的「薛定谔的实现」同型。
+  修法是往平台列表末尾追加 `freebsd/amd64`，现已落在 `main`
+  （判据：`git show origin/main:test/ci/check-test-compile.sh | grep 'for t in'`
+  → 末尾含 `freebsd/amd64`；且该处注释写明「故意多出来的一档，不在 C7 支持矩阵里，
+  别当成手滑删掉」）。
+  ⚠️ **但这一档目前没有反向对照**：`test/ci/check-test-compile.sh:113` 的注释写着
+  「负向对照见 `test/ci/negative-verify.sh` 的 freebsd 段」，而那个文件里
+  **一处 `freebsd` 都没有**（判据：`git show origin/main:test/ci/negative-verify.sh
+  | grep -c freebsd` → **0**，实测 2026-08-09 18:59 CST）。也就是说：这一档若哪天
+  被人从平台列表里删掉、或被 `continue` 提前跳过，**没有任何一关会变红**——
+  按本仓库自己的标准（「一个从来没红过的门禁，和没有门禁是一回事」），
+  它现在只是「跑了」，还谈不上「有牙」。
+  本条不改脚本（那是 vfs-deflake 的文件），只如实登记：这是本仓库「写了但从未被验证过」
+  的**第 10 例**，且形态与前 9 例不同——前 9 例是**代码**没被执行，这一例是
+  **注释里引用了一个不存在的实体**，读者会据此以为反向对照已经存在而不再去补。
 - **非 Windows 平台仍无元数据旁路兜底**：`internal/vfs/metadata_other.go` 直接
   返回 nil。宿主文件系统不支持 xattr 时（FAT32/exFAT 外置盘、`nouser_xattr` 挂载、
   只读根）这些元数据会**静默丢失**且不报错。这是 v0.3.0 builtin 完整化的第一优先级。

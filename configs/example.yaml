@@ -32,6 +32,30 @@
 #
 # 拿不准就留着 auto。取值**大小写敏感**，写成 Auto / PORTABLE 会启动报错
 #（本项目一律不静默纠正配置，免得你以为设的是 A、服务在按 B 跑）。
+#
+# ⚠️ 上面写的是**设计语义**，下面是**你手上这一版的实际行为**，两者目前不一致：
+#
+#   1) 本开关**尚无运行期消费方**，三档跑起来行为完全一样。
+#      抽象接口与两套适配器都已合入并有 CI 覆盖，但数据路径还没改为经由它们取能力。
+#      自行复算（编译器给的依赖闭包，比 grep 硬）：
+#          go list -deps ./cmd/stupidsamba | grep -c oscap
+#      结果为 1 就表示只有接口包被链进二进制，native/ 与 builtin/ 都不在里面。
+#      本版本的接线范围以真正合入 main 的内容为准，此处不做预告。
+#
+#   2) `native` 目前**不会**兑现它自己报错文案里的「不支持则启动报错」。
+#      实测 2026-08-09 18:35（Linux）：填 native 正常启动、无任何告警；
+#      反向对照填 Native（大写）rc=1 报非法取值，说明探针有鉴别力，不是恒真。
+#
+#   3) 接线之后，`native` 在 **Linux/macOS 上会恒定启动失败**，它实际只对 Windows 有意义。
+#      这不是 bug 而是两条设计相乘的必然结果：native 档的契约是「有一项不支持就报错、
+#      不降级」，而 POSIX 平台对 dos_attributes 的探测**恒为 false**
+#      （internal/oscap/probe_linux.go / probe_darwin.go 里 CapDOSAttributes 无条件返回
+#      false —— POSIX 根本没有存放 DOS 属性位的地方；macOS 上 sparse_file 目前同样恒 false）。
+#      所以**不要**把 native 当成「Linux 上钉死走原生路径」的手段，那条路不存在；
+#      用 auto 即可，它本来就会逐项优先选原生。
+#
+# 想确认某一项到底落在 native 还是 builtin：目前**没有**任何启动日志会打印这个能力矩阵
+#（全仓搜不到相关日志点），只能读代码或跑 internal/oscap 的测试。别去日志里找。
 filesystem_mode: auto
 
 server:

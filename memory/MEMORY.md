@@ -31,3 +31,4 @@
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
 - [墙钟耗时不能当 CI 判据](project_timing_criteria_flaky.md) — 微秒级比值在共享 runner 必假红；改数事件次数；附 GOGC=5 复现配方与 overlay 配对对照
 - [CNB Release API 与 tag_push 发布链路实测](reference_cnb_release_api.md) — 判最新版看 is_latest（latest 恒 null）；git:release 的 options 不吃变量，分渠道要两个互斥 stage + if:；整条发布 0.16~0.19 核时，付得起真跑
+- [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 谎报未完成/队友转述的实测其实在别的分支/已知问题清单最易腐烂/注释里「见 X」而 X 不存在；附 A~D 证据强度分档
