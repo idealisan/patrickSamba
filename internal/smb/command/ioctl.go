@@ -202,15 +202,33 @@ func sparseTarget(ctx *Context, req *wire.IoctlRequest, write bool) (*Open, vfs.
 // 规范明确规定输入为空时视为 TRUE。无输出。
 //
 // POSIX 语义差异：Unix 上没有「稀疏标志位」这个东西 —— 只要底层文件系统支持
-// 打洞，任何文件天生就能变稀疏，不需要事先声明。vfs 层据此把 SetSparse 实现成
-// 无操作（见 vfs.SparseFile.SetSparse 的注释：回 ErrNotSupported 会让 macOS
-// 在建 .sparsebundle 时直接放弃）。
+// 打洞，任何文件天生就能变稀疏，不需要事先声明。于是：
+//
+//	SetSparse(TRUE)  → 无操作成功，客户端要的效果本来就成立；
+//	SetSparse(FALSE) → STATUS_NOT_SUPPORTED，我们**真的做不到**。
+//
+// FALSE 为什么不谎称成功：本实现的 FILE_ATTRIBUTE_SPARSE_FILE 不是存下来的
+// 标志位，而是由 `Alloc < Size` 现算的（vfs/attr.go）。假装取消成功，客户端
+// 回头查属性会照样看到 SPARSE 位，得到一个自相矛盾的视图。真要取消就得把所有
+// 洞填零 —— 一个 8 MiB 的 Time Machine band 会从占几 KiB 涨到占满 8 MiB，
+// 绝不能作为某个 FSCTL 的副作用悄悄发生。
+//
+// ⚠️ 这里与 Samba 有意分歧：Samba 把稀疏位**存进 user.DOSATTRIB 扩展属性**
+// （source3/smbd/dosmode.c:file_set_sparse），所以它的 SET_SPARSE(FALSE) 只是
+// 清一个 bit；之后 fsctl_qar 见 `!fsp->fsp_flags.is_sparse` 就直接谎报「整个
+// 区间已分配」。那套模型要求属性有持久化后端，我们的属性是现算的，学不来。
+// 实测客户端只发 TRUE（macOS 建 .sparsebundle、Windows 建 VHD 都是），
+// 没有已知客户端依赖 FALSE。若将来真遇到，正确的退让是「文件本来就没有洞
+// （Alloc >= Size）时把 FALSE 当无操作成功」，而不是回去无条件谎称成功。
 func ioctlSetSparse(ctx *Context, req *wire.IoctlRequest) error {
 	open, sp, err := sparseTarget(ctx, req, true)
 	if err != nil {
 		return err
 	}
 
+	// ⚠️ 输入为空必须视为 TRUE（MS-FSCC §2.3.69）。macOS 与 Windows 都会发
+	// 不带 Input 的 SET_SPARSE，按 FALSE 处理的话 .sparsebundle 的 band
+	// 一个都稀疏不了。
 	setSparse := true
 	if len(req.Input) > 0 {
 		setSparse = req.Input[0] != 0
@@ -279,6 +297,21 @@ func ioctlQueryAllocatedRanges(ctx *Context, req *wire.IoctlRequest) error {
 		ctx.Log.Warn("QUERY_ALLOCATED_RANGES 失败", "path", open.Path, "err", qerr)
 		return status.FromVFSError(qerr)
 	}
+	if len(vr) == 0 {
+		// 查询长度为 0、文件为空、窗口整个落在 EOF 之外、或区间内全是空洞：
+		// 空输出 + STATUS_SUCCESS 是合法应答，**不是**错误。
+		// Samba fsctl_qar 在这几种情况下同样直接 `return NT_STATUS_OK` 且
+		// 不写 out_output（source3/smbd/smb2_ioctl_filesys.c）。
+		// 注意这条早退在缓冲区大小检查**之前**，与 Samba 的顺序一致。
+		return ioctlEmptyOK(ctx, req)
+	}
+	// 连一条区间都装不下：Samba 回 NT_STATUS_BUFFER_TOO_SMALL 而不是
+	// BUFFER_OVERFLOW（"must have enough space for at least one range"）。
+	// 这里跟随 Samba —— 它才是 smbclient/macOS 期望的对端行为。
+	if req.MaxOutputResponse < allocatedRangeSize {
+		return status.BufferTooSmall
+	}
+
 	ranges := make([]wire.FileAllocatedRangeBuffer, len(vr))
 	for i, r := range vr {
 		ranges[i] = wire.FileAllocatedRangeBuffer{FileOffset: r.Offset, Length: r.Length}
