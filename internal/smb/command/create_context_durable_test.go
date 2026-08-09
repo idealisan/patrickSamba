@@ -1,6 +1,7 @@
 package command
 
 import (
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"testing"
@@ -125,8 +126,13 @@ func TestDurableGrantV1NoPrecondition(t *testing.T) {
 	}
 }
 
-// 反向对照：v2 带 persistent flag，但本服务端无 CA 共享 → 整个 CREATE 失败。
-func TestDurableGrantV2PersistentRejected(t *testing.T) {
+// v2 带 persistent flag、本服务端无 CA 共享 → **忽略该位**，降级授予普通
+// durable v2，响应里的 persistent 位不置（§3.3.5.9.12，无失败出口）。
+//
+// 本用例原名 TestDurableGrantV2PersistentRejected，断言的是「整个 CREATE
+// 失败」。那个行为是错的：客户端顺手带上 persistent 位就连文件都打不开。
+// 改正依据见 create_context_durable.go 里的注释（含 Samba 的交叉验证）。
+func TestDurableGrantV2PersistentDegrades(t *testing.T) {
 	resetDurable()
 	ctx, _, _ := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 2, Volatile: 2, Path: "f.txt"}
@@ -142,12 +148,37 @@ func TestDurableGrantV2PersistentRejected(t *testing.T) {
 	if err := h.Parse(ctx, wire.CreateContextDH2Q, req.Contexts[0].Data); err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	err := h.Registered(ctx, open)
-	if err != status.NotSupported {
-		t.Fatalf("persistent 应被拒(STATUS_NOT_SUPPORTED)，实际 %v", err)
+	if err := h.Registered(ctx, open); err != nil {
+		t.Fatalf("persistent 位应被忽略而非让 CREATE 失败，实得 %v", err)
 	}
-	if open.Durable != nil && open.Durable.Granted {
-		t.Error("persistent 被拒后不应留下授予状态")
+	if open.Durable == nil || !open.Durable.Granted {
+		t.Fatal("应降级授予普通 durable v2")
+	}
+	if !open.Durable.v2 {
+		t.Error("DH2Q 请求应授予 v2，不是 v1")
+	}
+
+	// 响应侧：必须回 DH2Q，且 Flags 里**不能**有 persistent 位 —— 否则等于
+	// 谎称授予了 persistent handle，客户端会据此放弃自己的重试逻辑。
+	resp := &wire.CreateResponse{}
+	if err := h.Respond(ctx, open, resp, nil); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	if !hasCreateContext(resp.Contexts, wire.CreateContextDH2Q) {
+		t.Fatal("降级授予后应回 DH2Q 响应 context")
+	}
+	for _, c := range resp.Contexts {
+		if c.Name != wire.CreateContextDH2Q {
+			continue
+		}
+		// DurableResponseV2 线格式：Timeout(4) + Flags(4)，小端。
+		if len(c.Data) != 8 {
+			t.Fatalf("DH2Q 响应应为 8 字节，实得 %d", len(c.Data))
+		}
+		flags := binary.LittleEndian.Uint32(c.Data[4:8])
+		if flags&uint32(wire.DurableHandlePersistent) != 0 {
+			t.Errorf("响应里置了 persistent 位(flags=%#x) —— 谎称支持 persistent handle", flags)
+		}
 	}
 }
 
@@ -156,14 +187,14 @@ func TestDurableGrantV2PersistentRejected(t *testing.T) {
 // 成功：授予 → 断连 → 重连，拿回同一个句柄，FileId 不变，且不可二次重连。
 func TestDurableReconnectV1Success(t *testing.T) {
 	resetDurable()
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 7, Volatile: 7, Path: "f.txt"}
 
 	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
 	durableRegistry.disconnect(open) // 模拟连接断开
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 7, Volatile: 7}}
-	got, st := durableRegistry.reconnect(s, intent, "share")
+	got, st := durableRegistry.reconnect(s, tree, intent)
 	if st != status.Success {
 		t.Fatalf("重连失败: %v", st)
 	}
@@ -177,7 +208,7 @@ func TestDurableReconnectV1Success(t *testing.T) {
 		t.Error("重连后应挂回新会话")
 	}
 	// 二次重连：已认领，不应再成功。
-	if _, st2 := durableRegistry.reconnect(s, intent, "share"); st2 == status.Success {
+	if _, st2 := durableRegistry.reconnect(s, tree, intent); st2 == status.Success {
 		t.Error("重连成功后不应可再次重连")
 	}
 }
@@ -185,14 +216,14 @@ func TestDurableReconnectV1Success(t *testing.T) {
 // 反向对照：句柄仍在正常使用（未断连）→ 重连无效。
 func TestDurableReconnectWithoutDisconnect(t *testing.T) {
 	resetDurable()
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 7, Volatile: 7, Path: "f.txt"}
 
 	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
 	// 注意：没有调用 disconnect。
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 7, Volatile: 7}}
-	if _, st := durableRegistry.reconnect(s, intent, "share"); st == status.Success {
+	if _, st := durableRegistry.reconnect(s, tree, intent); st == status.Success {
 		t.Error("未断连的句柄不应被重连认领")
 	}
 }
@@ -201,7 +232,7 @@ func TestDurableReconnectWithoutDisconnect(t *testing.T) {
 func TestDurableReconnectTimeout(t *testing.T) {
 	resetDurable()
 	defaultDurableTimeout = 5 * time.Millisecond
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 7, Volatile: 7, Path: "f.txt"}
 
 	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
@@ -210,7 +241,7 @@ func TestDurableReconnectTimeout(t *testing.T) {
 	time.Sleep(20 * time.Millisecond) // 远超 5ms 超时
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 7, Volatile: 7}}
-	if _, st := durableRegistry.reconnect(s, intent, "share"); st != status.ObjectNameNotFound {
+	if _, st := durableRegistry.reconnect(s, tree, intent); st != status.ObjectNameNotFound {
 		t.Errorf("超时重连应失败(OBJECT_NAME_NOT_FOUND)，实得 %v", st)
 	}
 }
@@ -224,9 +255,9 @@ func TestDurableReconnectCrossUser(t *testing.T) {
 	grantDurable(t, ctxAlice, open, dhqReq(wire.OplockLevelBatch))
 	durableRegistry.disconnect(open)
 
-	_, sBob, _ := newDurableTestCtx(t, "bob")
+	_, sBob, treeBob := newDurableTestCtx(t, "bob")
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 9, Volatile: 9}}
-	if _, st := durableRegistry.reconnect(sBob, intent, "share"); st != status.AccessDenied {
+	if _, st := durableRegistry.reconnect(sBob, treeBob, intent); st != status.AccessDenied {
 		t.Errorf("跨用户重连应拒绝(ACCESS_DENIED)，实得 %v", st)
 	}
 }
@@ -234,14 +265,14 @@ func TestDurableReconnectCrossUser(t *testing.T) {
 // 反向对照：错误的 FileId → 找不到。
 func TestDurableReconnectWrongKey(t *testing.T) {
 	resetDurable()
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 9, Volatile: 9, Path: "f.txt"}
 
 	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
 	durableRegistry.disconnect(open)
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 999, Volatile: 999}}
-	if _, st := durableRegistry.reconnect(s, intent, "share"); st != status.ObjectNameNotFound {
+	if _, st := durableRegistry.reconnect(s, tree, intent); st != status.ObjectNameNotFound {
 		t.Errorf("错误 FileId 重连应失败(OBJECT_NAME_NOT_FOUND)，实得 %v", st)
 	}
 }
@@ -250,7 +281,7 @@ func TestDurableReconnectWrongKey(t *testing.T) {
 // 这条验证 tm-lease 的 break handler 调 open.InvalidateDurable() 的契约。
 func TestDurableInvalidateOnLeaseBreak(t *testing.T) {
 	resetDurable()
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{Persistent: 7, Volatile: 7, Path: "f.txt"}
 
 	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
@@ -259,7 +290,7 @@ func TestDurableInvalidateOnLeaseBreak(t *testing.T) {
 	open.InvalidateDurable() // tm-lease 的 break handler 会调这个
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 7, Volatile: 7}}
-	if _, st := durableRegistry.reconnect(s, intent, "share"); st != status.ObjectNameNotFound {
+	if _, st := durableRegistry.reconnect(s, tree, intent); st != status.ObjectNameNotFound {
 		t.Errorf("作废后重连应失败(OBJECT_NAME_NOT_FOUND)，实得 %v", st)
 	}
 	if open.Durable != nil && !open.Durable.Invalidated {
@@ -270,7 +301,7 @@ func TestDurableInvalidateOnLeaseBreak(t *testing.T) {
 // handleDurableReconnect 整条路径（含写响应）的端到端冒烟。
 func TestHandleDurableReconnectEndToEnd(t *testing.T) {
 	resetDurable()
-	ctx, s, _ := newDurableTestCtx(t, "alice")
+	ctx, s, tree := newDurableTestCtx(t, "alice")
 	open := &Open{
 		Persistent: 7, Volatile: 7, Path: "f.txt",
 		Handle: &fakeHandle{attr: vfs.Attr{Size: 10, FileAttributes: 0x20}},
@@ -283,6 +314,11 @@ func TestHandleDurableReconnectEndToEnd(t *testing.T) {
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: 7, Volatile: 7}}
 	if err := handleDurableReconnect(ctx, intent); err != nil {
 		t.Fatalf("handleDurableReconnect: %v", err)
+	}
+	// 重连必须把句柄改绑到本次的树上。不改绑的话重连会「成功」，但之后
+	// 每个命令的 resolveOpen 都会因 o.Tree != ctx.Tree 回 INVALID_PARAMETER。
+	if open.Tree != tree {
+		t.Error("重连后应改绑到本次 TREE_CONNECT 的树")
 	}
 	if open.Session != s {
 		t.Error("重连后应挂回会话")
