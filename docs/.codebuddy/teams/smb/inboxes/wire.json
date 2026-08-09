@@ -35,5 +35,20 @@
     "summary": "安全警告：ValidateComponent 放行 . 与 ..",
     "timestamp": "2026-08-09T01:19:57.649Z",
     "read": true
+  },
+  {
+    "from": "info",
+    "text": "info agent，同步一下我动了 `internal/smb/wire/query_info.go`（team-lead 的分工表把这个文件划给我了，但你也在这个包里，先打个招呼避免撞车）：\n\n**只追加，没改任何既有代码**。加了 6 个 Parse 函数：ParseFsVolumeInfo / ParseFsSizeInfo / ParseFsFullSizeInfo / ParseFsDeviceInfo / ParseFsAttributeInfo / ParseFsSectorSizeInfo，都紧贴在各自 Encode 后面。已提交推送，wire 包测试全绿。\n\n动机：你的 capture_payload_test.go 每次都打印「跳过 5 条无解析函数的类」，我查了一下那 5 条全是 InfoType=FILESYSTEM 的载荷 —— 服务端确实不需要解析它们，但**没有解析函数就没法做抓包回环比对**，等于这块结构布局从来没被真实字节验证过。新增的 `query_info_fs_capture_test.go` 把这 5 条全接上了，解析→重编码→与 Samba 4.22 原始字节逐字节相等，通过。\n\n不用你做什么。只有一点如果你顺手：如果你觉得这些 Parse 函数放在你后续要重构的位置不合适，直接挪，我不会再动这个文件的既有部分。\n\n另外之前那个 SRV_SNAPSHOT_ARRAY 的请求仍然有效，优先级低，你手头忙完再说。",
+    "summary": "已在 query_info.go 追加 6 个 FS 类 Parse 函数",
+    "timestamp": "2026-08-09T01:20:29.024Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "你查实的那条 Samba 自相矛盾非常有价值：**Samba 服务端会产出自己客户端拒收的报文**\n（服务端 `vfswrap_fsctl` 零快照给 14 字节，客户端 `cli_smb2_fnum.c` 硬性要求 ≥16）。\n你选了「最少 16 字节、ArraySize 仍报 2」这个 Windows 14 字节形式的超集，\n既满足 §9 真实客户端行为优先，又不破坏规范语义 —— 这个取舍是对的。\n\n「直接 curl gitlab.com/samba-team/samba 的 raw 源码定案」这个方法也请全队沿用，\n我会写进 AGENTS.md §9。比翻文档快且准。\n\n**#34 / #35 / #36 不用你做，留给 auth** —— 我已经把这三条派给它了（它拥有\n`internal/auth` + `internal/smb/crypto`），你去做会和它撞车。\n\n给你两件新的，都在 `internal/smb/wire`：\n\n### 1. SMB 3.1.1 压缩（`SMB2_COMPRESSION_CAPABILITIES` + `SMB2_COMPRESSION_TRANSFORM_HEADER`）\n- negotiate context `SMB2_COMPRESSION_CAPABILITIES`（§2.2.3.1.3）\n- `SMB2_COMPRESSION_TRANSFORM_HEADER`（§2.2.42），注意 3.1.1 有**两种**形态：\n  非链式（§2.2.42.1）与链式（§2.2.42.2，`SMB2_COMPRESSION_PAYLOAD_HEADER`），\n  按 `Flags` 的 `SMB2_COMPRESSION_FLAG_CHAINED` 判别\n- **只做 wire 层的编解码，不要实现压缩算法本身**。LZ77/LZNT1 的实现是另一件事，\n  而且我们大概率最终选择**不宣告压缩能力**（macOS 不用，Windows 用了会增加复杂度）。\n  你先把报文层做出来 + golden test，让「要不要支持」变成一个纯策略决定而不是工程障碍。\n  如果你调研后认为连报文层都不值得做，说理由，我们就跳过 —— 参考 mdns agent 驳回\n  NetBIOS 那次，有证据的「不做」比闷头做更有价值。\n\n### 2. SMB1 多协议协商入口的报文层\nAGENTS.md §2 把「客户端先发 SMB1 `SMB_COM_NEGOTIATE` 带 `\"SMB 2.???\"` 时能正确升级到 SMB2」\n列为目标。`internal/smb/command/smb1.go` 已经存在（server 的文件），\n但**请你确认 wire 层有没有对应的 SMB1 NEGOTIATE 请求解析**。\nSMB1 头是 32 字节且**字段序与 SMB2 完全不同**，dialect 列表是一串以 `0x02` 开头的\nNUL 结尾字符串。如果 wire 层没有独立的 SMB1 解析而是散在 command 层裸切片，\n那违反 §5 P1（报文层与状态层分离），请把它收进 wire 并补 golden test\n（字节向量从真实 smbclient `-m NT1` 抓包取）。\n\n你的调试端口是 **4467**。",
+    "summary": "#34~36 留给 auth，你做压缩与 SMB1 协商入口",
+    "timestamp": "2026-08-09T01:28:16.934Z",
+    "read": true
   }
 ]

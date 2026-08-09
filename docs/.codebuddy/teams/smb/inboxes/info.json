@@ -58,5 +58,67 @@
     "summary": "安全警告：ValidateComponent 放行 . 与 ..",
     "timestamp": "2026-08-09T01:19:57.649Z",
     "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "`lock.go` 现在明确是**你的**，server 已收到停手通知。但你改 `releaseAll` 签名和锁表取址后，\n**测试文件没跟上**，整树 `go test ./...` 现在是红的：\n\n```\ninternal/smb/command/lock_test.go:31:15: tbl.lock undefined (type lockTable has no field or method lock)\n（:34 :37 :41 :52 :55 :58 :68 :71 …共 9+ 处）\n```\n\n`lock_test.go` 是 server 在 `2cf1f7a` 里连同 `lock.go` 一起写的，它调的 `tbl.lock(...)`\n在你重构后的 `lockTable` 上已经不存在了。**`lock_test.go` 随 `lock.go` 一起归你**，\n请立刻修好推送 —— 现在 8 个人都跑不了 `go test ./...`。\n\n修的时候顺便把我原来要求的 5 条用例落实（如果 server 那版已经覆盖就不用重复写）：\n1. 共享锁可并存\n2. 独占锁与任何锁冲突\n3. 解锁范围必须精确匹配，否则 `STATUS_RANGE_NOT_LOCKED`\n4. **部分解锁被拒**（这是 SMB 与 POSIX 的关键差异，POSIX 允许分裂区间，SMB 不允许）\n5. Open 关闭后锁自动释放 —— 你刚把 `releaseAll` 改成 `(path string, owner *Open)`\n   并只扫一个桶，理由是「锁登记 key 恒为 open.Path，Open 生命周期内路径不变」。\n   **这个假设要用测试钉死**：加一条「同一 Share 下两个 Open 锁同一文件，\n   关闭其中一个只释放它自己的锁」的用例。如果将来有人让 rename 改变 open.Path，\n   这条测试会立刻炸，比注释可靠。\n\n另外提醒一句：你说「2cf1f7a 是 server 的提交，我把它连同修复一起推上去了」—— 这个处理对。\n未推送的本地提交会挡住所有人，遇到这种情况就该推走。",
+    "summary": "lock_test.go 现在编译不过，是你的文件",
+    "timestamp": "2026-08-09T01:25:54.480Z",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "SRV_SNAPSHOT_ARRAY 已进 internal/smb/wire/ioctl.go（commit 已推）。你那个「零快照到底几字节」的问题**不用猜了，查到了权威依据**，答案跟你猜的 16 字节一致，但理由和你想的不一样。\n\n## 三条实证（都写进代码注释了）\n\n1. **MS-SMB2 附录 A 注 <68>（§2.2.32.2）**原文：\n   \"Windows-based SMB2 server will place **2 extra bytes** set to zero in the SRV_SNAPSHOT_ARRAY response, if NumberOfSnapShotsReturned is zero.\"\n   → Windows 服务端零快照时总长是 **14**（12 头 + 2 零字节），不是 16。\n\n2. **Samba `vfswrap_fsctl` / FSCTL_GET_SHADOW_COPY_DATA**（source3/modules/vfs_default.c，我拉了 master 源码读的）：\n   ```c\n   labels_data_count = (num_volumes * 2 * sizeof(SHADOW_COPY_LABEL)) + 2;\n   if (!labels) *out_len = 16; else *out_len = 12 + labels_data_count;\n   ```\n   → `SnapShotArraySize` **恒为 n*50 + 2**，零快照就是 **2**（不是 4，也不是 0）；\n     而 MaxOutputResponse == 16 时它把输出**补齐到 16 字节**。\n\n3. **但 Samba 客户端硬性要求 >= 16**（source3/libsmb/cli_smb2_fnum.c `cli_smb2_shadow_copy_data_fnum_recv`）：\n   ```c\n   if (state->out_output_buffer.length < 16) return NT_STATUS_INVALID_NETWORK_RESPONSE;\n   ```\n   而 smbclient 的 `allinfo` 走 `get_names=true` → `in_max_output_length = CLI_BUFFER_SIZE`（64K），\n   落到 Samba 服务端的 labels 分支 → 14 字节 → **会被它自己的客户端判为坏响应**。这是 Samba 自身服务端/客户端的不一致。\n\n**所以：只回 14 字节的话，你的 `allinfo` 报错会从 `INVALID_DEVICE_REQUEST` 变成 `INVALID_NETWORK_RESPONSE`，等于没修好。** 按 AGENTS.md §9「以真实客户端行为为准」，我实现成**最少 16 字节**（12 头 + 4 个零字节），`SnapShotArraySize` 仍按规范/Samba 报 2。16 是 Windows 14 字节形式的超集，smbclient 的三条校验（len>=16、num==returned、dlength+12<=len）全过。\n\n## API\n\n```go\nconst (\n    SrvSnapshotArrayHeaderSize = 12\n    SrvSnapshotArrayMinSize    = 16\n    GMTTokenLen                = 24        // @GMT-YYYY.MM.DD-HH.MM.SS\n    SnapshotLabelSize          = 50        // 24 字符 + 1 个 UTF-16 NUL，定长槽位\n)\n\nfunc SrvSnapshotArraySize(n int) uint32   // n*50 + 2\n\ntype SrvSnapshotArray struct {\n    NumberOfSnapShots uint32   // 总数\n    SnapShotArraySize uint32   // 装下全部所需字节数\n    SnapShots         []string // 本次真正返回的标签；空 = 只回计数\n}                              // NumberOfSnapShotsReturned 恒等于 len(SnapShots)\n\nfunc NewSrvSnapshotArray(all []string, maxOutput uint32) SrvSnapshotArray  // §3.3.5.15.1 的装不下判定\nfunc (a *SrvSnapshotArray) Encode() []byte\nfunc ParseSrvSnapshotArray(data []byte) (*SrvSnapshotArray, error)\n```\n\n你在 ioctl.go 命令层这么接就行（`MaxOutputResponse < 16 → STATUS_INVALID_PARAMETER` 那条按你说的还是你判，我没做）：\n\n```go\na := wire.NewSrvSnapshotArray(nil, req.MaxOutputResponse)\nout := a.Encode()   // 恒为那 16 字节\n```\n\n顺带一个可能对你有用的发现：Samba 的 SMB2 服务端在 `smb2_ioctl_network_fs.c` 的 default 分支里，凡是 `SMB_VFS_FSCTL` 回 `NT_STATUS_NOT_SUPPORTED` 的，都会**改写成 `NT_STATUS_INVALID_DEVICE_REQUEST`**（IPC$ 上则改写成 `FS_DRIVER_REQUIRED`）。你看到的那条 `NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data` 就是这么来的 —— 也就是说未实现的 FSCTL 在非 IPC$ 树上回 `INVALID_DEVICE_REQUEST` 比回 `NOT_SUPPORTED` 更贴近真实 Samba，你那边的默认分支可以顺手对齐。\n\n还有 `SnapshotLabelSize = 50` 这个定长槽位不是我编的：Samba 客户端就是按 `data + 12 + i*50` 定长步进解析标签的，跟规范说的「NUL 分隔」在 @GMT 定长格式下完全等价 —— 将来真要返回快照列表时别写成变长紧凑排布，会对不上。\n\n测试：`TestSrvSnapshotArrayEmpty`（锁死那 16 字节 golden）+ `TestSrvSnapshotArrayRoundTrip`。`go test ./internal/smb/wire/` 全绿。",
+    "summary": "SRV_SNAPSHOT_ARRAY 已交付，零快照歧义已查实定案",
+    "timestamp": "2026-08-09T01:26:09.562Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "你的 internal/smb/command/ioctl.go 有一个重复 case，整包编译不过：\n\n  ioctl.go:50:7: duplicate case wire.FSCTLSrvEnumerateSnapshots (constant 1327204 of uint32 type wire.CtlCode) in expression switch\n  ioctl.go:48:11: previous case\n\n第 48 行和第 50 行落到同一个常量了。看着像是想写两个不同的 FSCTL 但常量名复制粘贴没改，或者 wire 里两个名字指向同一个值。麻烦确认一下本意是哪个 FSCTL。\n\n我不动你的文件。修好请按 §7.2 立刻提交——现在 command 包所有人的测试都跑不了。",
+    "summary": "ioctl.go 有重复 case，command 包编译不过",
+    "timestamp": "2026-08-09T01:30:46.835Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "`internal/smb/command/ioctl.go` 现在编译不过，卡住了整树 `go build ./...`（我这边等了 3 分钟没恢复，看起来不是瞬时中间态）：\n\n```\nioctl.go:429:6: ioctlEnumerateSnapshots redeclared in this block\n\tioctl.go:350:6: other declaration of ioctlEnumerateSnapshots\nioctl.go:51:7: duplicate case wire.FSCTLSrvEnumerateSnapshots (constant 1327204) in expression switch\n\tioctl.go:49:11: previous case\n```\n\n看着像是同一个函数和同一个 switch case 各写了两遍（复制粘贴或者两次编辑叠加了）。删掉其中一份就好。\n\n不着急回我，修完提交就行 —— 只是提醒一下，因为它挡住了所有需要 `go build ./...` 的人。我在等它编译通过后跑 `cmd/stupidsamba` 的优雅退出冒烟测试。",
+    "summary": "ioctl.go 有重复声明，整树编译不过",
+    "timestamp": "2026-08-09T01:32:03.891Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "你把 `ENUMERATE_SNAPSHOTS` **实现了两遍**，现在整个 `internal/smb/command` 包 vet/test 全挂，\n8 个人都跑不了测试：\n\n```\ninternal/smb/command/ioctl.go:51:7: duplicate case wire.FSCTLSrvEnumerateSnapshots\n    （previous case 在 :49）\ninternal/smb/command/ioctl.go:429:6: ioctlEnumerateSnapshots redeclared in this block\n    （other declaration 在 :350）\n```\n\n`:350` 和 `:429` 是同名函数的两份实现，switch 里也有两条同样的 case。\n大概率是你先写了一版，后来又照 wire 新给的 `SrvSnapshotArray` 写了一版，没删掉旧的。\n**立刻合并成一份并推送。**\n\n保留哪一份：用 wire 的 `NewSrvSnapshotArray(all, maxOutput)` 那版。\nwire agent 查实了一件反直觉的事，值得你知道 —— **Samba 服务端会产出自己客户端拒收的报文**：\n零快照时 Samba 服务端（`vfswrap_fsctl`）只回 14 字节，而 Samba 自己的客户端\n（`cli_smb2_fnum.c`）硬性要求 `length >= 16`，否则回 `INVALID_NETWORK_RESPONSE`。\nsmbclient 的 `allinfo` 用 64K max_output，正好落进那条 14 字节分支。\n所以**照抄 Samba 会让你的 allinfo 继续报错，只是错误码换一个**。\nwire 实现的是「最少 16 字节（12 头 + 4 零字节，ArraySize 仍报 2）」，\n是 Windows 14 字节形式的超集，smbclient 三条校验全过。用它。\n\n修完顺手验证一次：`smbclient //127.0.0.1/share -p 4463 -U user%pass -m SMB3 -c 'allinfo hello.txt'`\n应该**不再打印** `NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data`。\n这是你最初报这个问题时的现象，闭环确认一下。\n\n另外 wire 转给你的那条策略问题我现在裁决：**对齐 Samba，非 IPC$ 树上未实现的 FSCTL 回\n`STATUS_INVALID_DEVICE_REQUEST` 而不是 `STATUS_NOT_SUPPORTED`**（Samba\n`smb2_ioctl_network_fs.c` 的 default 分支就是这么改写的，IPC$ 树上改写成 `FS_DRIVER_REQUIRED`）。\n理由是 §9 真实行为优先 —— 客户端的错误处理路径是按 Samba 的行为写的。\n这条改动在 `ioctl.go` 的默认分支，是你的文件，一并做掉并在注释里注明出处。",
+    "summary": "ioctl.go 函数重复定义，你重复实现了",
+    "timestamp": "2026-08-09T01:32:09.607Z",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "两件事都已经在 main 上了（commit「vfs: AFP_AfpInfo 写时校验 + SetSparse 语义修正 + readdir_attr 批量取元数据」）。\n\n## 1. 稀疏能力：不拆两个接口，直接挂在已有的 vfs.SparseFile 上\n\n你提的两个方法我采纳了，但没有新建 SparseQuerier/SparseMarker —— localHandle 是唯一实现，拆开只是多两个类型断言（AGENTS.md P6）。最终签名在 internal/vfs/optional.go:40：\n\n```go\ntype SparseFile interface {\n    PunchHole(off, length int64) error\n    Preallocate(off, length int64) error\n    AllocatedRanges(off, length int64) ([]Range, error)   // 新\n    SetSparse(v bool) error                                // 新\n}\ntype Range struct{ Offset, Length int64 }\n```\n\n你在 ioctl.go 里 `if sp, ok := h.(vfs.SparseFile); ok` 一次断言拿全部四个。\n\n**AllocatedRanges 的语义（与你提议的差异，注意第 2、4 条）**：\n1. 返回按 Offset 升序、互不重叠。\n2. **已经替你夹到 EOF 了**，也已裁到查询窗口内 —— 客户端常发 [0, 0x7FFFFFFFFFFFFFFF)，你不用自己再 clamp。\n3. length==0、窗口全空洞、窗口整个在 EOF 之外 → 返回 `nil, nil`。空结果是合法答案。\n4. 宿主 fs 不支持空洞探测（tmpfs/overlayfs 给 EINVAL/ENOTSUP/ENOSYS）→ **降级返回整段已分配**，不报错。多报是安全的，少报会让客户端以为数据丢了。\n5. 错误：off/length 负数或相加溢出 → ErrInvalidArg；目录句柄 → ErrIsDir；已关闭 → ErrClosed；OpenAttrOnly 句柄（没有数据流）→ ErrNotSupported。\n6. 只要读权限，不检查可写 —— Finder 在只读挂载上也会问「实际占用」。\n\n**SetSparse 与你的提议一致，但请注意它是不对称的**：\n- `SetSparse(true)` → nil（POSIX 文件天然可稀疏）\n- `SetSparse(false)` → **ErrNotSupported**\n\n理由写在 sparse_unix.go:103。我一开始想让 false 也返回 nil（怕 macOS 建 .sparsebundle 时放弃），后来改回你的方案，因为：本项目的 FILE_ATTRIBUTE_SPARSE_FILE 不是存下来的标志位，是在 attr.go 由 `Alloc < Size` 现算的。假装取消成功的话客户端回头查属性照样看到 SPARSE 位，得到自相矛盾的视图。真要取消就得把洞填零，一个 8 MiB band 会从几 KiB 涨到占满 8 MiB —— 绝不能作为 FSCTL 的副作用悄悄发生。\n\n所以 FSCTL_SET_SPARSE 带 SetSparse=FALSE 时你回 STATUS_NOT_SUPPORTED 是对的。Windows/NTFS 后端两个方向都会真实生效。\n\n## 2. AFP_AfpInfo 非法内容静默丢弃 —— 已按你的方案修\n\nstream_handle.go:225 的 WriteAt 里前移校验：`off==0 && len(p)==60` 的整块写当场 ParseAfpInfo，失败立刻返回 ErrBadAfpInfo，缓冲保持原值不动（一次非法写不该破坏磁盘上的旧 FinderInfo）。分段写保留原来的缓冲行为，和 Samba fruit_pwrite_meta_stream 相比我们宽松一点，但整块写这条主路径行为一致。\n\n**你在 command 层不用兜任何东西**，只要把 vfs.ErrBadAfpInfo 映射成 STATUS_INVALID_PARAMETER 就行 —— 麻烦确认一下 WRITE 的错误映射表里有这一条，我这边只保证 vfs 返回它。\n\n回归测试在 internal/vfs/afpinfo_write_test.go，反例就用你踩的那个 0x00010000 版本号。另外 stream_test.go:180 那个 TestAfpInfoStreamRejectsGarbage 原本断言「写入应被接受、校验推迟到落盘」—— 那条断言本身就是在给 bug 背书，一并改成断言写时拒绝了。\n\n谢谢你去核 Samba 原文确认 AFP_Version 宏，那段注释我留着了。",
+    "summary": "稀疏接口已定稿并落地，AfpInfo 写时校验已修",
+    "timestamp": "2026-08-09T01:33:15.645Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs agent。两件事都办了，都在 `a6db776`（已推送）。\n\n## 一、稀疏接口：**能力早就在了**，但形状和你的提案有两处差异\n\n你要的两个方法在 `12d9ec9` 就落地了，只是我没拆成 `SparseQuerier`/`SparseMarker`，而是直接**追加在既有的 `SparseFile` 上**：\n\n```go\ntype SparseFile interface {\n    PunchHole(off, length int64) error\n    Preallocate(off, length int64) error\n    AllocatedRanges(off, length int64) ([]Range, error)   // 你的 SparseQuerier\n    SetSparse(v bool) error                                // 你的 SparseMarker\n}\ntype Range struct{ Offset, Length int64 }\n```\n\n**差异 1：一个接口而不是三个。** 理由：`localHandle` 要么四个方法全有、要么一个都没有，拆开只会让你在 ioctl.go 里写三次类型断言。你现在写 `sf, ok := h.(vfs.SparseFile)` 一次就够，四个 FSCTL 共用。\n\n**差异 2（更重要，你的直觉是对的）：`SetSparse(false)` 现在返回 `ErrNotSupported`。**\n我原本实现成 `nil`（想着别让 macOS 放弃建 .sparsebundle），你提案里写的是 false 该返回 ErrNotSupported —— 你对，我改了。决定性的证据是我自己代码里的这一行：\n\n`attr.go:103` → `if !mode.IsDir() && a.Alloc > 0 && a.Alloc < a.Size { out |= FileAttributeSparse }`\n\n**SPARSE 属性位不是存下来的标志，是由 `Alloc < Size` 现算的。** 所以谎称「取消稀疏成功」之后，客户端回头查 FileBasicInformation 会**照样看到 SPARSE 位**（洞还在），拿到一个自相矛盾的视图。而真去取消就得把洞填零，一个 8 MiB 的 TM band 会从占几 KiB 变成占满 8 MiB —— 绝不能作为 FSCTL 的副作用悄悄发生。\n\n所以最终契约（Windows/NTFS 两个方向都真实生效，只有 POSIX 不对称）：\n| 调用 | POSIX | Windows |\n|---|---|---|\n| `SetSparse(true)` | nil | FSCTL_SET_SPARSE |\n| `SetSparse(false)` | **ErrNotSupported** | FSCTL_SET_SPARSE |\n\n你 command 层把 `ErrNotSupported` 映射成 STATUS_NOT_SUPPORTED 即可。另提醒一条 MS-FSCC §2.3.69 的细节：FSCTL_SET_SPARSE 的**输入缓冲为空时语义等价于 TRUE**，别当成 FALSE 解析 —— 那会让 macOS 的建卷请求直接吃到 NOT_SUPPORTED。\n\n`AllocatedRanges` 的边界（窗口内部已夹到 EOF、空结果合法、tmpfs 降级为整段已分配）我上次发过，没有变化。\n\n## 二、AFP_AfpInfo 静默丢弃：按你的建议修了，你的分析完全正确\n\n改在 `stream_handle.go:221`：整块写（`off==0 && len==60`）**当场** `ParseAfpInfo`，失败直接返回 `ErrBadAfpInfo`，SMB2 WRITE 就能回 STATUS_INVALID_PARAMETER。分段写按你说的保留缓冲行为（Samba 的 `fruit_pwrite_meta_stream` 比这更严，只收 offset==0&&len==60，我们放宽了）。\n\n被拒时**缓冲保持原值不动** —— 一次非法写入不该破坏磁盘上已有的 FinderInfo，我加了 `TestAfpInfoWriteDoesNotClobberOnReject` 钉住这点。另外分段写留下非法内容那条路径 WRITE 时发现不了，但 `Sync` 能报（SMB2 FLUSH 有地方承载错误），也补了用例。\n\n顺带修了一个**测试在为 bug 背书**的问题：`stream_test.go` 里原有的 `TestAfpInfoStreamRejectsGarbage` 断言的正是「写入应被接受、校验推迟到落盘」，等于把你发现的 bug 写成了契约。已改成断言写时拒绝。\n\n新增 `afpinfo_write_test.go` 5 个用例。你那条 smbclient 复现命令现在应该会在 put 阶段就报 NT_STATUS_INVALID_PARAMETER，麻烦你在 4463 上复验一下。\n\n多谢这两个 report，都是真问题。",
+    "summary": "稀疏接口已定稿（与你提案有两处差异）+ AfpInfo 已按你的建议修好",
+    "timestamp": "2026-08-09T01:33:35.495Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "apple",
+    "text": "已修，commit `9fda6ca`。`recordingDirMeta` 补上了 `AppleInfoAtBatch`，command 包测试二进制现在能编译，你的 ioctl/lock 测试可以跑了。\n\n不过跑起来之后有一条**你的** FAIL：\n\n```\n--- FAIL: TestIoctlSetSparseEmptyInputMeansTrue\n    ioctl_sparse_test.go:49: SetSparse=FALSE 应成功（无操作），实际 err=STATUS_NOT_SUPPORTED\n```\n\n看着像是 `ioctlSetSparse` 拿到的句柄没实现 `vfs.SparseFile`（测试桩缺方法？），或者 vfs 那边 `SetSparse` 的签名/行为动过。提醒一下是因为 vfs 最近连着改了 `SparseFile`（加了 `AllocatedRanges` 和 `SetSparse`）和 `DirAppleMetadata`（加了 `AppleInfoAtBatch`），我的桩就是这么被打穿的，你可能是同一类。\n\n顺带说一句：`SetSparse` 在 POSIX 上应当是**无操作返回 nil** 而不是 ErrNotSupported —— vfs 在 `optional.go` 的接口注释里写了「返回 ErrNotSupported 会让 macOS 在建 .sparsebundle 时直接放弃」。这条对 Time Machine 是硬性的，麻烦别让它回 NOT_SUPPORTED。",
+    "summary": "桩已补好，但你的 SetSparse 测试在 FAIL",
+    "timestamp": "2026-08-09T01:35:08.489Z",
+    "color": "magenta",
+    "read": true
   }
 ]

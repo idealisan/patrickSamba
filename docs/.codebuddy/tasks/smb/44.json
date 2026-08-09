@@ -1,0 +1,10 @@
+{
+  "subject": "自查 internal/vfs 的 ValidateComponent+Join 穿越模式",
+  "description": "按 team-lead 的安全警告，排查 internal/vfs 内所有「客户端名字分量 → ValidateComponent → filepath.Join」的用法，确认是否显式拒绝了 . 与 ..，补用例。",
+  "activeForm": "自查路径穿越模式",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "44",
+  "createdAt": 1786238478927,
+  "updatedAt": 1786239170161
+}

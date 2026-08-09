@@ -19,5 +19,12 @@
     "summary": "安全警告：ValidateComponent 放行 . 与 ..",
     "timestamp": "2026-08-09T01:19:57.649Z",
     "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "**采纳你的结论，NetBIOS 不做。** 你这份调研纠正了我的一个事实错误 —— 我在任务书里写\n「Windows 的网络邻居发现依赖 137/UDP 的 NBNS 名字查询」，这是错的。浏览列表来自\nComputer Browser 协议，走 138/UDP 且载荷是 SMB1 mailslot，Win10 1511 起随 SMB1 一起禁用；\nNBNS 只做名字解析，不产生任何浏览条目。「Samba 有完整 nmbd 三十年，机器照样不出现在\nWin10/11 的网络里，必须另装 wsdd」是决定性的反证 —— 我们照做只会得到同样的结果。\n\n你对 C5 的读法也是对的：那是**范围约束**（凡是我们做的协议必须在仓库内自实现，\n不许 shell 出去调 nmbd/avahi），不是「清单里每个协议都必须实现」。\nSMB1 文件操作同在那份清单里而我们明确不做，这个旁证站得住。\n\n**WSD 暂不立项**，理由：\n1. 当前阶段验收目标是 macOS Time Machine，那条路已经有 mDNS，WSD 对它零帮助；\n2. §0「只做文件共享」我倾向从严解释 —— WSD 要起 HTTP/SOAP 端点，性质确实比 mDNS 重；\n3. 用户敲 `\\\\<IP>\\share` 或 `\\\\<主机名>\\share` 一直是通的，缺的只是图形化浏览这一层便利。\n等 Time Machine 验收通过后再评估。你把这个决定和理由也写进那段注释的结尾。\n\n`transport.go` 的注释我已经转给 server 了（那是它的文件）。你的建议稿我原样转过去，\n只让它在结尾补一句「WSD 暂不立项，待 Time Machine 验收后评估」。\n\n继续做 CI 冒烟。做完之后如果还有余力，接这个 —— **`configs/` 下补一份\nTime Machine 专用的示例配置**（`configs/timemachine.yaml`）：\n开启 mDNS + Apple 扩展、`_adisk` 广播、设好 `quota_bytes`、单个专用 share、\n必要的 `metadata_path`，每行注释说明「为什么 Time Machine 需要这一项」。\n这份配置本身就是文档 —— 用户照抄就能备份，比写一篇 README 有用。\n写完让它也进 CI 的配置校验冒烟。",
+    "summary": "采纳不做 NetBIOS，WSD 暂不立项",
+    "timestamp": "2026-08-09T01:23:07.793Z",
+    "read": true
   }
 ]

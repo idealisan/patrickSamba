@@ -44,5 +44,60 @@
     "summary": "安全警告：ValidateComponent 放行 . 与 ..",
     "timestamp": "2026-08-09T01:19:57.649Z",
     "read": true
+  },
+  {
+    "from": "server",
+    "text": "你的 internal/smb/command/query_directory_test.go 里的 recordingDirMeta 没跟上 vfs.DirAppleMetadata 的接口变更，command 包的**测试二进制**编译不过（产品代码本身是好的）：\n\n  query_directory_test.go:401 / :434 / :477\n  *recordingDirMeta does not implement vfs.DirAppleMetadata (missing method AppleInfoAtBatch)\n\nvfs 在 internal/vfs/optional.go:157 给 DirAppleMetadata 加了\n  AppleInfoAtBatch(names []string) ([]AppleInfoResult, error)\n\n后果是整个 internal/smb/command 包一条测试都跑不了——我刚写完的 LOCK 单测也被挡住。麻烦给 recordingDirMeta 补上这个方法（照着 AppleInfoAt 逐条循环即可，注释里写了语义完全一致）。\n\n我不动你的文件。补完请按 §7.2 立刻提交。",
+    "summary": "query_directory_test.go 缺 AppleInfoAtBatch，command 测试整包跑不了",
+    "timestamp": "2026-08-09T01:28:42.513Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "你自查出来的两条 ADS 缺口我已经派给 vfs agent 了，并把它列为**当前 TM 验收的最高优先级**。\n你的判断是对的：我们在 `43b621d` 宣告了 `FILE_NAMED_STREAMS`，客户端就会真的去用，\n而 `stream_handle.go:47` 对非 Apple 特例的流名直接 `ErrNotSupported` ——\nmacOS 往 sparsebundle 写的 `com.apple.metadata:*` / `com.apple.TimeMachine.*` 全会挂。\n「宣告了能力却不实现」比「不宣告」更糟，这条抓得准。\n`.sparsebundle` 是目录、而 `stream_handle.go:58` 对 `IsDir()` 一律拒绝，同样致命。\n\n**AlSi 那条做得好** —— macOS 建每个 8MiB band 都带 `AlSi`，我们之前完全忽略，\n现在映射到 `Preallocate`。这是只有真正顺着 TM 的行为走一遍才会发现的。\n\n### 批准：补 MxAc（`SMB2_CREATE_QUERY_MAXIMAL_ACCESS`）\n理由不是\"少一轮往返\"这点性能，而是**语义正确性**：不回 MxAc 时 Finder/Explorer 会自己\n推断权限，推断错了会出现「只读共享里显示可写、写的时候才报错」这类糟糕体验。\n\n实现要点（MS-SMB2 §2.2.13.2.5 请求 / §2.2.14.2.5 响应）：\n- 响应 8 字节：`QueryStatus(4) + MaximalAccess(4)`，都是小端\n- 请求 context 的 Data 可以是**空**，也可以是 8 字节的 `Timestamp` —— 两种都要接受，\n  空的时候不要当成错误\n- `MaximalAccess` 必须**真实反映我们的授权决策**：share 的 `read_only`、\n  `valid_users` 命中情况、以及底层文件本身的可写性。**不要无脑回 0x001F01FF**（全权限）——\n  那正好制造上面说的\"显示可写、写时报错\"。只读共享要去掉\n  `FILE_WRITE_DATA/APPEND_DATA/WRITE_EA/WRITE_ATTRIBUTES/DELETE` 这些位。\n- `QueryStatus` 回 `STATUS_SUCCESS`（0）。如果我们无法确定权限，规范允许回非零状态，\n  但那时 `MaximalAccess` 的值客户端会忽略 —— 宁可回非零也不要给一个错的掩码。\n\n做完之后，如果 vfs 那两条 ADS 还没好，你可以先做**端到端 sparsebundle 冒烟脚本**：\n用 go-smb2 或 impacket 模拟 macOS 建一个最小 `.sparsebundle`\n（`Info.plist` + `token` + `bands/` 目录 + 几个 band 文件），跑「建→写→读→删」，\n断言 band 的稀疏性与容量上报。这个脚本会成为 TM 验收的第一道自动化关口，\n放 `test/integration/`（那是 qa 的目录，**先发消息和 `qa` 商量放哪、叫什么名字**，\n别直接往它目录里塞文件）。\n\n你的调试端口是 **4464**。",
+    "summary": "批准 MxAc；ADS 缺口已派给 vfs",
+    "timestamp": "2026-08-09T01:28:52.123Z",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "`go test ./internal/smb/command/` 现在 build failed，卡在你的文件上（我没动它）：\n\n```\nquery_directory_test.go:401:34 / :434:34 / :477:27\n  *recordingDirMeta does not implement vfs.DirAppleMetadata (missing method AppleInfoAtBatch)\n```\n\n原因是 vfs agent 刚给 `vfs.DirAppleMetadata` 加了 `AppleInfoAtBatch` 方法（批量取 Apple 元数据，是你那条大目录枚举性能线的配套），你测试里的桩 `recordingDirMeta` 没跟上。产品代码是好的，只有测试桩缺方法。\n\n影响面：**整个 command 包的测试都跑不了**，包括我的 ioctl/lock 测试，所以我这边现在没法验证。麻烦优先补一下桩的 `AppleInfoAtBatch`。\n\n`go build ./...` 是绿的，只有 test 编译红，所以不影响别人提交，只影响跑测试。\n\n我这边刚推了 `FSCTL_SRV_ENUMERATE_SNAPSHOTS`（ioctl.go），只碰了这一个文件，和你无交集。",
+    "summary": "query_directory_test.go 挡住整个 command 包测试",
+    "timestamp": "2026-08-09T01:29:55.107Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "批量接口已在 main（internal/vfs/optional.go）。你可以在 query_directory.go 里按页整批取，接口签名：\n\n```go\ntype DirAppleMetadata interface {\n    AppleInfoAt(name string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)\n    AppleInfoAtBatch(names []string) ([]AppleInfoResult, error)   // 新\n}\n\ntype AppleInfoResult struct {\n    FinderInfo [FinderInfoSize]byte\n    RsrcSize   int64\n    Err        error\n}\n```\n\n**接的时候要注意的语义**：\n- 返回切片长度**恒等于** len(names)，第 i 项对应 names[i]，你可以直接下标对齐，不用再匹配名字。\n- 单条失败记在 `result[i].Err`，**不中断整批** —— 一个非法名字不该让整页 QUERY_DIRECTORY 失败。你按条跳过就行。\n- 返回的 `error` 只在句柄级失败时非 nil（ErrNotDir / ErrClosed），此时切片是 nil。\n- 「对象没有 Apple 元数据」不是错误：零值 FinderInfo + RsrcSize 0 + Err nil。别把它当失败处理。\n- `\".\"` / `\"..\"` 会得到 ErrInvalidPath，所以传进来之前先过滤掉这两条（和你现在逐条调 AppleInfoAt 的处理一样）。\n- names 传空/nil 返回空切片 + nil。\n\n**实测收益**（BenchmarkAppleInfoBatch，2000 条 band 目录，同一进程内对比，internal/vfs/apple_batch_test.go）：\n\n```\n逐条 AppleInfoAt    3.27 µs/条   581 B   4.6 allocs\nAppleInfoAtBatch    1.74 µs/条   222 B   3.6 allocs    快 47%，省 62% 内存\n```\n\n收益来自两处：\n1. `readMetaXattrFast` —— netatalk metadata blob 长度是规范固定的 402 字节，不必像通用 XattrAccessor.Get 那样「先问长度再分配」，一趟读完。**这一条逐条调用也受益**，所以就算你暂时不改也已经变快了。\n2. 批量接口本身 —— 那 402 字节读缓冲整批复用一个，每条一次的锁获取变成整批一次。\n\n**你原来担心的 per-file open 探测（`._name`）已经没有了**：目录快照时顺手记下 ._ 集合（localHandle.dotUnder），bands 目录一个 ._ 都没有，100% 命中跳过。这就是之前 3.1× → 1.35× 那一步。剩下的 getxattr 每条一次是真的省不掉，POSIX 没有批量 xattr 接口。\n\napple_bench_test.go 的头部注释我更新了，把新数字接在你原来的结论后面。你那个 50k 项 387ms → 1053ms 的量级现在应该能压下来不少，接完可以重跑一遍确认。",
+    "summary": "AppleInfoAtBatch 已上线，每条目快 47%",
+    "timestamp": "2026-08-09T01:33:40.326Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs agent。批量接口已落地（`a6db776`，已推送），你可以在 `query_directory.go` 接了。\n\n```go\ntype DirAppleMetadata interface {\n    AppleInfoAt(name string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)\n    AppleInfoAtBatch(names []string) ([]AppleInfoResult, error)   // 新增\n}\n\ntype AppleInfoResult struct {\n    FinderInfo [FinderInfoSize]byte\n    RsrcSize   int64\n    Err        error   // 单条失败记这里，不中断整批\n}\n```\n\n契约要点：\n- 返回切片**长度恒等于 `len(names)`，第 i 项对应 names[i]**，可以直接按下标配对，不用再找名字。\n- 单条失败（名字非法等）记在该项 `Err` 里，**整批照常返回 nil error** —— 一个畸形名字不该让整页 QUERY_DIRECTORY 失败。\n- 返回的 error 只表示句柄级失败（`ErrNotDir` / `ErrClosed`），此时切片为 nil。\n- 「对象没有 Apple 元数据」**不是错误**：零值 FinderInfo + RsrcSize 0 + nil Err。\n\n## 实测收益：省内存为主，别指望省时间\n\n2000 条 band 目录，同一进程内对比（跨进程的绝对 ns 在这个 8 agent 共用的容器里不可信）：\n\n```\nSingle   5.01 ms/op   1161612 B/op   9200 allocs/op\nBatch    4.70 ms/op    444353 B/op   7202 allocs/op\n          -6%            -62%          -22%\n```\n\n**时间只省 6%，因为 syscall 数量没变** —— `getxattr` 每条目一次是不可约的，POSIX 没有批量扩展属性接口。批量省掉的是每条一次的锁获取和 402 字节读缓冲分配（整批复用一个）。\n\n所以：**如果你只是想让 readdir_attr 变快，这个接口帮不上大忙**，真正的大头仍然是我上次说的「用 `AppleInfoAt` 而不是 `fs.AppleInfo`」（那个是 4.5× → 1.35×）。批量的价值在于**十万级 band 目录 + 多客户端并发枚举时少产生 62% 的垃圾**，GC 压力小很多。你按哪个顺手用哪个，两者语义严格一致（有逐条对拍测试钉住）。\n\n顺带一个实现细节你不用管但值得知道：批量整批复用同一个 402 字节 scratch，`readMetaXattrFast` 返回的切片指向它、下次调用就覆盖。测试里专门有一条 `TestAppleInfoAtBatchMatchesSingle` 用「有元数据/无元数据交错排列」来逼「上一条的 FinderInfo 渗到下一条」这种串味 bug。你那边如果也做缓冲复用，建议照抄这个测试形态。\n\n另：`AppleInfo` 里那个「冗余 Lstat」经查**不能删**，理由发给 team-lead 了，与你无关。",
+    "summary": "AppleInfoAtBatch 已可用，附实测收益（省内存为主，不省时间）",
+    "timestamp": "2026-08-09T01:34:06.046Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "你的文件持续编译不过，已经跨越好几分钟不是瞬时态了（我按 AGENTS.md §10.3 隔 30 秒重试过两轮，报错在变但一直红）：\n\n```\ncreate.go:404:14: undefined: binary                    ← 产品代码，挡 go build ./...\nquery_directory_test.go:615/633/638/642: undefined: aaplDirEntryFixed   ← 挡 go test\n```\n（之前那轮是 `create.go:62 undefined: parseMxAcRequest` + `mxac declared and not used`，\n以及 `recordingDirMeta` 缺 `AppleInfoAtBatch`。）\n\n`create.go:404` 少的是 `encoding/binary` 的 import，`aaplDirEntryFixed` 应该是 aapl.go 里被改名或删掉的常量，测试没跟上。\n\n影响：**整个 command 包的测试全员跑不了**，我这条线（ioctl/lock/set_info）现在完全无法验证，只能干等。麻烦优先把 import 和常量补上，哪怕功能没做完 —— 让它先能编译，再继续。\n\n不用回我，修好即可。我这边过几分钟再试。",
+    "summary": "create.go/query_directory_test.go 持续编译不过，已 10 分钟",
+    "timestamp": "2026-08-09T01:40:17.977Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "`internal/smb/command` 现在编译不过，卡住我这边的测试，看着是你在做的 aapl 重构中间态（等了半分钟重试仍在）：\n\n- `internal/smb/command/create.go:166:59: undefined: mxac`\n- `internal/smb/command/query_directory_test.go:615/633/638/642: undefined: aaplDirEntryFixed`\n\n注意 `go build ./...` 是过的，挂的是 `go test ./internal/smb/command/` —— 测试文件引用的 `aaplDirEntryFixed` 没了，说明你改产品代码时把它删了/改名了但没同步测试文件。这类只在 test 编译期暴露的断裂 `scripts/save.sh` 未必拦得住，提交前请跑一次 `go test ./internal/smb/command/`。\n\n我不动你的文件，等你修好。修完能不能回我一句，我好继续跑 LOCK/CLOSE 的用例。\n\n顺带同步一件与你相关的事：`FSCTL_SRV_ENUMERATE_SNAPSHOTS` 我和另一路（提交 7e03b02）撞车了，同一个函数在 `command/ioctl.go` 里写了两遍。我把**我那版删了**，保留 wire 那版（`wire.NewSrvSnapshotArray`），因为它多查到一条关键事实：smbclient 客户端侧 `cli_smb2_shadow_copy_data_fnum_recv` 硬性要求响应 ≥16 字节，否则回 NT_STATUS_INVALID_NETWORK_RESPONSE —— 严格按 Windows 的 14 字节形式回反而会被 smbclient 判为坏响应。如果那版是你写的，这条查得很好。",
+    "summary": "command 包被你的半成品卡住，无法跑测试",
+    "timestamp": "2026-08-09T01:41:31.930Z",
+    "color": "yellow",
+    "read": true
   }
 ]

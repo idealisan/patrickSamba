@@ -1,0 +1,10 @@
+{
+  "subject": "AppleInfo 冗余 Lstat 与 AppleInfoAtBatch 批量接口",
+  "description": "1) 确认 Resolver.Resolve 对「末级不存在」是宽松返回路径（是则 AppleInfo 里的 Lstat 是必需的存在性检查，不能删）。2) 新增 DirAppleMetadata.AppleInfoAtBatch(names) 批量接口，复用目录快照的 ._ 集合，跑 apple_bench_test.go 量收益，通知 apple。",
+  "activeForm": "实现 AppleInfoAtBatch 并复核冗余 Lstat",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "45",
+  "createdAt": 1786238491882,
+  "updatedAt": 1786239177768
+}

@@ -2,8 +2,9 @@
   "subject": "租约 create context 编解码（SMB2_CREATE_REQUEST_LEASE v1/v2）",
   "description": "MS-SMB2 §2.2.13.2.8 (32B) 与 §2.2.13.2.10 (52B)，响应侧 §2.2.14.2.10/§2.2.14.2.11 布局相同。按长度判别 v1/v2，非 32/52 返回错误。带 golden test。做完通知 server 与 apple。",
   "activeForm": "实现租约 create context 编解码",
-  "status": "pending",
+  "status": "in_progress",
   "id": "37",
   "createdAt": 1786238199970,
-  "updatedAt": 1786238199970
+  "updatedAt": 1786238518218,
+  "owner": "wire"
 }
