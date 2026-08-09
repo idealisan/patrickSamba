@@ -47,8 +47,10 @@
   本地已构建并核验：`docker create --platform` 解析探针确认 manifest 含
   `linux/amd64` + `linux/arm64`；把二进制从镜像两个架构分别抠出来看 ELF `e_machine`
   分别是 `0x003e`(x86-64) 与 `0x00b7`(AArch64)，构建信息 `CGO_ENABLED=0`；
-  两份 sha256 与 `dist/` 裸包里解出来的二进制**逐位相同**（`81c242c16b3852a6…` /
-  `d2fbdf7b7c79064f…`），即镜像与裸包确系同一份字节。
+  两份 sha256 与 `dist/` 裸包里解出来的二进制**逐位相同**（实测取 v0.2.0-rc0
+  预发布验证构建，前缀 `81c242c16b3852a6…` / `d2fbdf7b7c79064f…`；注意二进制里
+  嵌了版本号，打 `v0.2.0` tag 时 sha256 会随之变化，届时按实际产物重新核对），
+  即镜像与裸包确系同一份字节。
 - 端到端镜像验证脚本 [`scripts/verify-image.sh`](scripts/verify-image.sh)：用
   `smbclient` + `impacket` 对容器做 8 项可证伪校验（启动、`scratch` 中静态可执行、
   smbclient 读写往返、共享不存在被拒的反向对照、数据确实落到命名卷、impacket 独立
