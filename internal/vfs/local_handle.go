@@ -249,8 +249,12 @@ func (h *localHandle) SetAttr(attr *Attr, mask AttrMask) error {
 			return mapError(err)
 		}
 	}
-	if mask&(AttrUID|AttrGID) != 0 {
-		h.setOwner(attr, mask)
+	// 注意这里必须带上 AttrMode。上面那次 os.Chmod 在 Windows 上只翻
+	// READONLY 位（NTFS 没有 POSIX 权限位），真正的 mode 只能落到旁路存储。
+	// 旧实现只在 UID/GID 变更时才调，于是客户端**单独**设 mode 时
+	// 改动根本没落库，回读的是旧值。
+	if mask&(AttrUID|AttrGID|AttrMode) != 0 {
+		h.recordPOSIXMetadata(attr, mask)
 	}
 	return nil
 }
@@ -286,13 +290,16 @@ func (h *localHandle) setDOSAttributes(attrs uint32) error {
 	return mapError(os.Chmod(h.host, perm))
 }
 
-// setOwner 记录属主。
+// recordPOSIXMetadata 把 uid / gid / mode 记进旁路存储。
+//
+// 名字里不再叫 setOwner：它一直也在处理 AttrMode，而那个名字让调用点
+// 想当然地只在 UID/GID 变更时才调它，纯 mode 变更就被漏掉了。
 //
 // 注意 AGENTS.md §1.1：这里的 uid/gid 只是数字标签，**不做系统用户解析**，
 // 也不调用 chown —— 真去 chown 需要 root，且会把本软件的账户体系和
 // 宿主机的账户体系绑在一起，正是准则明令禁止的。
-// 表达不了 POSIX 属主的平台（Windows）写进旁路存储，其余平台忽略。
-func (h *localHandle) setOwner(attr *Attr, mask AttrMask) {
+// 表达不了 POSIX 属主/权限的平台（Windows）写进旁路存储，其余平台忽略。
+func (h *localHandle) recordPOSIXMetadata(attr *Attr, mask AttrMask) {
 	if h.fs.meta == nil {
 		return
 	}
