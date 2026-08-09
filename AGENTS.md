@@ -456,6 +456,8 @@ sh test/ci/check-test-compile.sh && git add -A \
 > 顺带：**新增任何 build tag，必须同步登记进该脚本的 `TAGS=`**，否则带该 tag 的文件
 > 没有任何一关会编译它 —— 脚本自己会检查这件事并报错，别把它当成误报绕过去。
 
+> **⚠️ bisect 约定（同源血的延伸）：** `git bisect` 每走到一个**因 `_test.go` 未编译而 `go vet`/`go test` 失败**的提交，都会撞上与被查 bug **无关**的编译错误 —— `git bisect run` 会把它误判成 `bad` 或干脆卡死，污染整条二分结论。修正：**每个被检出的提交先跑 `sh test/ci/check-test-compile.sh`，不过就 `git bisect skip`**（别硬跑 `go test` 去浪费在注定失败的编译上）。理由同上 —— 8199288 那个洞已经进了 main（`go build` 过、`go vet` 不过），将来任何人 bisect 到它都会被误导；让 `skip` 跳过这类「测试代码编译失败」的地雷，只让真正的 product 回归参与二分。
+
 > **⚠️ 血泪教训：推送的 refspec 必须是自己的分支，不能写死也不能省略。**
 > 多个 worktree **共享同一份 `.git`**，所以在自己 worktree 里执行 `git push origin main`
 > 推的是**本地 main 分支**（别人的），不是你的工作。它会照常打印成功、
