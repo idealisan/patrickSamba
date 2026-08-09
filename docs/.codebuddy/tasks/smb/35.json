@@ -1,9 +1,0 @@
-{
-  "subject": "SP800-108 KDF 四个 label 逐字节核对 + golden test",
-  "description": "SigningKey/ServerOut/ServerIn/ApplicationKey 在 3.1.1 与 3.0.x 两套 label，注意 \"ServerIn \" 末尾空格与各 label 末尾 NUL。用规范/抓包向量钉死。",
-  "activeForm": "核对 KDF label 并补 golden test",
-  "status": "completed",
-  "id": "35",
-  "createdAt": 1786238089700,
-  "updatedAt": 1786238507759
-}

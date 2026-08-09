@@ -1,9 +1,0 @@
-{
-  "subject": "golden test（MS-NLMP §4.2 规范向量）",
-  "description": "用 MS-NLMP §4.2.2/§4.2.4 worked example 的 SIGNKEY/SEALKEY/签名字节向量做 golden test，以及 mechListMIC 端到端往返测试。",
-  "activeForm": "编写 golden test",
-  "status": "completed",
-  "id": "4",
-  "createdAt": 1786235887886,
-  "updatedAt": 1786237059509
-}

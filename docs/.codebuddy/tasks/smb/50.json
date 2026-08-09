@@ -1,9 +1,0 @@
-{
-  "subject": "readdir_attr 改用 wire.DirEntry.ShortNameRaw，删掉打补丁写法",
-  "description": "wire agent 新增了 DirEntry.ShortNameRaw，可在 DirEntryWriter.Add 之前准备好 AAPL 字段，消除 patchIDBothDirEntry 的 start 偏移自算风险与 P1 分层违规。",
-  "activeForm": "改用 ShortNameRaw 消除打补丁写法",
-  "status": "pending",
-  "id": "50",
-  "createdAt": 1786239331830,
-  "updatedAt": 1786239331830
-}

@@ -1,9 +1,0 @@
-{
-  "subject": "核对 SESSION_SETUP 最终响应用新会话密钥签名",
-  "description": "MS-SMB2 §3.3.5.5.3：最后一条 SESSION_SETUP 响应必须用新导出的会话密钥签名。确认密钥导出侧正确，签名落点在 server 的 session_setup.go，发现问题只报告不改。",
-  "activeForm": "核对 SESSION_SETUP 最终响应签名",
-  "status": "completed",
-  "id": "32",
-  "createdAt": 1786237361108,
-  "updatedAt": 1786237839631
-}

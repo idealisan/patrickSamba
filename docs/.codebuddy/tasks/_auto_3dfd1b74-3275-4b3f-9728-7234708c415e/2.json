@@ -1,9 +1,0 @@
-{
-  "subject": "实现 AAPL create context 解析与响应",
-  "description": "在 internal/smb/command 新增 aapl.go：AAPL 请求解析（CommandCode/RequestBitmap/ClientCapabilities）与响应构造（ServerCaps/VolumeCaps/ModelString），在 create.go 的 createResponseContexts 里接入，并记录协商状态供 readdir_attr 使用。附 golden test。",
-  "activeForm": "实现 AAPL create context 解析与响应",
-  "status": "in_progress",
-  "id": "2",
-  "createdAt": 1786234440669,
-  "updatedAt": 1786234567224
-}

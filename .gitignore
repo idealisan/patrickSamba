@@ -10,3 +10,9 @@
 .DS_Store
 /config.yaml
 /config.yml
+
+# CodeBuddy 的工作状态目录（会话缓存、shell 环境快照、file-history、插件市场副本）。
+# 曾经被 `git add -A` 误扫进 docs/ 下并入库 149 MB，其中 shell-snapshots 里含
+# 明文 CNB_TOKEN —— 见 commit 2e327a6 / 8624094。任何层级都不得再入库。
+# 会话历史要归档请走 scripts/save-history.sh，它落到仓库的 history/ 目录。
+.codebuddy/

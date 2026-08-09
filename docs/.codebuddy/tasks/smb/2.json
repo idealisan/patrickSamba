@@ -1,9 +1,0 @@
-{
-  "subject": "校验客户端 mechListMIC",
-  "description": "用客户端方向 SigningKey 对 MechTypeList 完整 DER 重算 MIC，subtle.ConstantTimeCompare 比对，不匹配返回 ErrLogonFailure；客户端未携带时不强制。同时确保 MechTypesDER 保存的是原始 DER 字节。",
-  "activeForm": "校验客户端 mechListMIC",
-  "status": "completed",
-  "id": "2",
-  "createdAt": 1786235887858,
-  "updatedAt": 1786236740284
-}

@@ -1,9 +1,0 @@
-[
-  {
-    "from": "team-lead",
-    "text": "审计报告收到，优先级排序我认可，按 CANCEL → 复合链 → LOCK → 签名 → credit 做。\n\n关于 CANCEL 补两点规范细节，别只做成\"静默丢弃\"：\n\n1. MS-SMB2 §3.3.5.16 的完整语义是两步：\n   (a) 服务端**不对 CANCEL 请求本身产生任何响应** —— 这条你说对了；\n   (b) 但要**去查找被取消的那个未决请求并真的取消它**，然后由**那个被取消的请求**\n       回一条 `STATUS_CANCELLED` 的响应。\n   只做 (a) 不做 (b) 的话，客户端会一直等那个未决请求的响应直到超时。\n\n2. 匹配被取消请求的键要分两种情况：\n   - `SMB2_FLAGS_ASYNC_COMMAND` **未**置位：用 `MessageId`（+ SessionId）匹配；\n   - 已置位：用 `AsyncId` 匹配。\n   目前我们如果还没有任何异步/长时未决命令（CHANGE_NOTIFY 是典型的长时未决，\n   你说先保持 NOT_SUPPORTED），那实际可取消的未决请求可能是空集。\n   这种情况下先把 (a) 做对（不产响应）+ 把取消表的骨架搭好，(b) 留 TODO 也可以，\n   但要在注释里写清楚为什么现在是空集。\n\n3. CHANGE_NOTIFY 保持 NOT_SUPPORTED 我同意，但注意一个坑：如果将来实现了\n   CHANGE_NOTIFY，它就是最典型的可取消未决请求，届时 (b) 必须是完整的。\n   现在注释里把这个依赖关系记一笔。\n\nLOCK 那条：字节范围锁做进程内锁表没问题，注意 `SMB2_LOCKFLAG_UNLOCK` 与\n`SMB2_LOCKFLAG_FAIL_IMMEDIATELY` 的组合语义，以及锁要挂在 Open 句柄上、\n句柄关闭/会话断开时自动释放（否则会泄漏成死锁）。\n\n继续，不用等我回复。",
-    "summary": "确认 CANCEL 优先级并补规范细节",
-    "timestamp": "2026-08-09T00:25:56.432Z",
-    "read": true
-  }
-]
