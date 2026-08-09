@@ -94,14 +94,42 @@ func handleNegotiate(ctx *Context) error {
 	c.MaxReadSize = maxSize
 	c.MaxWriteSize = maxSize
 
-	// ---- 3.1.1 negotiate contexts ----
+	// ---- 加密算法协商 ----
+	//
+	// 两条完全不同的路径，都必须走到，否则 encryption_required 会被降级绕过：
+	//   - 3.1.1：走 SMB2_ENCRYPTION_CAPABILITIES negotiate context；
+	//   - 3.0/3.0.2：没有 negotiate context，能力用 Capabilities 里的
+	//     CAP_ENCRYPTION 位表达，算法固定为 AES-128-CCM（MS-SMB2 §3.3.5.4）。
 	var respContexts []wire.NegotiateContext
-	if d.SupportsNegotiateContexts() {
+	switch {
+	case d.SupportsNegotiateContexts():
 		respContexts, err = negotiateContexts(ctx, req)
 		if err != nil {
 			c.Dialect = 0 // 协商失败，连接回到未协商状态
 			return err
 		}
+	case d.SupportsEncryption() && set.EncryptionEnabled &&
+		uint32(req.Capabilities)&dialect.CapEncryption != 0:
+		c.Cipher = wire.CipherAES128CCM
+	}
+
+	// 加密强制必须 fail closed。
+	//
+	// 曾经的缺口：上面的加密协商在 3.1.1 之前的方言里根本不产生 Cipher，
+	// 而 session_setup 里 `EncryptionRequired && Cipher != 0` 才置
+	// SessionFlagEncryptData —— 于是客户端只要在 NEGOTIATE 里把方言压到
+	// 3.1.1 以下（`smbclient -m SMB2_10`），就能让 encryption_required
+	// 静默失效，全程明文且服务端不拒绝、不告警。
+	//
+	// 2.0.2/2.1 属于"方言根本没有加密能力"，此处一律拒绝协商；
+	// 3.0/3.0.2 若客户端没宣告 CAP_ENCRYPTION 也一样拒绝。
+	if set.EncryptionRequired && c.Cipher == 0 {
+		ctx.Log.Warn("配置要求加密但本连接协商不出加密算法，拒绝协商",
+			"dialect", d,
+			"dialect_supports_encryption", d.SupportsEncryption(),
+			"client_caps", req.Capabilities)
+		c.Dialect = 0
+		return status.AccessDenied
 	}
 
 	encryption := c.Cipher != 0
