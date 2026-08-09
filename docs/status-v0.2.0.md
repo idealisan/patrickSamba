@@ -4,7 +4,11 @@
 > **本文件的判断只采信客观证据**：分支上的 commit、已合并的 PR、可复现的实测记录。
 > agent 的自我汇报不作为进度依据。
 >
-> 最近盘点：**2026-08-09 13:06 CST**（第 2 轮）　上轮：12:15（第 1 轮 · 基线）
+> 最近盘点：**2026-08-09 13:14 CST**（第 3 轮）　上轮：13:06（第 2 轮）、12:15（第 1 轮 · 基线）
+>
+> **第 3 轮增量**：`qa` 已解除哑火，交付 PR #17（`save.sh` 三处推送 bug + 反向验证，+611）。
+> 开着的 PR 增至 **9 个**。`origin/main` 仍停在 12:34:06，**已静止 40 分钟**。
+> `win-meta` 仍未响应（`bolt.go` 未提交已 53 分钟）。§2.2 的「零调用点」全量复扫结论见 §2.3。
 
 ---
 
@@ -62,10 +66,17 @@ origin/main 最后一次前进：12:34:06（PR #8）
 | #14 | `tm-vfs/quota` | +819/-26 | 配额可用空间按本共享用量算，修 TM 被「0 可用」阻断 | ⚠️ `vfs/local.go` |
 | #15 | `tm-vfs/quota-startup-check` | +1002/-26 | 启动自检 `quota_bytes` 是否已小于现有用量 | ⚠️ 含 #14；`config/validate.go` |
 | #16 | `audit/cred-scan` | +307 | v0.1.0 凭据泄漏审计报告 | ⚠️ `config/validate.go` |
+| #17 | `qa/save-sh-residual` | +611/-17 | `save.sh` 三处推送 bug（死分支 / rebase 目标 / worktree 锁）+ 反向验证 | 只碰 `scripts/`+`test/ci/`，零冲突 |
 
 ### 2.1 建议的合并顺序（**照此顺序不会产生冲突**）
 
 ```
+第 0 批（**建议插队最先合**）：
+    #17 qa/save-sh-residual
+    ↑ 它修的是全队的提交推送入口。当前 9 个 PR 同时开着，save.sh 的 retry 会拿 main
+      去 rebase 当前分支并改写历史——任何人跑到它都可能搅乱自己在评审中的 PR。
+      早一分钟合，少一分钟暴露。只碰 scripts/ 与 test/ci/，与所有人零冲突。
+
 第 1 批（互不相干，可任意顺序直接合）：
     #11 docs  →  #7 win-vfs  →  #10 tm-vfs/path  →  #12 tm-lease
     ↑ 这 4 个改的文件两两不相交，合完不需要任何人 rebase
@@ -106,6 +117,20 @@ CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两�
 > 附带更正：team-lead 任务描述里的「删除死变量 `reservedNames`」**不成立**——
 > 它在 `path.go:200` 有真实使用，不是死变量。
 
+### 2.3 全量复扫：「零产品调用点」只有 #7 一例
+
+对其余 6 个含 Go 改动的 PR，逐个提取 diff 里新增的 `func` 再查非测试调用点，
+命中 2 个疑似，**人工复核后两个都是假阳性**：
+
+| 疑似 | 实际 | 结论 |
+|---|---|---|
+| `tm-lease/oplock` :: `handleOplockBreak` | `oplock.go:9` 用 `register(wire.CommandOplockBreak, …)` 注册 | ✅ 已接线（策略模式分发，AGENTS.md P2，不是裸调用所以扫不到） |
+| `tm-vfs/metadata-mode` :: `recordPOSIXMetadata` | `local_handle.go:257` 有真实调用 | ✅ 已接线 |
+
+**所以「被架空的逻辑」不是本轮的系统性问题，只有 #7 一处。**
+记下扫描方法本身的盲区：**策略模式注册（`register(...)`）不是函数调用，
+机械扫描一定会误报**，任何命中都必须人工看一眼注册表。
+
 ---
 
 ## 3. 逐人盘点（第 2 轮）
@@ -117,7 +142,7 @@ CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两�
 | `tui-diag` | `tui-hang` | +135 | 13:00 | 6 min | 🔵 | ✅ 活跃 |
 | `win-vfs` | `platform-split` | +764 | 12:41 | 25 min | 🟡 #7 | ✅ 正常（在等评审） |
 | `win-meta` | `metadata-store` | +1611 | 12:20 | **46 min** | 🔵 | 🔴 **见 §4.1** |
-| `qa` | `acceptance-v020` | **0** | 12:34 | **32 min** | ⚪ | 🔴 **见 §4.2** |
+| `qa` | `save-sh-residual` | +611 | 13:11 | 3 min | 🟡 #17 | ✅ **已解除哑火（§4.2）** |
 | `tm-handle` | `durable` | +1677 | 12:40 | 26 min | 🔵 | 🔴 **见 §4.3（不在册）** |
 | `r-infra` | `test-infra` | +600 | 12:30 | 36 min | 🔵 | 🟠 **见 §4.4（不在册）** |
 | `tm-vfs` | 4 条分支 | +2575 | 12:47 | — | 🟡 #10/#13/#14/#15 | ✅ 产出最高，已交付 |
@@ -146,7 +171,28 @@ CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两�
 - **建议**：立刻 DM 要求 (a) 先 commit+push 手上的改动，(b) 无论 bbolt 核验完没完
   都先提 PR（标 draft 也行），把 1611 行送进评审队列。
 
-### 4.2 🔴 `qa`：`qa/acceptance-v020` 建了分支但 32 分钟零 commit
+### 4.2 ✅ `qa`：已解除（第 3 轮 13:11 交付 PR #17）
+
+原判定（第 2 轮 13:06）：`qa/acceptance-v020` 建了分支但 32 分钟零 commit。
+**13:11 qa 在 `qa/save-sh-residual` 上交付 PR #17**（+611/-17），内容超出原任务范围：
+
+- 删死代码分支（`BASE` 两支同值）——原任务项；
+- retry 的 rebase 目标 `main` → `origin/<当前分支>`——原任务项，且 qa 指出它是**双重错误**
+  （治不了病：push 被拒是因 `origin/$BRANCH` 有本地没有的提交，从 main 拉多少次都拿不到，
+  6 次重试全部空转；还添新病：改写本分支历史）；
+- **额外发现第三处、之前无人知晓的阻断性 bug：worktree 锁失效**；
+- 配套 `test/ci/testdata/save-legacy.sh`（+236）做**反向对照**——符合本看板 ✅ 档准入要求。
+
+> 记一笔：qa 的 `qa/acceptance-v020` 分支**至今没有远端**（`git branch -r` 无此分支），
+> 违反 AGENTS.md §7.3.1「worktree 建完立刻推空分支」。当前它 upstream 指向 `origin/main`，
+> 在这个状态下裸跑 `git push` 就是那个「静默推错目标」事故的土壤。已提醒。
+>
+> 讽刺的是 PR #17 修的正是同一类「打印已推送但一个 commit 都没出去」的静默失败。
+
+<details>
+<summary>第 2 轮原文（保留，用于复盘判定准确性）</summary>
+
+### 4.2-旧 🔴 `qa`：`qa/acceptance-v020` 建了分支但 32 分钟零 commit
 
 - 分支 tip 就是 `origin/main`，工作树干净，没有任何在写的痕迹。
 - team-lead 指派的任务是「`scripts/save.sh` 残留 bug（死代码分支 + retry 用 main rebase
@@ -154,6 +200,11 @@ CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两�
   去 rebase 当前分支并改写历史，在现在这个「8 个 PR 同时开着」的局面下，
   任何一个人跑到它都可能改写自己 PR 的历史，把评审中的 PR 搅乱。
 - **建议**：确认 qa 是否还活着；若活着，把这条 PR 的优先级提到第 1 批一起合。
+
+**结果：判定正确，处置有效**——DM 发出约 5 分钟后 qa 交付 PR #17，
+且确实按建议「单独切最小 PR、不与 acceptance 攒在一起」。
+
+</details>
 
 ### 4.3 🔴 `tm-handle`：1677 行 durable handle 无 PR，且该 agent 已不在册
 
