@@ -84,6 +84,16 @@ func loadCapture(t *testing.T) []captureFrame {
 	return frames
 }
 
+// readCaptureFrame 读单独一帧，供需要对某条具体真实报文做字段级断言的测试使用。
+func readCaptureFrame(t *testing.T, scenario, file string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(captureRoot, scenario, file))
+	if err != nil {
+		t.Fatalf("读 %s/%s: %v（fixture 应当随代码一起提交）", scenario, file, err)
+	}
+	return b
+}
+
 // TestCaptureFixturesSane 先确认 fixture 本身没坏：要么是 SMB2 报文，
 // 要么是 SMB3 加密报文（TRANSFORM，wire 层不负责解密）。
 func TestCaptureFixturesSane(t *testing.T) {
