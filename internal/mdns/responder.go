@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -89,10 +90,15 @@ type Responder struct {
 	conflictTimes []time.Time // 冲突时间戳，用于 §9 的限速判断
 
 	conflictCh chan struct{}
+	// readdressCh 在网卡地址发生变化时被触发，promote 一次重新宣告。
+	readdressCh chan struct{}
+
+	// known 暂存跨报文的已知答案（RFC 6762 §7.2）。
+	known *knownAnswerStash
 
 	cancel   context.CancelFunc
 	loopDone chan struct{}
-	sendWG   sync.WaitGroup // 延迟应答的 goroutine
+	sendWG   sync.WaitGroup // 延迟应答与网卡监视的 goroutine
 	stopOnce sync.Once
 	started  bool
 }
@@ -140,6 +146,12 @@ func (r *Responder) Start(ctx context.Context) error {
 	go c.run(runCtx, r.handlePacket)
 	go r.loop(runCtx)
 
+	r.sendWG.Add(1)
+	go func() {
+		defer r.sendWG.Done()
+		r.watchAddresses(runCtx)
+	}()
+
 	r.log.Info("mDNS: 已启动",
 		"instance", r.rs.instance, "host", r.rs.hostname(), "services", r.serviceTypes())
 	return nil
@@ -159,8 +171,12 @@ func (r *Responder) Stop() {
 		if r.conn == nil {
 			return
 		}
-		// 只有已经宣告过的名字才需要撤回。
-		if r.currentState() == stateResponding {
+		// 只有已经宣告出去的名字才需要撤回。
+		// 注意宣告阶段（stateAnnouncing）已经发过至少一次宣告，同样要撤回，
+		// 否则"刚起来就 Ctrl-C"会在邻居缓存里留下一个死服务好几分钟 ——
+		// 反复重启调试时这个残留特别烦人。
+		switch r.currentState() {
+		case stateAnnouncing, stateResponding:
 			r.sendGoodbye()
 		}
 		if r.cancel != nil {
@@ -211,13 +227,37 @@ func (r *Responder) loop(ctx context.Context) {
 		}
 
 		r.setState(stateResponding)
+		if !r.serveUntilConflict(ctx) {
+			return
+		}
+		r.renameAfterConflict()
+		if !sleepCtx(ctx, r.backoff()) {
+			return
+		}
+	}
+}
+
+// serveUntilConflict 停在应答状态，直到发生名字冲突（返回 true）
+// 或 responder 被停止（返回 false）。
+//
+// 期间如果网卡地址变了就重新宣告一轮：DHCP 续约、切换 Wi-Fi、
+// 容器网络重建之后，我们之前广播出去的 A/AAAA 已经指向一个不存在的地址，
+// 不重新宣告的话客户端要等 TTL（120 秒）过期才会重新发现。
+func (r *Responder) serveUntilConflict(ctx context.Context) bool {
+	for {
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-r.conflictCh:
-			r.renameAfterConflict()
-			if !sleepCtx(ctx, r.backoff()) {
-				return
+			return true
+		case <-r.readdressCh:
+			r.log.Info("mDNS: 网卡地址发生变化，重新宣告",
+				"host", r.rs.hostname())
+			if err := r.announce(ctx); err != nil {
+				if errors.Is(err, errConflict) {
+					return true
+				}
+				return false
 			}
 		}
 	}
@@ -371,6 +411,69 @@ func (r *Responder) sendGoodbye() {
 	r.log.Debug("mDNS: 已发送 goodbye（TTL=0）")
 }
 
+// ---------------------------------------------------------------- 网卡监视
+
+// addressPollInterval 是网卡地址变化的轮询周期。
+//
+// 用轮询而不是订阅内核事件（Linux 的 RTNETLINK、macOS 的 SCNetworkReachability、
+// Windows 的 NotifyAddrChange）：后者每个平台一套实现，且 Windows 上要走
+// syscall，跨平台成本远高于收益。地址变化不是高频事件，30 秒的发现延迟
+// 远小于记录 TTL（120 秒），够用。
+const addressPollInterval = 30 * time.Second
+
+// watchAddresses 轮询网卡地址，变化时通知主循环重新宣告。
+func (r *Responder) watchAddresses(ctx context.Context) {
+	last := addressFingerprint(r.conn.ifaces)
+
+	t := time.NewTicker(addressPollInterval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+
+		cur := addressFingerprint(r.conn.ifaces)
+		if cur == last {
+			continue
+		}
+		last = cur
+		select {
+		case r.readdressCh <- struct{}{}:
+		default: // 已经有一个未处理的通知，不必重复
+		}
+	}
+}
+
+// addressFingerprint 把这些网卡上会被宣告的地址压成一个可比较的字符串。
+//
+// 只看我们真正会写进 A/AAAA 的地址（interfaceIPs 的口径），
+// 这样 MTU、队列长度之类与 mDNS 无关的属性变化不会触发无谓的重新宣告。
+func addressFingerprint(ifaces []net.Interface) string {
+	var sb strings.Builder
+	for i := range ifaces {
+		ifi := &ifaces[i]
+		v4, v6 := interfaceIPs(ifi)
+		ips := make([]string, 0, len(v4)+len(v6))
+		for _, ip := range v4 {
+			ips = append(ips, ip.String())
+		}
+		for _, ip := range v6 {
+			ips = append(ips, ip.String())
+		}
+		// 内核返回的地址顺序没有保证，排序后再比较，避免顺序抖动误报变化。
+		sort.Strings(ips)
+
+		sb.WriteString(ifi.Name)
+		sb.WriteByte('=')
+		sb.WriteString(strings.Join(ips, ","))
+		sb.WriteByte(';')
+	}
+	return sb.String()
+}
+
 // ---------------------------------------------------------------- 记录集合
 
 // proposedRecords 是探测时放进 Authority 段的记录：只要正面记录，不含 NSEC。
@@ -456,15 +559,22 @@ func (r *Responder) handlePacket(p packet) {
 		return
 	}
 
+	// RFC 6762 §7.2：查询者的已知答案可能分散在多个报文里，后续报文
+	// 只有 Answer 段、没有 Question 段。先无条件暂存，等真正要应答时再合并。
+	r.known.add(p.src, m.Answers, time.Now())
+
 	// 查询报文里也可能夹带别人的 Authority（同时探测），先做仲裁。
 	if r.currentState() == stateProbing {
 		r.checkProbeTiebreak(m)
 		return
 	}
-	if r.currentState() != stateResponding {
-		return // 宣告阶段还没稳定，先不应答
+	// 探测一旦通过我们就拥有了这些名字（RFC 6762 §8.3），宣告阶段
+	// 也必须应答查询 —— 宣告要跨 1+2 秒，这几秒里装死会让客户端
+	// 在"刚启动就来浏览"的场景下白等一个完整的重试周期。
+	switch r.currentState() {
+	case stateAnnouncing, stateResponding:
+		r.answerQuery(p)
 	}
-	r.answerQuery(p)
 }
 
 // checkConflicts 检查对方的应答是否与我们宣告的记录冲突（RFC 6762 §9）。
@@ -611,48 +721,39 @@ func (r *Responder) answerQuery(p packet) {
 		return
 	}
 
-	// RFC 6762 §7.1 已知答案抑制：对方缓存里还很新鲜的记录就别再发了。
-	answers = suppressKnownAnswers(answers, p.msg.Answers)
-	if len(answers) == 0 {
-		return
-	}
+	mode := replyModeFor(p, shared)
+	delay := mode.delay()
 
-	additionals := r.additionalsFor(answers, pool)
-
-	// RFC 6762 §5.5：源端口不是 5353 的是"传统单播查询"，必须单播回应，
-	// 并且要带上原问题、复用原 ID、TTL 压到 10 秒以内（§6.7）。
-	legacy := p.src.Port != mdnsPort
-	// §5.4：QU 位要求单播回应。
-	unicast := legacy || anyUnicastQuestion(p.msg.Questions)
-
-	resp := &Message{Flags: FlagResponse | FlagAuthoritative}
-	if legacy {
-		resp.ID = p.msg.ID
-		resp.Questions = p.msg.Questions
-		answers = capTTL(answers, legacyTTL)
-		additionals = capTTL(additionals, legacyTTL)
-		// 传统客户端不认识 cache-flush 位，必须清掉（§6.7）。
-		answers = withoutCacheFlush(answers)
-		additionals = withoutCacheFlush(additionals)
-	}
-	resp.Answers = answers
-	resp.Additionals = additionals
-
-	delay := time.Duration(0)
-	if !unicast && (shared || len(p.msg.Questions) > 1) {
-		// §6：共享记录或多问题查询，随机延迟 20-120ms 错峰。
-		delay = sharedReplyDelayMin + rand.N(sharedReplyDelayMax-sharedReplyDelayMin)
-	}
-
+	// 已知答案抑制刻意放到**发送前**才做：带 TC 位的查询要等 400-500ms
+	// 收齐续包（RFC 6762 §7.2），这段时间里 r.known 还会继续进货，
+	// 提前算就白等了。
 	send := func() {
-		if unicast {
+		answers := suppressKnownAnswers(answers, r.known.get(p.src, time.Now()))
+		if len(answers) == 0 {
+			return
+		}
+		additionals := r.additionalsFor(answers, pool)
+
+		resp := &Message{Flags: FlagResponse | FlagAuthoritative}
+		if mode.legacy {
+			// §6.7：传统单播查询要复用原 ID、带上原问题，
+			// TTL 压到 10 秒以内，并清掉它读不懂的 cache-flush 位。
+			resp.ID = p.msg.ID
+			resp.Questions = p.msg.Questions
+			answers = withoutCacheFlush(capTTL(answers, legacyTTL))
+			additionals = withoutCacheFlush(capTTL(additionals, legacyTTL))
+		}
+		resp.Answers = answers
+		resp.Additionals = additionals
+
+		if mode.unicast {
 			r.conn.sendUnicast(resp, p.src, p.v6)
 			return
 		}
 		r.conn.sendMulticast(resp, p.ifIndex)
 	}
 
-	if delay == 0 {
+	if delay <= 0 {
 		send()
 		return
 	}
