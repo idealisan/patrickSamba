@@ -16,3 +16,4 @@
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
 - [CNB PR API 的调用方式与四个坑](reference_cnb_pr_api.md) — 合并须 PUT 非 POST、参数 merge_style 非 merge_method、commit_title 必填、GET/PUT 都要 Accept: application/json
 - [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — metadata_path 那条已修（跳过+平台形参+平台化判定函数三件套）；example.yaml 在 Windows 上仍跑不起来
+- [metadata 存储双实现冲突的定夺](project_metadata_store_consolidation.md) — vfs 与 internal/meta 撞同一文件/bucket 静默吐垃圾；定夺由 internal/meta 单一化（posix2 桶+迁移），并暴露 -tags metabolt 的 CI 假绿洞
