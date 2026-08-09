@@ -43,6 +43,12 @@ func ApplyDefaults(c *Config) {
 		c.Listen.Port = DefaultPort
 	}
 
+	// OS 能力抽象的三态开关（AGENTS.md §1.2 C9）。默认 auto：逐项探测，
+	// 能用原生就用原生，用不了自动落到本项目自带实现。
+	if c.FilesystemMode == "" {
+		c.FilesystemMode = DefaultFilesystemMode
+	}
+
 	for i := range c.Shares {
 		s := &c.Shares[i]
 		if s.Browseable == nil {
