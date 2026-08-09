@@ -52,11 +52,15 @@ func TestGenericStreamRoundTrip(t *testing.T) {
 
 	// macOS 真实会用的流名（Finder 的 Spotlight 注释）。
 	//
-	// 注意冒号写成 U+F03A 而不是裸 ':' —— 这不是为了绕过校验，
+	// 注意冒号写成 U+F022 而不是裸 ':' —— 这不是为了绕过校验，
 	// 而是**线上真实的样子**：macOS 把 NTFS 非法字符映射到 Unicode
-	// 私用区再发出来（vfs_fruit(8) 手册）。裸冒号在 SMB 流名里是
-	// 分隔符，客户端不可能发。
-	const stream = "com.apple.metadata\uF03AkMDItemFinderComment"
+	// 私用区再发出来。裸冒号在 SMB 流名里是分隔符，客户端不可能发。
+	//
+	// 冒号是 U+F022，**不是** U+F03A：映射表是紧凑分配的，不是
+	// 0xF000+字符（后者是老 SFM 方案）。出处 Samba
+	// source3/lib/string_replace.c:186 的 `0x3a:0xf022`。
+	// 用错这个字符，测试就测不到真实客户端会发的那个流名。
+	const stream = "com.apple.metadata\uF022kMDItemFinderComment"
 	payload := []byte("bplist00\x00\x01\x02hello finder")
 
 	h := openGeneric(t, fs, "doc.txt", stream, OpenAlways)
@@ -189,14 +193,27 @@ func TestGenericStreamNameLimits(t *testing.T) {
 		}
 	}
 
-	// 私用区字符**必须放行**：那是 macOS 表达「非法 NTFS 字符」的
-	// 正常方式，拒了就等于拒了 com.apple.metadata:* 这一整类流。
-	h2, _, err := fs.Open(&OpenRequest{
-		Path: "f", Stream: "a\uF03Ab", Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
-	})
-	if err != nil {
-		t.Errorf("私用区编码的流名应被接受，得到 %v", err)
-	} else {
+	// 私用区字符**必须全部放行**：那是 macOS 表达「非法 NTFS 字符」的
+	// 正常方式，拒掉任何一个就等于拒掉一整类真实存在的流名。
+	//
+	// 这里把 8 个非控制字符的映射逐个钉住（Samba
+	// source3/lib/string_replace.c:186 的 macos_string_replace_map），
+	// 防止后来者"加固"ValidateStreamName 时顺手把它们一起禁掉 ——
+	// 那会让 com.apple.metadata:* 这类流全线失效，而且现象是
+	// 「Finder 注释莫名其妙保存不了」，极难联想到流名校验。
+	pua := map[rune]byte{
+		'\uF020': '"', '\uF021': '*', '\uF022': ':', '\uF023': '<',
+		'\uF024': '>', '\uF025': '?', '\uF026': '\\', '\uF027': '|',
+	}
+	for r, orig := range pua {
+		name := "pua" + string(r) + "x"
+		h2, _, err := fs.Open(&OpenRequest{
+			Path: "f", Stream: name, Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+		})
+		if err != nil {
+			t.Errorf("私用区字符 U+%04X（原字符 %q）的流名被拒: %v", r, orig, err)
+			continue
+		}
 		_ = h2.Close()
 	}
 }
