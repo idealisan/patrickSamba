@@ -214,9 +214,49 @@ mknod: /tmp/fusedev: 不允许的操作                # ← 且造不出来（d
 | `wine` | ❌ 未装 | 见 §B |
 | `mount.cifs` | ❌ 未装，**且装了也跑不通** | 见 §A.4(3) |
 
-### A.6 QEMU（TCG 纯软件模拟）实测
+### A.6 QEMU TCG（纯软件模拟）：**能跑，但只够跑 Linux 客机**
 
-见本节末尾「§A.6 实测记录」。
+**【实测】** `apt-get install -y --no-install-recommends qemu-system-x86` 装得上
+（约 12 MB deb，10 秒装完），版本 **QEMU 10.0.11**。TCG 不需要 `/dev/kvm`、
+不需要 `CAP_SYS_ADMIN`，纯用户态跑，**在本容器里是可用的**。
+
+用 Alpine 3.21 virt ISO（66 MB）测启动到 login 提示符的耗时：
+
+```
+$ qemu-system-x86_64 -accel tcg -m 1024 -smp N -cdrom alpine.iso -nographic -display none
+accel=tcg smp=2 boot_to_login=34s
+accel=tcg smp=1 boot_to_login=22s
+```
+
+（日志里能看到 `Welcome to Alpine Linux 3.21` / `localhost login:`，确认真的起来了。）
+
+两点值得记下来：
+
+- **`-smp 2` 比 `-smp 1` 慢**（34s vs 22s）。TCG 下多核要做跨 vCPU 的内存序同步，
+  在只有 2 个物理核的宿主上是净亏。**跑 TCG 一律用 `-smp 1`。**
+- 同样的 Alpine virt ISO 在 KVM 上通常 2~3 秒起来 → **TCG 约慢 8~11 倍**。
+
+**【推断】** 按 8~11 倍外推到 Windows（**未实测，下面的数字不要当承诺**）：
+
+| 操作 | KVM 参考值 | TCG 外推 |
+|---|---|---|
+| Windows 10 安装 | ~20 分钟 | **3~7 小时** |
+| Windows 10 冷启动到桌面 | ~30 秒 | **5~15 分钟** |
+
+而且外推还偏乐观 —— 本容器只有 **2 核、约 2.8 GiB 可用内存**：
+Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要求 4 GiB + TPM 2.0，
+**内存这一关就过不去**。
+
+> **结论：本容器可以用 QEMU TCG 跑 Linux 客机，但跑 Windows 客机做 SMB 验证不现实。**
+> 若确实要用 TCG 跑 Windows，应当在一台内存 ≥ 16 GiB 的机器上做，并且只用于
+> **一次性录制**（装好后存成 qcow2 快照，之后每次从快照恢复，别每次重装）。
+>
+> **TCG 的真正用武之地是 Linux 客机**：需要一个"能 `mount -t cifs` 的干净内核"时，
+> 用 TCG 起一个 Alpine 客机，`-netdev user` 让客机通过 `10.0.2.2` 访问宿主上的
+> stupidsamba，就能绕开 §A.4(3) 的 user namespace 限制。
+> **【推断，未实测】** 这条路子在本容器里理论上可行（TCG 客机有自己的完整内核，
+> 不在宿主的 user namespace 里），但需要给 Alpine 做自动登录 + 自动执行脚本，
+> 属于后续可做的工作，本轮未验证。
 
 ---
 
