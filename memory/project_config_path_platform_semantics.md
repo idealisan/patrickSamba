@@ -34,6 +34,19 @@ Go 的 windows `IsAbs` 先取 `volumeNameLen`，为 0 直接返回 false，所�
 Go 标准库源码得出，容器里跑不了 windows 二进制。）这条属于 `share.path`，
 **不能**照 metadata_path 的办法「跳过校验」—— 那个路径必须在本机真实存在。
 
+### 2.1 调研结论（example.yaml 跨平台，尚未动手改产品代码）
+
+- **(a) 一份配置无法跨平台**：绝对路径在两个平台上**没有交集**——
+  `/srv/...` 在 Windows 不算绝对，`C:\...` 在 Linux 不算绝对，UNC（`\\host\share`）
+  同理。所以「一份 example.yaml 在两种 OS 上都跑得起来」在数学上不可能，
+  **必须提供两份示例**（如 `example.yaml` + `example-windows.yaml`），而非通用一份。
+- **(b) 报错时要提示改用对应示例文件**：校验 `share.path` 在异平台被判为非绝对时，
+  错误信息应指明「Windows 上请用 `example-windows.yaml`」之类，降低开箱即坏。
+- **(c) 只有 `metadata_path` 一例是「仅某平台使用却在所有平台硬校验」的 bug**：
+  逐字段过一遍确认，`shares[].path` / `log.file` 本就要在本机存在、`metadata_path`
+  是唯一「运行时声明忽略却全平台硬校验」的字段；其余配置字段无同形态问题。
+  判据是「仅某平台使用却在所有平台硬校验」即算 bug，已用 §1 三件套修掉唯一一例。
+
 **Why**：`configs/example.yaml` 是大多数人接触本项目的第一份文件，
 和历史上 `addresses: [0.0.0.0, "::"]` 是同一类「开箱即坏」事故。
 
