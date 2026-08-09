@@ -19,6 +19,10 @@ type Open struct {
 	Tree    *Tree
 	Session *Session
 
+	// Durable 非 nil 表示本句柄被授予了 durable 能力（tm-handle 的持久句柄）。
+	// 字段只占一行，与 tm-lease 的 Lease 指针互不干扰，合并零冲突。
+	Durable *DurableState
+
 	// Path 是相对共享根的路径（'/' 分隔，不以 '/' 开头，空串表示根）。
 	Path string
 	// Stream 是 alternate data stream 名，空串表示主数据流。
@@ -212,6 +216,11 @@ func (o *Open) close() {
 		return
 	}
 	o.closed = true
+	// 显式关闭一个 durable 句柄时，把它从「等待重连」表摘除，
+	// 否则它会一直占着登记表直到超时。Durable 为 nil 或未授予时是无害 no-op。
+	if o.Durable != nil && o.Durable.Granted {
+		durableRegistry.remove(o)
+	}
 	h := o.Handle
 	p := o.Pipe
 	o.Handle = nil
