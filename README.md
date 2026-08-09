@@ -67,11 +67,15 @@ shares:
 stupidsamba -config stupidsamba.yaml
 ```
 
-启动后日志会打印监听地址与协商到的方言范围，例如：
+启动后日志会打印监听地址与协商到的方言范围。上面这份最小配置没写
+`listen.addresses`，等于监听全部地址，实际输出是：
 
 ```
-SMB 服务已监听 addrs=127.0.0.1:445 dialects=2.0.2..3.1.1 shares="public"
+time=2026-08-09T12:28:25.777+08:00 level=INFO msg="SMB 服务已监听" addrs=[::]:445 dialects=2.0.2..3.1.1 shares=public
 ```
+
+（`addrs` 是双栈通配地址 `[::]`，IPv4 一并覆盖；显式写了 `listen.addresses` 时
+会逐个列出，如 `addrs="127.0.0.1:445, [::1]:445"`。）
 
 想先只校验配置、不真正起服务，用 `-check`：
 
