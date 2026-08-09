@@ -1,6 +1,9 @@
 package wire
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ---------------------------------------------------------------------------
 // IOCTL Request（MS-SMB2 §2.2.31）
@@ -515,6 +518,181 @@ func EncodeSetSparseInput(setSparse bool) []byte {
 		b[0] = 1
 	}
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// FSCTL_SRV_ENUMERATE_SNAPSHOTS / SRV_SNAPSHOT_ARRAY
+// （MS-SMB2 §2.2.32.2，处理规则 §3.3.5.15.1）
+//
+// 全部**小端**：
+//
+//	 0 NumberOfSnapShots(4)          该卷上的快照总数
+//	 4 NumberOfSnapShotsReturned(4)  本次返回的条数；装不下时为 0
+//	 8 SnapShotArraySize(4)          SnapShots 数组字节数；
+//	                                 装不下时为"全部装下所需字节数"
+//	12 SnapShots(变长)               UTF-16LE 的 @GMT 标签，
+//	                                 以 UNICODE NUL 分隔、两个 UNICODE NUL 结尾
+//
+// ── 关于"零快照时 SnapShots 到底几个字节"（这一点规范文本两可，已查实现定案）──
+//
+// 1. MS-SMB2 附录 A 注 <68>（§2.2.32.2）：
+//    "Windows-based SMB2 server will place 2 extra bytes set to zero in the
+//     SRV_SNAPSHOT_ARRAY response, if NumberOfSnapShotsReturned is zero."
+//    → Windows 服务端在 Returned=0 时补 **2** 个零字节（总长 14）。
+//
+// 2. Samba `vfswrap_fsctl` / FSCTL_GET_SHADOW_COPY_DATA
+//    （source3/modules/vfs_default.c，master 分支实测阅读）：
+//        labels_data_count = num_volumes * 2 * sizeof(SHADOW_COPY_LABEL) + 2;
+//        if (!labels) *out_len = 16; else *out_len = 12 + labels_data_count;
+//    → SnapShotArraySize **总是** n*50 + 2，零快照即 2，与注 <68> 一致；
+//      而 MaxOutputResponse == 16 时输出**补齐到 16 字节**。
+//
+// 3. 但 Samba **客户端**（smbclient 走的
+//    source3/libsmb/cli_smb2_fnum.c:cli_smb2_shadow_copy_data_fnum_recv）
+//    硬性要求 `out_output_buffer.length >= 16`，否则回
+//    NT_STATUS_INVALID_NETWORK_RESPONSE。smbclient 的 `allinfo` 用
+//    get_names=true（MaxOutputResponse = CLI_BUFFER_SIZE = 64K），
+//    所以只回 14 字节会被它判为坏响应 —— 这是 Samba 自身服务端/客户端的不一致。
+//
+// 结论（按 AGENTS.md §9「以真实客户端行为为准」）：
+//   **Encode 输出最少 16 字节**（12 头 + 4 个零字节），
+//   SnapShotArraySize 仍按 n*50+2 上报（零快照 = 2）。
+//   16 字节是 Windows 14 字节形式的超集，smbclient 与 Linux cifs 都能接受。
+//
+// 每个标签占**固定 50 字节槽位**：@GMT-YYYY.MM.DD-HH.MM.SS 共 24 字符
+// （48 字节）+ 1 个 UTF-16 NUL。Samba 客户端就是按 50 字节定长步进解析的
+// （`src = data + 12 + i * 2 * sizeof(SHADOW_COPY_LABEL)`），
+// 与规范「NUL 分隔」的说法在 @GMT 定长格式下完全等价。
+// ---------------------------------------------------------------------------
+
+const (
+	// SrvSnapshotArrayHeaderSize 是 SRV_SNAPSHOT_ARRAY 的固定头长度。
+	SrvSnapshotArrayHeaderSize = 12
+
+	// SrvSnapshotArrayMinSize 是本实现输出的最小长度，见上方第 3 点。
+	// 也正是 §3.3.5.15.1 里 MaxOutputResponse 的下限。
+	SrvSnapshotArrayMinSize = 16
+
+	// GMTTokenLen 是 @GMT-YYYY.MM.DD-HH.MM.SS 的字符数（MS-SMB2 §2.2.32.2）。
+	GMTTokenLen = 24
+
+	// SnapshotLabelSize 是每个标签在 SnapShots 数组里占的字节数：
+	// 24 个字符 + 1 个 UTF-16 NUL，共 50 字节。
+	SnapshotLabelSize = (GMTTokenLen + 1) * 2
+
+	// snapshotArrayTerminator 是数组末尾额外的那个 UTF-16 NUL。
+	snapshotArrayTerminator = 2
+)
+
+// SrvSnapshotArraySize 返回装下 n 个 @GMT 标签所需的 SnapShots 数组字节数
+// （即 SnapShotArraySize 字段应填的值）。n = 0 时为 2，与 Windows 注 <68>
+// 和 Samba 的 labels_data_count 一致。
+func SrvSnapshotArraySize(n int) uint32 {
+	return uint32(n)*SnapshotLabelSize + snapshotArrayTerminator
+}
+
+// SrvSnapshotArray 是 FSCTL_SRV_ENUMERATE_SNAPSHOTS 的输出（MS-SMB2 §2.2.32.2）。
+//
+// NumberOfSnapShotsReturned 不单独存字段，它恒等于 len(SnapShots)。
+type SrvSnapshotArray struct {
+	// NumberOfSnapShots 是卷上的快照总数（可以大于 len(SnapShots)）。
+	NumberOfSnapShots uint32
+	// SnapShotArraySize 是「装下全部标签所需的字节数」，用 SrvSnapshotArraySize 算。
+	SnapShotArraySize uint32
+	// SnapShots 是本次真正返回的 @GMT 标签。为空表示只回计数（装不下或没有快照）。
+	SnapShots []string
+}
+
+// NewSrvSnapshotArray 按 MS-SMB2 §3.3.5.15.1 组装应答。
+//
+// all 是 Share.SnapshotList 里的全部 @GMT 标签，maxOutput 是请求的
+// MaxOutputResponse（调用方需先按 §3.3.5.15.1 校验它 >= 16，
+// 否则应回 STATUS_INVALID_PARAMETER，本函数不做这个判断）。
+//
+// 没有快照、或全部标签装不进 maxOutput 时：Returned = 0、SnapShots 为空，
+// 但 SnapShotArraySize 仍是「全部装下所需的字节数」，好让客户端加大缓冲重试。
+//
+// 本项目不做卷影副本，命令层直接 NewSrvSnapshotArray(nil, maxOutput) 即可，
+// 回「0 个快照」而不是 STATUS_INVALID_DEVICE_REQUEST。
+func NewSrvSnapshotArray(all []string, maxOutput uint32) SrvSnapshotArray {
+	a := SrvSnapshotArray{
+		NumberOfSnapShots: uint32(len(all)),
+		SnapShotArraySize: SrvSnapshotArraySize(len(all)),
+	}
+	need := uint64(SrvSnapshotArrayHeaderSize) + uint64(a.SnapShotArraySize)
+	if len(all) > 0 && need <= uint64(maxOutput) {
+		a.SnapShots = all
+	}
+	return a
+}
+
+// Encode 编码 SRV_SNAPSHOT_ARRAY。
+//
+// 长度 = 12 + len(SnapShots)*50 + 2，且**不小于 16**（见类型上方注释第 3 点）。
+// 每个标签写进自己的 50 字节槽位，槽位剩余字节保持 0，天然构成 NUL 结尾；
+// 数组末尾那 2 个零字节也由 make 的零值提供。
+//
+// 超过 24 个字符的标签会被截到 24 字符（槽位的 NUL 位不可侵占）。
+// 合法的 @GMT 标签恒为 24 字符，只有调用方传了非法值才会触发。
+func (a *SrvSnapshotArray) Encode() []byte {
+	size := SrvSnapshotArrayHeaderSize + len(a.SnapShots)*SnapshotLabelSize
+	if len(a.SnapShots) > 0 {
+		size += snapshotArrayTerminator
+	}
+	if size < SrvSnapshotArrayMinSize {
+		size = SrvSnapshotArrayMinSize
+	}
+	b := make([]byte, size)
+	le.PutUint32(b[0:], a.NumberOfSnapShots)
+	le.PutUint32(b[4:], uint32(len(a.SnapShots)))
+	le.PutUint32(b[8:], a.SnapShotArraySize)
+
+	off := SrvSnapshotArrayHeaderSize
+	for _, s := range a.SnapShots {
+		label := EncodeUTF16LE(s)
+		if len(label) > SnapshotLabelSize-2 {
+			label = label[:SnapshotLabelSize-2]
+		}
+		copy(b[off:], label)
+		off += SnapshotLabelSize
+	}
+	return b
+}
+
+// ParseSrvSnapshotArray 解析 SRV_SNAPSHOT_ARRAY（供测试与 Go 客户端使用）。
+//
+// 校验与 Samba 客户端（cli_smb2_shadow_copy_data_fnum_recv）一致：
+// 总长至少 16 字节，且 Returned 条标签必须真的在缓冲区内。
+func ParseSrvSnapshotArray(data []byte) (*SrvSnapshotArray, error) {
+	if err := need(data, SrvSnapshotArrayMinSize); err != nil {
+		return nil, fmt.Errorf("SRV_SNAPSHOT_ARRAY: %w", err)
+	}
+	a := &SrvSnapshotArray{
+		NumberOfSnapShots: le.Uint32(data[0:]),
+		SnapShotArraySize: le.Uint32(data[8:]),
+	}
+	returned := le.Uint32(data[4:])
+	if returned == 0 {
+		return a, nil
+	}
+	body, err := sliceAt(data, SrvSnapshotArrayHeaderSize, uint64(returned)*SnapshotLabelSize)
+	if err != nil {
+		return nil, fmt.Errorf("SRV_SNAPSHOT_ARRAY SnapShots: %w", err)
+	}
+	a.SnapShots = make([]string, returned)
+	for i := range a.SnapShots {
+		slot := body[i*SnapshotLabelSize : (i+1)*SnapshotLabelSize]
+		s, err := DecodeUTF16LE(slot)
+		if err != nil {
+			return nil, fmt.Errorf("SRV_SNAPSHOT_ARRAY SnapShots[%d]: %w", i, err)
+		}
+		// 槽位用 NUL 补齐，取到第一个 NUL 为止。
+		if k := strings.IndexByte(s, 0); k >= 0 {
+			s = s[:k]
+		}
+		a.SnapShots[i] = s
+	}
+	return a, nil
 }
 
 // ---------------------------------------------------------------------------

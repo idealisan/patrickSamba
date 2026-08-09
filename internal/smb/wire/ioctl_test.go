@@ -388,3 +388,113 @@ func TestAllocatedRangesArray(t *testing.T) {
 		t.Error("offset+length 溢出应报错")
 	}
 }
+
+// TestSrvSnapshotArrayEmpty 锁定「零快照」应答的逐字节形态。
+//
+// 依据（见 ioctl.go 该结构上方注释）：
+//   - MS-SMB2 附录 A 注 <68>：Returned=0 时 Windows 补零字节；
+//   - Samba vfs_default.c 的 labels_data_count = n*50 + 2 → 零快照即 2；
+//   - Samba 客户端 cli_smb2_shadow_copy_data_fnum_recv 硬性要求总长 >= 16。
+func TestSrvSnapshotArrayEmpty(t *testing.T) {
+	a := NewSrvSnapshotArray(nil, 65536)
+	if a.NumberOfSnapShots != 0 || len(a.SnapShots) != 0 {
+		t.Fatalf("零快照应为空: %+v", a)
+	}
+	if a.SnapShotArraySize != 2 {
+		t.Errorf("SnapShotArraySize = %d, 期望 2（Samba labels_data_count = 0*50+2）", a.SnapShotArraySize)
+	}
+
+	golden := []byte{
+		0x00, 0x00, 0x00, 0x00, // NumberOfSnapShots = 0
+		0x00, 0x00, 0x00, 0x00, // NumberOfSnapShotsReturned = 0
+		0x02, 0x00, 0x00, 0x00, // SnapShotArraySize = 2
+		0x00, 0x00, 0x00, 0x00, // 补齐到 16 字节（客户端下限）
+	}
+	got := a.Encode()
+	if !bytes.Equal(got, golden) {
+		t.Errorf("Encode = % X, 期望 % X", got, golden)
+	}
+	if len(got) < SrvSnapshotArrayMinSize {
+		t.Errorf("长度 %d < %d，smbclient 会回 INVALID_NETWORK_RESPONSE", len(got), SrvSnapshotArrayMinSize)
+	}
+	// Samba 客户端的两条校验：SnapShotArraySize+12 不得超出实际长度。
+	if int(a.SnapShotArraySize)+SrvSnapshotArrayHeaderSize > len(got) {
+		t.Errorf("dlength+12 = %d 超出缓冲 %d", a.SnapShotArraySize+SrvSnapshotArrayHeaderSize, len(got))
+	}
+
+	back, err := ParseSrvSnapshotArray(got)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if back.NumberOfSnapShots != 0 || back.SnapShotArraySize != 2 || back.SnapShots != nil {
+		t.Errorf("回解析不一致: %+v", back)
+	}
+}
+
+func TestSrvSnapshotArrayRoundTrip(t *testing.T) {
+	all := []string{"@GMT-2024.01.02-03.04.05", "@GMT-2025.06.07-08.09.10"}
+	for _, s := range all {
+		if len(s) != GMTTokenLen {
+			t.Fatalf("@GMT 标签 %q 应为 %d 字符", s, GMTTokenLen)
+		}
+	}
+
+	a := NewSrvSnapshotArray(all, 65536)
+	if got := a.SnapShotArraySize; got != 2*SnapshotLabelSize+2 {
+		t.Errorf("SnapShotArraySize = %d, 期望 %d", got, 2*SnapshotLabelSize+2)
+	}
+	b := a.Encode()
+	want := SrvSnapshotArrayHeaderSize + 2*SnapshotLabelSize + 2
+	if len(b) != want {
+		t.Fatalf("长度 = %d, 期望 %d", len(b), want)
+	}
+	if got := le.Uint32(b[4:]); got != 2 {
+		t.Errorf("NumberOfSnapShotsReturned = %d, 期望 2", got)
+	}
+	// 每个标签占定长 50 字节槽位：48 字节正文 + 2 字节 NUL。
+	for i := range all {
+		off := SrvSnapshotArrayHeaderSize + i*SnapshotLabelSize
+		if !bytes.Equal(b[off:off+48], EncodeUTF16LE(all[i])) {
+			t.Errorf("标签 %d 正文不符", i)
+		}
+		if b[off+48] != 0 || b[off+49] != 0 {
+			t.Errorf("标签 %d 槽位末尾应为 UTF-16 NUL", i)
+		}
+	}
+	// 末尾两个 UNICODE NUL 终止符。
+	if b[len(b)-2] != 0 || b[len(b)-1] != 0 {
+		t.Error("数组应以两个 UNICODE NUL 结尾")
+	}
+
+	back, err := ParseSrvSnapshotArray(b)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if back.NumberOfSnapShots != 2 || len(back.SnapShots) != 2 {
+		t.Fatalf("回解析计数不符: %+v", back)
+	}
+	for i := range all {
+		if back.SnapShots[i] != all[i] {
+			t.Errorf("SnapShots[%d] = %q, 期望 %q", i, back.SnapShots[i], all[i])
+		}
+	}
+
+	// 装不下时按 §3.3.5.15.1：Returned=0，但 ArraySize 仍报所需字节数。
+	small := NewSrvSnapshotArray(all, 16)
+	if len(small.SnapShots) != 0 {
+		t.Error("装不下时不应返回标签")
+	}
+	if small.NumberOfSnapShots != 2 || small.SnapShotArraySize != 2*SnapshotLabelSize+2 {
+		t.Errorf("装不下时应仍报总数与所需字节数: %+v", small)
+	}
+	if got := small.Encode(); len(got) != SrvSnapshotArrayMinSize {
+		t.Errorf("装不下时长度 = %d, 期望 %d", len(got), SrvSnapshotArrayMinSize)
+	}
+
+	// 截断的输入不得越界读。
+	for n := 0; n < len(b); n++ {
+		if _, err := ParseSrvSnapshotArray(b[:n]); err == nil {
+			t.Fatalf("截断到 %d 应报错", n)
+		}
+	}
+}
