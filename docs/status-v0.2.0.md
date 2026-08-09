@@ -4,12 +4,15 @@
 > **本文件的判断只采信客观证据**：分支上的 commit、已合并的 PR、可复现的实测记录。
 > agent 的自我汇报不作为进度依据。
 >
-> 最近盘点：**2026-08-09 06:50Z（第 12 轮 · 实测复现 CI 全链，查明 `main` 红灯有两道而非一道）**
-> 上轮：第 11 轮（拍板 posix.v2 / CI 归属）、13:22（第 4 轮）、13:14（第 3 轮）、13:06（第 2 轮）、12:15（第 1 轮 · 基线）
-> 本期核对基线：`origin/main` = `4a1bee2`（第 11 轮基线 `1acae3f` 之后又前进 1 个提交）
+> 最近盘点：**2026-08-09 07:20Z（第 13 轮 · 全量盘点 main/PR/分支/孤儿，`main` 转绿、#26 为唯一阻塞）**
+> 上轮：第 12 轮（实测复现 CI 全链，查明 `main` 红灯有两道）、第 11 轮（拍板 posix.v2 / CI 归属）、13:22（第 4 轮）、13:14（第 3 轮）、13:06（第 2 轮）、12:15（第 1 轮 · 基线）
+> 本期核对基线：`origin/main` = `0d60c68`（`push` CI = `success`，绿；相对第 12 轮 `4a1bee2` 前进 22 个提交）
 >
 > **第 12 轮头条**：合并 fix-ci 的 PR #35 **不足以**让 `main` 变绿——它后面还压着一个
 > 真实的产品级 data race，而修它的代码正未提交地躺在 `qa-proto` 的磁盘上。详见 §12。
+>
+> **✅ 该头条已闭环（见第 13 轮）**：#35 与 qa-proto 的 R12 修复（含 data race，PR #40）均已合入，
+> `origin/main` 的 `push` CI 现 = `success`（绿）。第 12 轮「两道红灯」是合并顺序未完成的瞬时态，非结构性故障。
 
 ---
 
@@ -903,4 +906,124 @@ qa-proto 修好了 5 个根因（归属校验 / data race / 超时关句柄 / �
 
 AGENTS.md §7.1 原话已经预警过这件事：「随着 `internal/smb/command` 变大，
 该目录内部要**按文件再切分**，否则三个 agent 会互相覆盖。」本轮就是它的又一次应验。
+
+---
+
+## 第 13 轮：**`main` 已转绿，第 12 轮「两道红灯」预测闭环**（07:20Z 起）
+
+> 最近盘点：**2026-08-09 07:20Z（第 13 轮 · 全量盘点 main / PR / 分支 / 孤儿）**
+> 上轮：第 12 轮（实测复现 CI 全链，查明 `main` 红灯有两道）
+> 本期核对基线：`origin/main` = **`0d60c68`**（`push` 事件 CI = **`success`**，绿）
+> 第 12 轮基线 `4a1bee2` 之后 `main` 又前进 **22 个提交**。
+
+### 13.1 头条：第 12 轮的头号顾虑已消散
+
+第 12 轮我的核心判断是「合并 fix-ci 的 #35 **不足以**让 `main` 变绿，后面还压着一个真实 data race」。
+实测结论现在被实践推翻且方向变好：
+
+- **#35 已合入**（`aae12b2` Merge PR #35）；
+- **qa-proto 的 R12 修复（6 个 durable 缺陷，含那个 data race）已合入**（`0d60c68` Merge PR #40）；
+- `origin/main` 的 `push` 事件 CI = **`success`**。
+
+**`main` 现在是绿的。** 第 12 轮「两道红灯」只是合并顺序未完成的瞬时态，不是结构性故障。
+原 §12 建议的合并顺序（先 #35 → qa-proto rebase 取自己侧 → 合入恢复绿）已按建议发生，结论成立。
+
+### 13.2 自第 12 轮起合入的 PR（共 7 个，主干高速前进）
+
+| PR | 分支 | 主题 | 核实 |
+|---|---|---|---|
+| #31 | win-vfs/open-seam | vfs: 收口宿主文件打开点到 openHostFile 接缝 | ✅ tip 已是 main 祖先 |
+| #33 | win-meta/validate-slash-source | config: isAbsWindowsPath 委托 internal/vfs 唯一真源 | ✅ 同上 |
+| #35 | fix-ci/qadefect-tag | ci: 注册 qadefect build tag 进 check-test-compile 白名单 | ✅ 同上 |
+| #36 | oscap-rules/c9-agents-md | docs: 新增 C9 操作系统边界约束，改写 P7 为 native/builtin 双适配器 | ✅ 同上 |
+| #37 | oscap-gate/c9-constraint | ci: 新增 C9 门禁（禁挂载与命名空间机制）+ 反向对照 | ✅ 同上 |
+| #40 | qa-proto/durable-fix | server: 修复 durable handle 6 个缺陷（R12 / 含 data race） | ✅ 同上 |
+| #41 | fix-ci/c9-gate-name | ci: .cnb.yml 关卡名补上 C9 | ✅ 同上（fix-ci/c9-gate-name 现已 +0，并入 main） |
+
+> 这 7 个 PR 在 round-12 盘点时或处于「开但未合」或尚未出现；现在全部合入。
+> **round-12 的 D-新2（先合 #35）已自然闭环。**
+
+### 13.3 当前开着的 PR（仅 3 个）
+
+| PR | 分支 | 主题 | 状态 | 说明 |
+|---|---|---|---|---|
+| #38 | qa-verify/e2e-ci | test: 修正集成测试假故障 + 修掉验收脚本里说谎的成功信息 | **mergeable** | 见 §13.6 关注点 |
+| #34 | srv-share/share-access | server: 实现 SMB ShareAccess 共享模式冲突判定 | **mergeable** | 可直接合 |
+| #26 | win-meta/metadata-store | windows: MetadataStore 旁路存储（P7） | **⚠️ conflict** | 唯一阻塞项，见 §13.4 |
+
+> 开 PR 数从 round-12 的 8 个降到 3 个，且下降**全部来自正常合入**（#31/#33/#36/#37 经核实 tip 已是 main 祖先），**不是丢工作**。这正是 round-12 §12.11「数量减少≠成果丢失」纪律的正面印证。
+
+### 13.4 唯一阻塞项：#26 冲突——且是**低工作量**冲突
+
+`win-meta/metadata-store` 从旧 `main`（`1acae3f`，83 分钟前）切出，期间 main 落了 22 个提交。
+与当前 main 做三路合并，冲突文件**只有 3 个，且全是共享的配置/记忆文件，不含 win-meta 的功能代码**：
+
+| 冲突文件 | 为何冲突 | 建议处置 |
+|---|---|---|
+| `.cnb.yml` | main 经 #37/#41 加了 C9 关卡；win-meta 也动了它 | **取 main 版**（C9 门禁是主线共识） |
+| `memory/MEMORY.md` | 两边都往索引加指针 | **取 main 版**后由 win-meta 补自己那行 |
+| `test/ci/check-test-compile.sh` | main 经 #35/#37 注册了 qadefect / C9 反向对照 | **取 main 版** |
+
+**关键**：win-meta 的真实功能代码 `internal/meta/{store,bolt,noop}.go(+_test)`、`ORIGIN.md`、`THIRD_PARTY.md`
+在合并里是「仅 win-meta 侧改动」，**不与 main 冲突**。所以这不是功能冲突，只是 3 个共享文件被 main 的 CI/记忆 PR 抢改了。
+
+**建议动作（给 win-meta owner，疑似 `win-backend`）**：
+`git pull --rebase origin main` → 三处冲突全选 `ours` 之外的「main 版」（即 `git checkout --theirs` 那 3 个文件）→ 保留 `internal/meta/*` → 重新 push → PR 转 `mergeable`。预计 < 10 分钟。
+
+### 13.5 无主/无 PR 但在写的分支：全部「活跃」，无停滞
+
+以下分支领先 main 但**未开 PR**，逐一核对最后提交时间（全部在 83 分钟内），**没有停滞分支**：
+
+| 分支 | 领先 | 最后提交 | 主题 | 判读 |
+|---|---|---|---|---|
+| win-backend/symlink-gap | +3 | 5 分钟前 | vfs: 链接逃逸判据平台化（堵 Windows junction 末级逃逸） | 进行中 |
+| tm-dev/timemachine | +2 | 3 分钟前 | docs: v0.2.0 Time Machine 缺口清单 | 进行中 |
+| rel-v010/cnb-image | +4 | 69 分钟前 | docs: README 增加 CNB 制品库拉取镜像小节 | 进行中（发布物） |
+| qa-verify/negative-matrix | +3 | 8 分钟前 | test: 修掉 acceptance.sh 说谎的成功信息 + 探针残留 | 进行中（见 §13.6） |
+| oscap-audit/capabilities-doc | +2 | 34 秒前 | docs: OS 能力审计 §2.8 反直觉结论 | 进行中 |
+| rel-docker/image | +1 | 76 分钟前 | docker: scratch + COPY-only 多架构 Dockerfile | 进行中（发布物） |
+| qa-vfs/verify | +2 | 69 分钟前 | test: 变异测试全量成绩（39 条 38 杀） | 进行中 |
+| qa-e2e/ci | +2 | 83 分钟前 | test: 失败对照 reverse-control.sh，6 变异全抓 | **孤儿抢救中**（见 §13.7） |
+| win-vfs/openhost-seam | +1 | 79 分钟前 | vfs: 抽出 openHostFile 接缝（build tag 分裂） | 进行中 |
+| win-meta/is-windows-slash | +1 | 71 分钟前 | config: isWindowsSlash 委托 vfs（单点真源，PR #27） | 进行中 |
+| pm/status | +7 | — | 本看板 | 我 |
+
+> 与 round-12 那个「无主 1500 行」的告警不同，本轮**所有无 PR 分支都有分钟级活跃度**。
+> 这些分支没开 PR 是因为 agent 仍在做（合 §7.2「尽快提交尽快推送，PR 待就绪」），**不是卡住**。
+> PM 把它们列为「观察」，不列为「阻塞」。
+
+### 13.6 关注点：qa-verify 同时有两个分支，需澄清 PR 意图
+
+`qa-verify` 当前有两条领先分支：
+- `qa-verify/e2e-ci`（+3，**已开 PR #38**）—— 修集成测试假故障 + 验收脚本说谎成功信息；
+- `qa-verify/negative-matrix`（+3，未开 PR）—— 修 acceptance.sh 说谎成功信息 + 探针残留级联。
+
+两者主题高度重叠（都动 acceptance.sh 的「说谎成功」）。**风险提示**：若两条都开 PR 且都含对 `acceptance.sh` 的修改，合入顺序不当会互冲突。
+**建议**：qa-verify 明确哪条进 #38、哪条后续；或将 `negative-matrix` 的内容并入 `e2e-ci` 再统一开 PR，避免双线改同一文件。已发消息给 qa-verify。
+
+### 13.7 round-12 孤儿项 D-新1：qa-e2e 孤儿抢救——**进行中，工作未丢**
+
+round-12 担心的 `qa-e2e/ci` 938 行冒烟套件（`ad27691`）并未丢失：
+- 当前 `qa-e2e/ci` tip 已改写为 `414bdf7`（三客户端端到端冒烟套件 `test/e2e/smoke.sh` + 变异生成器）、`3ff7cd8`（失败对照 `reverse-control.sh`，6 个变异全抓）；
+- 旧 `ad27691`/`265bcaf` 被这两条干净提交**取代**（内容实质保留，历史变整洁）；
+- 接管者确为 qa-verify（与 round-12 建议一致）。
+
+**状态**：分支级抢救完成、工作保全；但尚未进 main（领先 +2，无 PR）。
+**待办**：qa-verify 给 `qa-e2e/ci` 开 PR（或并入 #38），把这份冒烟套件落进主干。
+
+### 13.8 待 team-lead 拍板 / 跟踪清单
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| D-新2（先合 #35） | ✅ 闭环 | #35 + #40 已合，main 绿 |
+| R12 data race | ✅ 闭环 | 随 #40 合入 main |
+| D-新1（qa-e2e 孤儿） | 🟡 进行中 | 分支级保全完成，待开 PR 落 main |
+| D-新6（#35 留 `TestQADefectDurableReconnectRebindsTree` 在 qadefect tag 后，与你此前点名回退的做法抵触） | ⏳ 仍待你复核 | 无新进展，#35 已合但口径未改；若维持现状，需你明确「此条可留在 tag 后」 |
+| #26 冲突 | ⚠️ 阻塞 | 低工作量，等 win-meta owner rebase（见 §13.4） |
+| qa-verify 双分支 | 🟡 关注 | 见 §13.6，防 acceptance.sh 双线冲突 |
+
+### 13.9 一句话结论
+
+**主干健康、进度高速、无停滞分支。唯一真正阻塞是 #26 的 3 文件低工作量冲突（等 win-meta owner 处理）；
+唯一需你拍板的是 D-新6（#35 的 tag 口径）。** 其余（孤儿抢救、qa-verify 双分支）均在 agent 手上正常推进。
 
