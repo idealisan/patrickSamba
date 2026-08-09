@@ -33,6 +33,7 @@ import (
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
 	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
+	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 )
 
@@ -191,8 +192,8 @@ func (c *rawClient) sessionSetup() error {
 	if err != nil {
 		return err
 	}
-	if hdr1.Status != 0 { // 期望 STATUS_MORE_PROCESSING_REQUIRED
-		return fmt.Errorf("session setup round1 status = %#x", hdr1.Status)
+	if status.Status(hdr1.Status) != status.MoreProcessingRequired { // 轮次 1 必须是 MORE_PROCESSING_REQUIRED
+		return fmt.Errorf("session setup round1 status = %#x, 期望 MORE_PROCESSING_REQUIRED", hdr1.Status)
 	}
 	ssr1, err := wire.ParseSessionSetupResponse(resp1)
 	if err != nil {
