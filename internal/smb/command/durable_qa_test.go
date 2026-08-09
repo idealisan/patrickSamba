@@ -539,6 +539,57 @@ func TestQADurableEvictionRequiresAuthorization(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 9. persistent 位应降级而非打死 CREATE（原 durable_defect_test.go，已修）
+// ---------------------------------------------------------------------------
+
+// TestQADurablePersistentFlagDegrades
+//
+// 原缺陷：DH2Q 里带 SMB2_DHANDLE_FLAG_PERSISTENT 时直接
+// return STATUS_NOT_SUPPORTED，把整个 CREATE 打掉 —— 客户端顺手带上这个位
+// 就连文件都打不开。
+//
+// 正确行为（§3.3.5.9.12，且经 Samba smb2_create.c L1481-1503/L1988 交叉验证）：
+// 该位只是条件升级请求，条件不满足就**忽略它**，继续走普通 durable v2 授予。
+// 这条分支在规范里没有失败出口。
+//
+// 本用例走 qaAddOpen 的真实 FileId 分配路径（与 create_context_durable_test.go
+// 里手工构造 Open 的那条互为补充）。判据可证伪：把那句 return 加回去即变红。
+func TestQADurablePersistentFlagDegrades(t *testing.T) {
+	resetDurable()
+	conn := NewConn(&Settings{}, "test", "test")
+	ctx, s, tree := qaSession(t, conn, 1, "alice", "share")
+	open := qaAddOpen(t, s, tree, "f.txt", &fakeHandle{})
+
+	req := &wire.CreateRequest{
+		RequestedOplockLevel: wire.OplockLevelBatch,
+		Contexts: []wire.CreateContext{{
+			Name: wire.CreateContextDH2Q,
+			Data: (&wire.DurableRequestV2{Timeout: 10000, Flags: wire.DurableHandlePersistent}).Encode(),
+		}},
+	}
+	h := &durableHandler{req: req}
+	if err := h.Parse(ctx, wire.CreateContextDH2Q, req.Contexts[0].Data); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := h.Registered(ctx, open); err != nil {
+		t.Fatalf("persistent 位应降级为普通 durable 而非让 CREATE 失败，实得 %v", err)
+	}
+	if open.Durable == nil || !open.Durable.Granted {
+		t.Fatal("降级后应授予普通 durable v2")
+	}
+
+	// 降级出来的必须是**真能用**的 durable，不是一个空壳：断连后可重连。
+	durableRegistry.disconnect(open)
+	conn2 := NewConn(&Settings{}, "test", "test")
+	_, s2, tree2 := qaSession(t, conn2, 1, "alice", "share")
+	intent := &wire.DurableIntent{ReconnectV2: &wire.DurableReconnectV2{
+		FileID: wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile}}}
+	if _, st := durableRegistry.reconnect(s2, tree2, intent); st != status.Success {
+		t.Errorf("降级授予的 durable 无法重连：%v", st)
+	}
+}
+
 // closedForTest 暴露 Session.closed 供本文件断言（只读，不改产品语义）。
 func (s *Session) closedForTest() bool {
 	s.mu.RLock()

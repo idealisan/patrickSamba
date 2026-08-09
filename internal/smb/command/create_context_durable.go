@@ -1,7 +1,6 @@
 package command
 
 import (
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
@@ -48,9 +47,9 @@ func (h *durableHandler) Parse(_ *Context, name string, data []byte) error {
 
 // Registered 在句柄登记后进执行授予判定（此时能拿到完整 *Open）。
 //
-// 顺序：先拒 persistent（本服务端无 CA 共享，永远不该授予）→ 再判前提
-// （§3.3.5.9.6）→ 满足才真正授予并登记进 durableRegistry。前提不满足时
-// **诚实不授予**（也不回响应 context），绝不伪造一个 dead handle。
+// 顺序：判前提（§3.3.5.9.6）→ 满足才真正授予并登记进 durableRegistry。
+// 前提不满足时**诚实不授予**（也不回响应 context），绝不伪造一个 dead
+// handle。请求里的 persistent 位一律降级处理，不会让 CREATE 失败（见下）。
 func (h *durableHandler) Registered(ctx *Context, open *Open) error {
 	intent, err := wire.FindDurableIntent(h.req.Contexts)
 	if err != nil {
@@ -60,20 +59,29 @@ func (h *durableHandler) Registered(ctx *Context, open *Open) error {
 		return nil // 不是持久句柄请求
 	}
 
-	// persistent handle 需要 CONTINUOUS_AVAILABILITY 共享，本服务端没有，
-	// 永远不能授予（诚实：不假装支持，直接拒）。§3.3.5.9.11。
+	// DH2Q 的 SMB2_DHANDLE_FLAG_PERSISTENT（§2.2.13.2.11）在这里**被忽略**，
+	// 不是被拒绝 —— 我们授予普通 durable v2，响应 Flags 不置 persistent 位。
 	//
-	// 已知争议，**暂不改**：MS-SMB2 §3.3.5.9.12 读起来是「share 不是 CA 就
-	// 忽略 persistent 位、继续按普通 durable v2 处理」，也就是应当**降级**
-	// 而不是让整个 CREATE 失败（客户端顺手带上这个位就连文件都打不开）。
-	// 但这只是读规范推断出来的，我们没有对真实 Windows/macOS 客户端抓过包，
-	// 而 AGENTS.md §9 要求「规范与真实客户端行为不一致时以真实客户端行为为
-	// 准」。在拿到抓包证据之前保持现状，不把未经验证的规范解读写进生产代码。
-	// 复现用例：durable_defect_test.go 的 TestQADefectPersistentFlagDegradesNotFails
-	// （qadefect tag，故意留红）。
-	if intent.RequestV2 != nil && intent.RequestV2.Flags.IsPersistent() {
-		return status.NotSupported
-	}
+	// 该位只是一个「条件升级」请求：按 §3.3.5.9.12，只有在服务端宣告了
+	// SMB2_GLOBAL_CAP_PERSISTENT_HANDLES **且** TreeConnect.Share.IsCA 时才
+	// 升级为 persistent handle。两个条件我们都不满足（不宣告该能力、没有 CA
+	// 共享），所以走普通 durable v2 授予流程。规范里这条分支**没有失败出口**。
+	//
+	// 原实现在这里 return STATUS_NOT_SUPPORTED，会把「顺手带上 persistent 位」
+	// 的客户端整个 CREATE 打掉 —— 文件根本打不开，而不是退化成不太好用。
+	//
+	// 交叉验证（AGENTS.md §9：拿真实实现的行为兜底，不靠对规范的单方面解读）：
+	// Samba source3/smbd/smb2_create.c 是独立实现，行为一致 ——
+	//   L1481  durable_requested = true            无条件先设好
+	//   L1492  if (flag & PERSISTENT) && (server_caps & CAP_PERSISTENT_HANDLES)
+	//          && (tcon_caps & CONTINUOUS_AVAILABILITY) && oplock ∈ {NONE,LEASE}
+	//              → persistent_requested = true   纯粹的条件升级，**没有 else**
+	//   L1988  响应侧只有真授予了 persistent 才把该位写进 DH2Q 响应
+	// 顺带一条 Samba 的额外约束（我们不实现，只记录）：即便支持 persistent，
+	// 请求了 oplock 时它也拒绝升级，理由是 persistent handle 配 oplock 在
+	// Windows 上是坏的。
+	//
+	// 回归保护：durable_qa_test.go TestQADurablePersistentFlagDegrades。
 
 	if !durableGrantAllowed(h.req) {
 		// 前提不满足：当普通句柄处理，不回任何 durable context。
