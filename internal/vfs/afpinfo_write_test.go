@@ -173,3 +173,83 @@ func TestAfpInfoSyncReportsBadBuffer(t *testing.T) {
 		t.Errorf("Sync 应报告 ErrBadAfpInfo，得到 %v", err)
 	}
 }
+
+// TestAfpInfoWriteAtZeroChecksSignature 覆盖「首段写就带垃圾签名」的情况。
+//
+// 上面那条 TestAfpInfoSyncReportsBadBuffer 说明了 Sync 兜底的存在，但兜底
+// 是下策：客户端未必 FLUSH，不 FLUSH 就只剩 CLOSE，而 CLOSE 承载不了错误。
+// Samba 的 fruit_pwrite_meta 在 offset==0 上有两道早期拦截：
+//
+//	if (n < 3)                      { errno = EINVAL; return -1; }
+//	if (memcmp(data, "AFP", 3) != 0){ errno = EINVAL; return -1; }
+//
+// 我们照抄这两道 —— 分段写的第一段必然带完整签名（"AFP\0" 在 [0,4)），
+// 所以拦签名不会误伤合法的分段写，见下面的子用例。
+func TestAfpInfoWriteAtZeroChecksSignature(t *testing.T) {
+	fs := newTestFS(t, false)
+	requireXattr(t, fs)
+
+	cases := []struct {
+		name string
+		data []byte
+		want error
+	}{
+		// n < 3：连签名都放不下，Samba 直接 EINVAL。
+		{"空写", []byte{}, ErrInvalidArg},
+		{"1 字节", []byte("A"), ErrInvalidArg},
+		{"2 字节", []byte("AF"), ErrInvalidArg},
+		// n >= 3 但签名不对：同样拒，映射成 ErrBadAfpInfo。
+		{"3 字节坏签名", []byte("XYZ"), ErrBadAfpInfo},
+		{"半段坏签名", append([]byte("BAD\x00"), make([]byte, 12)...), ErrBadAfpInfo},
+		// 长度不足 60 但签名正确：这是合法的分段写首段，必须放行。
+		{"半段好签名", append([]byte("AFP\x00"), make([]byte, 12)...), nil},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, fs, tc.name+".txt", "base")
+			h, _ := openStreamH(t, fs, tc.name+".txt", StreamAFPInfo, OpenRead|OpenWrite, OpenAlways)
+			defer h.Close()
+
+			n, err := h.WriteAt(tc.data, 0)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("WriteAt = (%d, %v)；合法首段不应被拒", n, err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("WriteAt = (%d, %v)；期望 %v", n, err, tc.want)
+			}
+			if n != 0 {
+				t.Errorf("失败的写入不应报告写入字节数，得到 %d", n)
+			}
+		})
+	}
+}
+
+// TestAfpInfoBadSignatureLeavesXattrAbsent 确认早拒之后没有半个流留下来。
+//
+// 这正是当初那个 bug 的危害形态：写"成功"、关"成功"、xattr 没建，
+// 读回 OBJECT_NAME_NOT_FOUND。早拒之后 WRITE 就该失败，且不留痕迹。
+func TestAfpInfoBadSignatureLeavesXattrAbsent(t *testing.T) {
+	fs := newTestFS(t, false)
+	requireXattr(t, fs)
+	writeFile(t, fs, "t.txt", "base")
+
+	h, _ := openStreamH(t, fs, "t.txt", StreamAFPInfo, OpenRead|OpenWrite, OpenAlways)
+	if _, err := h.WriteAt([]byte("nope, not an AfpInfo at all"), 0); !errors.Is(err, ErrBadAfpInfo) {
+		t.Fatalf("坏签名写入应被拒，得到 %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("被拒之后 Close 应成功，得到 %v", err)
+	}
+
+	fi, _, err := fs.AppleInfo("t.txt")
+	if err != nil {
+		t.Fatalf("基础文件不该受影响: %v", err)
+	}
+	if !bytes.Equal(fi[:], make([]byte, len(fi))) {
+		t.Errorf("被拒的写入不该留下 FinderInfo，得到 % x", fi)
+	}
+}
