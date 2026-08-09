@@ -79,6 +79,10 @@ type LocalFS struct {
 	// 平台（Windows）上非 nil。Linux/macOS 上恒为 nil，零开销。
 	meta MetadataStore
 
+	// usage 统计本共享自身占了多少空间，只在设了配额时非 nil
+	// （不设配额就没人需要这个数字，一次目录遍历都不做）。
+	usage *shareUsage
+
 	closeOnce sync.Once
 }
 
@@ -115,6 +119,14 @@ func NewLocalFS(cfg LocalConfig) (*LocalFS, error) {
 		return nil, err
 	}
 	l.meta = meta
+
+	// 配额生效时才需要知道「本共享已用多少」。首次统计立刻异步开始，
+	// 好让客户端问到容量时（至少要先走完 NEGOTIATE/SESSION_SETUP/TREE_CONNECT）
+	// 已经有真实数字可用。构造过程本身不阻塞。
+	if cfg.QuotaBytes > 0 {
+		l.usage = newShareUsage(res.Root())
+		l.usage.start()
+	}
 	return l, nil
 }
 
@@ -143,6 +155,7 @@ func (l *LocalFS) ReadOnly() bool { return l.cfg.ReadOnly }
 func (l *LocalFS) Close() error {
 	var err error
 	l.closeOnce.Do(func() {
+		l.usage.stop()
 		if l.meta != nil {
 			err = l.meta.Close()
 		}
@@ -575,13 +588,17 @@ func (l *LocalFS) StatFS() (*FSInfo, error) {
 // 语义：配额限制的是**本共享**的总容量，所以
 //
 //	Total = min(宿主 Total, 配额)
-//	Free  = min(宿主 Free,  配额 - 已用)
+//	Free  = min(宿主 Free,  配额 - **本共享**已用)
 //
-// 「已用」取共享自己的占用量还是宿主的占用量？这里取**宿主的**
-// （Total-Free），理由是递归统计共享目录大小在十万级 band 目录上
-// 要几秒钟，每次 QUERY_FS_INFO 都做一遍完全不可接受。
-// 代价是：同一个宿主卷上放多个带配额的共享时，它们互相看得见对方的占用。
-// 对 Time Machine 这个主要场景（一块盘一个备份共享）是准确的。
+// 「已用」必须是本共享自己的占用量。曾经这里取的是宿主卷的已用量
+// （Total-Free），理由是递归统计目录大小太慢 —— 那是一个**真实的阻断级 bug**：
+// 一个**空的**、配了 2 GiB 配额的共享，只要放在一块已用 3.7 GiB 的宿主卷上，
+// 算出来的可用空间就是 0，macOS 会直接拒绝启动 Time Machine 备份。
+// 共享用了多少空间与宿主卷上别的东西用了多少空间毫无关系，这个口径从根上就是错的。
+//
+// 性能问题由 shareUsage 解决：统计在后台做、结果带缓存、重扫频率随目录规模
+// 自动退避，QUERY_FS_INFO 路径上一次目录遍历都不做。
+// 由此带来的失效场景（预热窗口、刷新滞后）在 usage.go 的 shareUsage 注释里列全了。
 func (l *LocalFS) applyQuota(info *FSInfo) {
 	if l.cfg.QuotaBytes == 0 {
 		return
@@ -593,10 +610,12 @@ func (l *LocalFS) applyQuota(info *FSInfo) {
 	// 向下取整成块数：宁可少报一点，也不要报出一个写不进去的容量。
 	quotaBlocks := l.cfg.QuotaBytes / bs
 
-	usedBlocks := uint64(0)
-	if info.TotalBlocks > info.FreeBlocks {
-		usedBlocks = info.TotalBlocks - info.FreeBlocks
-	}
+	// 还没有统计结果时按 0 处理（上报「配额全部可用」）。
+	// 这个方向是安全的：宁可预热窗口内短暂高报，也不要像旧实现那样
+	// 在一个空共享上报 0 而直接阻断备份。
+	usedBytes, _ := l.usage.used()
+	// 已用量向**上**取整成块数，与上面 Total 的向下取整同向：两边都让剩余偏小。
+	usedBlocks := (usedBytes + bs - 1) / bs
 
 	var quotaFree uint64
 	if quotaBlocks > usedBlocks {
