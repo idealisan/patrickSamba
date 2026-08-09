@@ -63,3 +63,25 @@ R12（durable handle 6 缺陷）已于 2026-08-09 由 PR #40 合入 main。修�
 更别为了让它变绿去加常驻 goroutine。日后真要消它，最低成本是给每条 entry 挂
 `time.AfterFunc` 并在 reconnect/remove 时 `Stop()`（有明确宿主与销毁点的一次性
 定时器，不是常驻 goroutine）。
+
+## 4. 授予前提判的是「请求的」oplock，而我们恒授予 NONE —— 未决
+
+**状态：2026-08-09 由 qa-proto 查出并上报 team-lead，尚未定夺，别当已修。**
+
+`durableGrantAllowed`（`durable.go:465`）判的是 `req.RequestedOplockLevel == Batch`，
+即**客户端请求的**级别；而 `create.go:167/246` 恒回 `wire.OplockLevelNone`。
+于是「请求 BATCH 的客户端拿到 `OplockLevel=NONE` **外加**一个 durable 句柄」这条路是通的。
+
+**Why 这是问题：** Samba 判的是**已授予的**。`source3/smbd/smb2_create.c:1903`
+用 `state->durable_requested && (fsp_lease_type(state->result) & SMB2_LEASE_HANDLE)`，
+而 `source3/locking/leases_util.c:51` 的 `fsp_lease_type()` 读 `fsp->oplock_type`
+（非 LEASE_OPLOCK 时走 `map_oplock_to_lease_type()`，`NO_OPLOCK → 0`）——
+即 Samba 在我们这个场景下**不授予** durable。
+后果：客户端断连后句柄被扣住整个 durable timeout，却没有任何 oplock/lease 可以 break 它，
+第二个客户端被 sharing-mode 挡住，且这个扣留对外不可见。
+
+**How to apply:** 真要改，判据应从「请求的」换成「已授予的」oplock/lease。
+注意别顺手把 `leaseDurableEligible` 那个 seam 一起接线 ——
+它当前**无任何调用方**是**有意的**（lease 只做了 break 通道、不授予、不宣告 CAP_LEASING），
+由 `TestQADurableGrantRequiresBatchOplockOnly` 正向钉着：一旦有人调了
+`SetLeaseDurableEligible`，该用例第二段就会变红提示重新评估。那是提示，不是回归。
