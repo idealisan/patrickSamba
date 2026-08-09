@@ -510,6 +510,12 @@ func (s *aaplDirAttrSource) appleInfo(name string) (fi [vfs.FinderInfoSize]byte,
 		return s.appleInfoByPath(s.dir)
 	}
 	if s.handle != nil {
+		// 这里刻意用逐条的 AppleInfoAt 而不是 AppleInfoAtBatch：
+		// 一页能装多少条是由 DirEntryWriter 边写边定的（放不下的条目会被
+		// UnreadDir 退回句柄），而 open.ReadDir 一次可能吐回整个几万条的
+		// 目录 —— 提前整批取会为绝大多数根本进不了本页的条目白做元数据。
+		// 且按 internal/vfs/apple_bench_test.go 的实测，批量省下的只是
+		// 每条一次的加锁与读缓冲分配，真正的成本 getxattr 无法批量。
 		f, r, err := s.handle.AppleInfoAt(name)
 		if err == nil {
 			return f, r, true

@@ -460,6 +460,16 @@ func (r *recordingDirMeta) AppleInfoAt(name string) ([vfs.FinderInfoSize]byte, i
 	return fi, 0, r.err
 }
 
+// AppleInfoAtBatch 只为满足接口 —— 见 aapl.go 里为什么 readdir_attr 走逐条版本。
+func (r *recordingDirMeta) AppleInfoAtBatch(names []string) ([]vfs.AppleInfoResult, error) {
+	out := make([]vfs.AppleInfoResult, len(names))
+	for i, n := range names {
+		fi, rs, err := r.AppleInfoAt(n)
+		out[i] = vfs.AppleInfoResult{FinderInfo: fi, RsrcSize: rs, Err: err}
+	}
+	return out, nil
+}
+
 type recordingFSMeta struct {
 	calls int
 	last  string
