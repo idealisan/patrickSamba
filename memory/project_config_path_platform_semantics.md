@@ -29,11 +29,10 @@ type: project
 
 ## 2. `configs/example.yaml` 在 Windows 上启动不了 —— 仍未修
 
-Go 的 windows `IsAbs`（标准库 `internal/filepathlite/path_windows.go:184`）
-先取 `volumeNameLen`，为 0 直接返回 false，所以 `/srv/share/public` 在 Windows 上
-不算绝对路径。（Linux 侧实测；Windows 侧是读 Go 标准库源码得出，容器里跑不了
-windows 二进制。）这条属于 `share.path`，**不能**照 metadata_path 的办法
-「跳过校验」—— 那个路径必须在本机真实存在，跳过了等于不校验。
+Go 的 windows `IsAbs` 先取 `volumeNameLen`，为 0 直接返回 false，所以
+`/srv/share/public` 在 Windows 上不算绝对路径。（Linux 侧实测；Windows 侧是读
+Go 标准库源码得出，容器里跑不了 windows 二进制。）这条属于 `share.path`，
+**不能**照 metadata_path 的办法「跳过校验」—— 那个路径必须在本机真实存在。
 
 **Why**：`configs/example.yaml` 是大多数人接触本项目的第一份文件，
 和历史上 `addresses: [0.0.0.0, "::"]` 是同一类「开箱即坏」事故。
