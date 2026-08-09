@@ -27,6 +27,17 @@ curl -sSL "https://gitlab.com/samba-team/samba/-/raw/master/<仓库内路径>" -
 | `libcli/smb/smb2_constants.h` | `SMB2_CRTCTX_AAPL_*` 各能力位 |
 | `source3/smbd/smb2_create.c` | MxAc 的两条真实行为：L1608 请求长度只许 0/8，L1875 mtime 未变则**不回**响应 context |
 | `source3/lib/string_replace.c` | `macos_string_replace_map` —— macOS 非法字符 ↔ Unicode 私有区映射表（见下） |
+
+Samba 之外还有一个可 curl 的权威交叉验证源 —— **Linux 内核的 SMB 客户端**：
+
+```sh
+curl -sSL "https://raw.githubusercontent.com/torvalds/linux/master/fs/smb/client/<文件>"
+# cifs_unicode.h / cifs_unicode.c  非法字符 SFM/SFU 映射
+# smb2pdu.c / smb2pdu.h            客户端实际怎么发 SMB2 请求
+```
+
+它和 Samba 是**互相独立**的实现，两边一致的事实基本可以当定论；
+两边不一致时要格外小心，多半意味着有一方在迁就某个具体服务端。
 | `source3/smbd/smb2_ioctl_filesys.c` | `fsctl_qar`（QUERY_ALLOCATED_RANGES）、`fsctl_zero_data`、压缩、dup_extents |
 | `source3/smbd/smb2_ioctl_network_fs.c` | copychunk、QUERY_NETWORK_INTERFACE_INFO、VALIDATE_NEGOTIATE_INFO、REQUEST_RESUME_KEY |
 | `source3/modules/vfs_default.c` | `vfswrap_fsctl` —— **上面两个文件 switch 里没有的 FSCTL 全部 fall through 到这里**，`FSCTL_GET_SHADOW_COPY_DATA` 就在其中 |
@@ -47,10 +58,24 @@ macOS 客户端把 NTFS 非法字符映射到 Unicode 私有区再发上线，�
 0x5C \  → U+F026      0x7C |  → U+F027
 ```
 
-后 8 个接着 `U+F01F` 顺序往下排，与字符本身码点无关。老的 SFM 用的才是
-`0xF000+字符`（那样 `:` 会变成 U+F03A）—— **抄错这一个字符**，
-`com.apple.metadata:kMDItemFinderComment` 就会落成错的 xattr 名，
+后 8 个接着 `U+F01F` 顺序往下排，**与字符本身码点无关**。
+
+**误解的来源**（团队内已有人踩过，坚持 `:`→U+F03A）：`0xF000 + 字符` 这条规则
+**只适用于控制字符 0x01–0x1F**，标点是另一张手工分配的表。把控制字符那条规则
+外推到标点就会得出 F03A。抄错这一个字符，
+`com.apple.metadata:kMDItemFinderComment` 会落成错的 xattr 名，
 Finder 注释与 Spotlight 元数据全部读不回来，且与 Samba/netatalk 不互通。
+
+**独立佐证**（这类事实值得交叉验证，不要只信一个来源）：
+Linux 内核 cifs.ko `fs/smb/client/cifs_unicode.h` 的 `SFM_*` 常量与上表**逐项一致**
+（`SFM_COLON = 0xF022`），且 `convert_to_sfm_char()` 同样只对 0x01–0x1F 做加偏移。
+Linux 还多两个 Samba 没有的、**仅用于名字结尾**的：
+`SFM_SPACE = 0xF028`、`SFM_PERIOD = 0xF029`（Windows 不允许名字以空格/句点结尾）。
+
+这张表**就是** catia 的线上↔磁盘映射表，不是别的用途 —— `vfs_fruit.c:1354`：
+`fruit:encoding = native` 时把它整个装进 `catia:mappings`。所以它权威地回答了
+「macOS 线上到底发什么」。Samba 默认是 `private`（`vfs_fruit.c:319`），即**原样保留**
+私用区字符不还原成 ASCII；我们跟随这个默认。
 
 推论：`ValidateStreamName` 拒绝字面冒号是**正确**的，不要为了让某个用了字面冒号的
 测试通过而放行它 —— 放行后 `SplitStreamPath` 就无法区分分隔符与流名内容。
