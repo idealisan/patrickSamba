@@ -155,6 +155,60 @@ func TestWinPathContainsDriveRoot(t *testing.T) {
 	}
 }
 
+func TestWinStripLongPathPrefix(t *testing.T) {
+	cases := []struct {
+		in, want, why string
+	}{
+		{`\\?\C:\srv\share`, `C:\srv\share`, "最常见的盘符形式"},
+		{`\\?\C:\srv\share\a.txt`, `C:\srv\share\a.txt`, "带子路径"},
+		{`\\?\c:\srv`, `c:\srv`, "小写盘符同样还原，大小写留给上层判定"},
+		{`\\?\UNC\host\share\a.txt`, `\\host\share\a.txt`, "UNC 形式还原成双反斜杠"},
+		{`C:\srv\share`, `C:\srv\share`, "已经是普通形式，原样返回"},
+		{`\\host\share`, `\\host\share`, "普通 UNC，原样返回"},
+		{"", "", "空串"},
+
+		// 认不出的形式必须原样返回 —— 后续前缀比较会判它在共享外（拒绝）。
+		// 猜一个等价形式反而可能猜出一个**能匹配上**的串，那是假接受。
+		{`\\?\Volume{12345678-1234-1234-1234-123456789abc}\a.txt`,
+			`\\?\Volume{12345678-1234-1234-1234-123456789abc}\a.txt`,
+			"卷 GUID 形式不还原，让它匹配不上从而被拒"},
+		{`\\?\1:\x`, `\\?\1:\x`, "盘符不是字母，不认"},
+	}
+	for _, c := range cases {
+		if got := winStripLongPathPrefix(c.in); got != c.want {
+			t.Errorf("winStripLongPathPrefix(%q) = %q，应为 %q；%s",
+				c.in, got, c.want, c.why)
+		}
+	}
+}
+
+// TestWinStripThenContains 把两个函数串起来验一遍，这才是真实调用形态：
+// final path 先还原形式，再与共享根做包含性判定。
+func TestWinStripThenContains(t *testing.T) {
+	const root = `C:\srv\share` // Resolver.root 的形式（EvalSymlinks 产出）
+
+	cases := []struct {
+		final string
+		want  bool
+		why   string
+	}{
+		{`\\?\C:\srv\share\a.txt`, true, "junction 指回共享内，应放行"},
+		{`\\?\C:\srv\share`, true, "指向共享根自身"},
+		{`\\?\C:\Windows\System32\config\SAM`, false, "junction 逃逸到系统目录"},
+		{`\\?\C:\srv\shareEvil\x`, false, "同前缀兄弟目录"},
+		{`\\?\D:\srv\share\a.txt`, false, "换卷"},
+		{`\\?\UNC\evil\share\a.txt`, false, "指向网络路径"},
+		{`\\?\Volume{12345678-1234-1234-1234-123456789abc}\srv\share\a.txt`, false,
+			"卷 GUID 形式还原不了，按拒绝处理"},
+	}
+	for _, c := range cases {
+		got := winPathContains(root, winStripLongPathPrefix(c.final))
+		if got != c.want {
+			t.Errorf("final=%q → %v，应为 %v；%s", c.final, got, c.want, c.why)
+		}
+	}
+}
+
 // TestWinPathContainsEmptyRootDenies 钉死失败方向：
 // 根为空（配置异常 / 取 final path 失败）时必须**拒绝**，不能退化成放行一切。
 func TestWinPathContainsEmptyRootDenies(t *testing.T) {
