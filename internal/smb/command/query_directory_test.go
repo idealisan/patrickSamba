@@ -41,8 +41,8 @@ import (
 // （vfs_fruit.c readdir_attr_meta_finderi 取的正是这两字节）。
 var sampleFinderInfo = func() [vfs.FinderInfoSize]byte {
 	var fi [vfs.FinderInfoSize]byte
-	copy(fi[0:4], "TEXT")   // 类型码
-	copy(fi[4:8], "ttxt")   // 创建者码
+	copy(fi[0:4], "TEXT")       // 类型码
+	copy(fi[4:8], "ttxt")       // 创建者码
 	fi[8], fi[9] = 0x40, 0x00   // Finder flags = kHasBeenInited
 	fi[10], fi[11] = 0x11, 0x22 // 图标位置 v —— **不得**出现在压缩结果里
 	fi[24], fi[25] = 0x80, 0x01 // 扩展 Finder flags

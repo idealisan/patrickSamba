@@ -301,13 +301,13 @@ func buildAAPLResponse(replyBitmap, serverCaps, volumeCaps uint64, model string)
 // 且只在 AAPL 协商出 kAAPL_SUPPORTS_READ_DIR_ATTR 之后生效。
 // 偏移量相对**条目起点**（MS-FSCC §2.4.17）：
 //
-//	 64 EaSize(4)            → max_access（小端）
-//	 68 ShortNameLength(1)   → 24
-//	 69 Reserved(1)          → 0
-//	 70 ShortName[0:8]       → rfork_size（**小端 uint64**）
-//	 78 ShortName[8:24]      → 压缩 FinderInfo（16 字节）
-//	 94 Reserved2(2)         → unix_mode；我们恒填 0，见下
-//	 96 FileId(8)            不变
+//	64 EaSize(4)            → max_access（小端）
+//	68 ShortNameLength(1)   → 24
+//	69 Reserved(1)          → 0
+//	70 ShortName[0:8]       → rfork_size（**小端 uint64**）
+//	78 ShortName[8:24]      → 压缩 FinderInfo（16 字节）
+//	94 Reserved2(2)         → unix_mode；我们恒填 0，见下
+//	96 FileId(8)            不变
 //
 // Samba 在 68 处写的是 `SSVAL(p, 0, 24)`，即 ShortNameLength=24、Reserved=0。
 // 源码注释写明：「按文档 short_name_len 应当为 0，但抓包显示客户端把它置成 24」
