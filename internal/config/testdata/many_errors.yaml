@@ -1,0 +1,34 @@
+# 故意到处写错的配置：用来验证「一次性报出全部问题，且每条都指出字段路径」。
+#
+# 每一处错误旁边都注明了期望在错误信息里出现的字段路径。
+server:
+  name: THIS-NAME-IS-WAY-TOO-LONG    # server.name：超过 NetBIOS 15 字节
+  min_dialect: "3.1.1"
+  max_dialect: "2.0.2"               # server.min_dialect：min 高于 max
+
+listen:
+  addresses:
+    - 0.0.0.0                        # listen.addresses[0]：通配地址不能与其他地址并列
+    - 192.0.2.1
+    - not-an-ip                      # listen.addresses[2]：不是合法 IP
+  port: 70000                        # listen.port：超出 1-65535
+
+auth:
+  users:
+    - name: alice
+      nt_hash: "zzzz"                # auth.users[0].nt_hash：不是 32 位十六进制
+    - name: ALICE                    # auth.users[1].name：与 users[0] 重名
+      password: "x"
+
+shares:
+  - name: public
+    path: __SHARE_DIR__
+    valid_users:
+      - alice
+      - nobody                       # shares[0].valid_users[1]：用户未定义
+  - name: "bad/name"                 # shares[1].name：含非法字符
+    path: relative/path              # shares[1].path：不是绝对路径
+
+log:
+  level: verbose                     # log.level：非法级别
+  format: xml                        # log.format：非法格式

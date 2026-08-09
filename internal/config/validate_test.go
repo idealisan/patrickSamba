@@ -135,6 +135,82 @@ func TestValidateListenPortRange(t *testing.T) {
 	}
 }
 
+func TestValidateListenAddressDuplicate(t *testing.T) {
+	c := baseConfig(t)
+	c.Listen.Addresses = []string{"192.0.2.1", "192.0.2.1"}
+	assertInvalid(t, c, "listen.addresses[1]", "重复")
+
+	// 同一地址的不同写法也算重复。
+	c = baseConfig(t)
+	c.Listen.Addresses = []string{"::1", "0:0:0:0:0:0:0:1"}
+	assertInvalid(t, c, "listen.addresses[1]", "重复")
+}
+
+// 通配地址与具体地址并列会 bind 失败（实测：EADDRINUSE），
+// 同时写 0.0.0.0 与 :: 也一样 —— Go 的 tcp 监听是双栈的。
+func TestValidateListenWildcardConflict(t *testing.T) {
+	c := baseConfig(t)
+	c.Listen.Addresses = []string{"0.0.0.0", "::"}
+	assertInvalid(t, c, "listen.addresses[0]", "双栈")
+
+	c = baseConfig(t)
+	c.Listen.Addresses = []string{"0.0.0.0", "127.0.0.1"}
+	assertInvalid(t, c, "listen.addresses[0]", "通配地址")
+
+	// 单独一个通配地址是合法的。
+	c = baseConfig(t)
+	c.Listen.Addresses = []string{"::"}
+	if err := Validate(c); err != nil {
+		t.Fatalf("单个通配地址应当合法，实际: %v", err)
+	}
+}
+
+func TestValidateValidUsersEmptyAndDuplicate(t *testing.T) {
+	c := baseConfig(t)
+	c.Shares[0].ValidUsers = []string{""}
+	assertInvalid(t, c, "shares[0].valid_users[0]", "空条目")
+
+	c = baseConfig(t)
+	c.Shares[0].ValidUsers = []string{"alice", "ALICE"}
+	assertInvalid(t, c, "shares[0].valid_users[1]", "重复")
+}
+
+func TestValidateLogFileDirMissing(t *testing.T) {
+	c := baseConfig(t)
+	c.Log.File = filepath.Join(t.TempDir(), "no-such-dir", "smb.log")
+	assertInvalid(t, c, "log.file", "目录不存在")
+
+	// 目录存在时合法（文件本身可以还不存在）。
+	c = baseConfig(t)
+	c.Log.File = filepath.Join(t.TempDir(), "smb.log")
+	if err := Validate(c); err != nil {
+		t.Fatalf("目录存在时应当合法，实际: %v", err)
+	}
+}
+
+func TestWarningsSharePathOverlap(t *testing.T) {
+	c := baseConfig(t)
+	c.Shares = append(c.Shares, Share{Name: "mirror", Path: c.Shares[0].Path})
+	if !strings.Contains(strings.Join(Warnings(c), "\n"), "同一个目录") {
+		t.Error("两个共享指向同一目录时应告警")
+	}
+
+	// 只读共享嵌在可写共享里 = 只读形同虚设，必须点破。
+	c = baseConfig(t)
+	inner := filepath.Join(c.Shares[0].Path, "sub")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c.Shares = append(c.Shares, Share{Name: "inner", Path: inner, ReadOnly: true})
+	ws := strings.Join(Warnings(c), "\n")
+	if !strings.Contains(ws, "位于") {
+		t.Errorf("嵌套共享应告警，实际:\n%s", ws)
+	}
+	if !strings.Contains(ws, "绕过只读限制") {
+		t.Errorf("只读共享套在可写共享内应特别点破，实际:\n%s", ws)
+	}
+}
+
 func TestValidateDialects(t *testing.T) {
 	c := baseConfig(t)
 	c.Server.MinDialect = "1.0"
