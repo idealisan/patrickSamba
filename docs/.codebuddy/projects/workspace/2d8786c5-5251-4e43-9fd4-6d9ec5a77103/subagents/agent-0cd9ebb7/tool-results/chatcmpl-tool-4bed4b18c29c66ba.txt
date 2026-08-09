@@ -1,9 +1,0 @@
-goos: linux
-goarch: amd64
-pkg: github.com/finalappstore/stupidsamba/internal/vfs
-cpu: AMD EPYC 9K65 192-Core Processor
-BenchmarkReadDirAAPLByHandle10k-2   	    2000	  75697054 ns/op	11559323 B/op	  114817 allocs/op
-BenchmarkAppleInfoSingle/ByPath-2   	    2000	     16450 ns/op	    1320 B/op	      18 allocs/op
-BenchmarkAppleInfoSingle/ByHandle-2 	    2000	      8389 ns/op	     368 B/op	       8 allocs/op
-PASS
-ok  	github.com/finalappstore/stupidsamba/internal/vfs	152.203s

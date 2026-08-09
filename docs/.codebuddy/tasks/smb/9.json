@@ -1,9 +1,0 @@
-{
-  "subject": "SET_INFO 补齐 FileLinkInformation 与注释",
-  "description": "硬链接若 VFS 支持则实现；ValidDataLength/ShortName 保持 NOT_SUPPORTED 并写清原因。",
-  "activeForm": "补齐 SET_INFO",
-  "status": "completed",
-  "id": "9",
-  "createdAt": 1786236714501,
-  "updatedAt": 1786237217938
-}

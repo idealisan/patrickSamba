@@ -1,9 +1,0 @@
-{
-  "subject": "mDNS responder 真实网络健壮性补齐",
-  "description": "按 RFC 6762 逐条检查 probing/冲突改名、Known-Answer Suppression、随机延迟、goodbye、多网卡、IPv6，补齐缺失项并加单测（不依赖真实组播）。",
-  "activeForm": "补齐 mDNS responder 健壮性",
-  "status": "completed",
-  "id": "19",
-  "createdAt": 1786236845679,
-  "updatedAt": 1786237246232
-}

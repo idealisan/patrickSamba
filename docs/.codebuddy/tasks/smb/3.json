@@ -1,9 +1,0 @@
-{
-  "subject": "生成服务端 mechListMIC 并回填 negTokenResp",
-  "description": "在最终 accept-completed 的 NegTokenResp 里带上服务端方向 MIC（seqnum 从 0 独立计数）。",
-  "activeForm": "生成服务端 mechListMIC",
-  "status": "completed",
-  "id": "3",
-  "createdAt": 1786235887880,
-  "updatedAt": 1786236740287
-}

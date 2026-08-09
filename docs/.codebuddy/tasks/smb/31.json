@@ -1,9 +1,0 @@
-{
-  "subject": "为新增 FSCTL 写单元测试",
-  "description": "internal/smb/command/ioctl_test.go：SET_SPARSE 空输入视为 TRUE、SET_ZERO_DATA 打洞、QUERY_ALLOCATED_RANGES 截断与 BUFFER_OVERFLOW。",
-  "activeForm": "编写 FSCTL 单元测试",
-  "status": "completed",
-  "id": "31",
-  "createdAt": 1786237354322,
-  "updatedAt": 1786237635477
-}
