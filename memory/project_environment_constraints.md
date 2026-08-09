@@ -74,6 +74,14 @@ Go 工具链消失、python3/smbclient 消失、`/root/.codebuddy/.../memory` �
     （自动解析到当前 worktree 的私有目录）。写 shell 工具时凡是要落文件到 git 目录，
     先想一想它会不会在 worktree 里跑。
 
+12. **不要用 `git -c user.name=... -c user.email=... commit` 覆盖提交身份** ——
+    CNB 侧会做**提交签名**，身份一改就被拒：
+    `error signing commit: error making request: 403 | Author is invalid`
+    → `gpg 无法为数据签名` → `致命错误：无法写提交对象`（rc=128，**提交根本没产生**）。
+    这条容易在「我是子 agent，署个自己的名字更清楚」的好心下踩到。
+    直接 `git commit` 用仓库默认身份即可，一次就过。
+    2026-08-09 19:15 ci-trigger 实测，去掉那两个 `-c` 后同一条命令立刻成功。
+
 **在共享工作树里做破坏性实验的正确姿势**：用 `git worktree add --detach /tmp/wt HEAD`
 另开一份，在 /tmp 里随便改随便编译，做完 `git worktree remove --force /tmp/wt`。
 这样既能做"故意改坏看客户端是否报错"的负向验证，又完全不碰 `/workspace`，
