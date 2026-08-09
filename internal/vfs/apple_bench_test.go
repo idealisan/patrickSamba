@@ -31,12 +31,26 @@ package vfs
 //     每个条目省掉一次注定 ENOENT 的 open。Time Machine 的 bands 目录
 //     一个 ._ 都没有，这条优化对该场景是 100% 命中：
 //     优化前 by-handle 是基线的 3.1×，优化后 1.35×。
-//  3. 剩下的 ~35% 开销是 getxattr(org.netatalk.Metadata) 的固有成本，
+//  3. 剩下的 ~35% 开销里，**syscall 部分确实是固有的**：getxattr
 //     每条目一次、无法批量（POSIX 没有批量 xattr 接口）。
-//     **不再继续优化**：加缓存要处理失效，而 readdir_attr 的收益本来
-//     就是「省掉客户端对每个文件额外开两次流」——一次 getxattr 换两次
-//     网络往返，这笔账仍然划算。commit 9b7185b「无需优化」的结论
-//     在 readdir_attr 场景下依然成立。
+//     但它周围的**分配**可以消掉，见下。
+//
+// # 后续（BenchmarkAppleInfoBatch，2000 条 band，同一进程内对比）
+//
+//	逐条 AppleInfoAt      3.27 µs/条   581 B   4.6 allocs
+//	AppleInfoAtBatch      1.74 µs/条   222 B   3.6 allocs   ← 快 47%，省 62% 内存
+//
+// 两处改动叠加得来：
+//
+//   - readMetaXattrFast（xattr_unix.go）：metadata blob 的长度是规范固定的
+//     402 字节，不必像通用的 XattrAccessor.Get 那样「先问长度再分配」，
+//     一趟读完。**这一条逐条调用也受益。**
+//   - AppleInfoAtBatch：那 402 字节的读缓冲整批复用一个，
+//     外加每条一次的锁获取变成整批一次。
+//
+// 到此为止不再继续优化：剩下的就是 getxattr 本身与路径字符串，
+// 加缓存要处理失效，不划算。readdir_attr 的收益本来就是「省掉客户端对
+// 每个文件额外开两次流」——一次 getxattr 换两次网络往返仍然大赚。
 
 import (
 	"path/filepath"
