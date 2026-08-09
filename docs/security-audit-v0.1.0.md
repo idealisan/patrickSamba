@@ -131,3 +131,61 @@ TWINE_PASSWORD = <h=1578f30c len=27>   ← 同一个值
 - 全部落在 `docs/.codebuddy/plugins/marketplaces/` 下的**上游插件模板**中，
   非本项目代码。
 - 两个 `.env.example` / `.env.template` 的值全部形如 `your_xxx_here`。
+
+---
+
+## 5. `history/`（会话存档）—— 干净
+
+`history/` 是 `scripts/save-history.sh` 落地的 CodeBuddy 会话 jsonl 快照。
+它是最容易被忽略的泄漏面：会话里可能出现工具调用回显的明文 token。
+
+扫描做法不止查明文，还查了 **8 种编码形态**：
+
+`plain` / `base64` / URL-encode / `sha256hex` / `md5hex` /
+前 12 字符 / 后 12 字符 / JSON 转义
+
+| 项 | 结果 |
+|---|---|
+| 覆盖 blob（含所有历史版本） | 93 |
+| 累计扫描 | 60.1 MB |
+| **8 种形态命中总数** | **0** |
+| 反向对照（把真值塞进探针缓冲区） | **命中** → 检测器有效 |
+
+反向对照这一步不可省：否则「0 命中」既可能是真干净，
+也可能是检测器根本没工作。
+
+**遗留风险**：`save-history.sh` **没有任何脱敏逻辑**。本次未泄漏属于运气，
+只要某次会话里执行过 `env` 之类的命令，下次存档就会把凭据带进库。
+建议在存档前增加一道脱敏。（`scripts/` 归 qa，本报告只提出，不修改。）
+
+---
+
+## 6. 示例口令：真示例 vs 真实用过
+
+我方源码目录（`configs/` `docs/` `test/` `scripts/` `internal/` `cmd/`
+`README` `AGENTS` 等，排除 `docs/.codebuddy/`）全历史共 **17 条**
+口令形态字面量。
+
+**结论：全部是示例/测试值，没有任何一条是真实用过的凭据。**
+
+判定依据分两层：
+
+1. **哈希反查占位词字典**（哈希对上才算数）——已坐实为字面占位词的有：
+   `pass`、`password`、`pwd`、`secret`、`secret123`、`testpass123`、
+   `123456`、`abc123`、`changeme`、`YOUR_TOKEN`、`api_key`、`string`、
+   `Password`、`smoke-secret`、`tok`。
+
+2. **交叉核对**：把泄漏快照中**每一个** opaque 环境变量值收集成集合，
+   将剩余 9 条逐一比对——**无一落在该集合内**，即它们从未作为真实凭据出现过。
+
+剩余 9 条的形状（进一步佐证其为平凡测试值）：
+
+| 位置 | 长度 | 字符集 |
+|---|---|---|
+| `README.md` `pass` / `password` | 4 / 3 | 符号 / 纯小写 |
+| `configs/example.yaml` `nt_hash` | 19 | 字面说明文字 `MD4(UTF16LE(口令))` |
+| `internal/auth/ntlmssp_test.go` | 5 | 纯小写 |
+| `internal/auth/static_test.go` | 14 | 小写 + 符号 |
+| `test/integration/*` | 8 | 小写 + 大写 |
+| `internal/vfs/local_test.go` | 24 | 小写 + 大写 + 符号 |
+| `docs/test-infra.md` `pwd` | 5 | 纯小写 |
