@@ -100,24 +100,8 @@ PR 比 main 全量跑）。判「能不能合」取 **pull_request** 那条，�
 | `400` | 漏了 `commit_title`；它是必填不是可选 | 必填 `commit_title` |
 | `406` `{"errcode":406,"errmsg":"either of 'application/json' or 'application/vnd.cnb.api+json' content type supported"}` | **GET 和 PUT 都要求 `Accept: application/json`**，缺了就报 406。报错文案说的是 content type，极易误导你去查 `Content-Type` 头——但 `Content-Type: application/json` 明明已经带了，真正缺的是 `Accept` | 请求务必带 `-H "Accept: application/json"`（上面两段 curl 已经带了，照抄即可，别漏） |
 
-## ⚠️ CNB API 的 null 陷阱（已实测两个实例，同一个形态）
-
-**CNB 用 `null` 表达「我不回答这个问题」，调用方却几乎总是读成「否」。**
-两个实例分属不同接口，坑法完全一样，所以并在一起记：
-
-| 接口 | 恒为 null 的字段 | 该看的字段 | 误读的后果 |
-|---|---|---|---|
-| `GET /-/pulls/<号>` | `merged` / `merged_at` / `merge_commit_sha` | **git 内容比对**（见下文三条命令的分工） | 已合并的 PR 被判成「关掉但没合」，进而重推、重做、在已合并分支上继续 rebase 造重复提交 |
-| `GET /-/releases/tags/<tag>` | `latest` | **`is_latest`**（bool） | 「所有 Release 都不是最新版」，发版核对时会以为 Release 没生效 |
-
-**判据**：`null` ≠ `false`。看到 null 先问「这个字段是不是压根没被填过」，
-再找**另一个真的被填了的字段**或**绕开 API 用 git/内容判**。
-只要一个字段在**已知为真**的样本上也回 null（PR #120 确已合并、`v0.0.99` 确已发布），
-它就是不可用字段，不要在任何判定里出现它。
-
-同型提醒：这是本项目「成功回显 ≠ 事情真的发生」的镜像版——
-那边是**说成了其实没成**，这边是**做成了却回显说没有**。两边都不能只信一个字段。
-Release 侧的完整实测见 `reference_cnb_release_api.md`。
+> **本文档下方有专门的「null 陷阱」小节**（`merged` 与 Release 的 `latest`），
+> 遇到任何 CNB 字段返回 `null` 先去看那一节：**`null` 是「我不回答」，不是「否」**。
 
 **⚠️ 判断 PR 是否已合并：不要信 `.merged` / `.merged_at` / `.merge_commit_sha`。**
 CNB 的 `GET /-/pulls/<号>` 对**已经合并**的 PR 依然返回
@@ -209,6 +193,11 @@ squash 让 main **独立引入**同一份内容，`merge-base` 不动，于是 `
 - 判 PR 合没合 → 比内容（`git diff --stat origin/main <分支> -- <文件>` 为空 = 已合），**绝不**信 `merged` 字段。
 - 判 Release 是否最新 → 看 **`is_latest`（bool）**，**绝不**看 `latest`。
 - 任何字段是 `null` 时，先假设「该端点不回答」，去找它指定的替代字段，不要当 false 用。
+
+**怎么当场认出一个「不可用字段」**（可证伪的做法，一次请求就够）：
+拿一个**已知为真**的样本去问它 —— PR #120 确已合进 main、`v0.0.99` 确已发布 ——
+如果它在这个样本上**仍然**回 `null`，那它就是不可用字段，此后不许出现在任何判定里。
+不要只在「不确定」的样本上试，那种情况下 `null` 看着像个合理答案，你会把它当结论用。
 
 另见 `reference_cnb_release_api.md`（Release 字段、`git:release` 的 `options` 不支持变量替换、
 按 tag 名分渠道用两个互斥 stage + `if:`）。
