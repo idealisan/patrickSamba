@@ -1,6 +1,6 @@
 ---
 name: CNB PR API 的调用方式 + null 陷阱 + 判「合并会带来什么/合没合/SHA 在不在」三条命令的分工
-description: cnb.cool 创建/更新/合并 PR 的写法（merge 用 PUT、更新用 PATCH 否则 404、参数名 merge_style、commit_title 必填、都要 Accept: application/json）；裸写 #N 有歧义（TaskList 任务 ID 与 PR 号两套编号空间在小号段撞车，查到的是无关对象且返回 200）；CNB 的 null 陷阱（PR 的 merged 与 Release 的 latest 恒为 null，null 表示「不回答」不是「否」）；判定改动是否进主干时两点 diff 会造出「大规模删除」幻觉、三点 diff 与祖先判定在 squash 下双双假阴性，最终判据只有内容
+description: cnb.cool 创建/更新/合并 PR 的写法（merge 用 PUT、更新用 PATCH 否则 404、参数名 merge_style、commit_title 必填、都要 Accept: application/json）；裸写 #N 有歧义（TaskList 任务 ID 与 PR 号两套编号空间在小号段撞车，查到的是无关对象且返回 200）；CNB 的 null 陷阱（PR 的 merged 与 Release 的 latest 恒为 null，null 表示「不回答」不是「否」）；判定改动是否进主干时两点 diff 会造出「大规模删除」幻觉、三点 diff 与祖先判定在 squash 下双双假阴性、且 is-ancestor 的 rc=1 同时代表「squash」与「还没合」两态，最终判据只有内容
 type: reference
 ---
 
@@ -168,6 +168,36 @@ squash 让 main **独立引入**同一份内容，`merge-base` 不动，于是 `
 而 squash 恰好切断了拓扑与内容的对应关系。
 **判「合没合」的最终判据只有内容。** 实测 PR #139：三点 diff 9 文件 +955/-0（看着有货），
 但 9 个文件的 blob hash 与 main **逐个相同**，内容早由 `a8db071` 进的主干，合并是彻底的 no-op。
+
+**⚠️ 再补一个假阳性：`--is-ancestor` 的 `rc=1` 有两种截然不同的含义。**
+表里第 3 行说它「只对同一个 SHA 有效」，那是**已经合了**的前提下的用法。
+真实世界还有第三种状态：**根本还没合**。三者的 rc 是这样的：
+
+| 真实状态 | `is-ancestor <T1> origin/main` |
+|---|---|
+| 真合并（提交保留） | **0** |
+| squash 合入 | **1** |
+| **还没合入** | **1** ← 与 squash 撞在同一个值上 |
+
+2026-08-09 21:41 实测：`is-ancestor 524bb43 origin/main` → rc=1，但 `origin/main`
+还停在 `762e335`，#171 一行都没进去。若照「1=squash」执行，就会在没有目标可 rebase 的时候
+去做 `--onto`。**两态判据套在三态现实上，必然有一态被吞掉。**
+
+**修法：先过一道内容门，确认「事情发生了没」，再判「以什么形态发生」。**
+
+```sh
+git fetch origin
+# 门 1（内容判据，squash / 真合并通用，且不看标题）：那句被 PR 删掉的话还在不在 main
+git show origin/main:CHANGELOG.md | grep -c '<该 PR 删掉的那句原文>'
+#   1 → 还没合。停在这里，什么都别做。
+#   0 → 已合入，继续门 2。
+# 门 2（形态）
+git merge-base --is-ancestor <PR 冻结 tip> origin/main; echo $?   # 0=真合并  1=squash
+```
+
+门 1 必须用**内容**不能用标题：CNB 的 squash 同样生成「Merge pull request #N」，
+标题判据恒定假绿（见 [成功回显](project_silent_success_failures.md) 第 11 条）。
+选那句话时挑**该 PR 明确删掉/新增的一句原文**，它天然就是「这个 PR 到底进没进」的指纹。
 
 同源提醒：判「工作有没有丢」也一样不能靠 ref 关系，见
 [PM 盘点法](project_pm_inventory_method.md)——`git log origin/<b>..<b>` 逐分支问会得出
