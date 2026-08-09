@@ -3,6 +3,7 @@ package command
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -406,7 +407,7 @@ func TestAAPLChildPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // newQueryDirTestFS 建一个指向 root 的真实 LocalFS。
-func newQueryDirTestFS(t *testing.T, root string) *vfs.LocalFS {
+func newQueryDirTestFS(t testing.TB, root string) *vfs.LocalFS {
 	t.Helper()
 
 	fs, err := vfs.NewLocalFS(vfs.LocalConfig{Root: root, CaseInsensitive: true})
@@ -418,7 +419,7 @@ func newQueryDirTestFS(t *testing.T, root string) *vfs.LocalFS {
 }
 
 // newQueryDirTestContext 在 fs 上建共享与会话，并打开根目录句柄。
-func newQueryDirTestContext(t *testing.T, fs vfs.FileSystem, aaplOn bool) (*Context, *Open) {
+func newQueryDirTestContext(t testing.TB, fs vfs.FileSystem, aaplOn bool) (*Context, *Open) {
 	t.Helper()
 
 	share := &Share{Name: "backup", Type: wire.ShareTypeDisk, FS: fs, TimeMachine: true}
@@ -503,6 +504,58 @@ func runQueryDirectory(t *testing.T, ctx *Context, open *Open, pattern string) m
 	return nil
 }
 
+// drainQueryDirectory 把目录枚举到底，只数条数，不保留字节 ——
+// 给 benchmark 用，避免测量结果被测试辅助代码的 map 分配污染。
+func drainQueryDirectory(tb testing.TB, ctx *Context, open *Open) int {
+	tb.Helper()
+
+	total := 0
+	for {
+		req := &wire.QueryDirectoryRequest{
+			FileInformationClass: wire.FileIdBothDirectoryInformation,
+			FileID:               wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
+			OutputBufferLength:   64 * 1024,
+		}
+		if total == 0 {
+			req.FileName = "*"
+		}
+		msg, err := req.Append(make([]byte, wire.HeaderSize))
+		if err != nil {
+			tb.Fatalf("编码请求: %v", err)
+		}
+		ctx.Msg = msg
+		ctx.Out = make([]byte, wire.HeaderSize)
+
+		if err := handleQueryDirectory(ctx); err != nil {
+			if err == status.NoMoreFiles {
+				return total
+			}
+			tb.Fatalf("handleQueryDirectory: %v", err)
+		}
+		resp, err := wire.ParseQueryDirectoryResponse(ctx.Out)
+		if err != nil {
+			tb.Fatalf("解析响应: %v", err)
+		}
+		total += countDirEntries(tb, resp.Buffer)
+	}
+}
+
+// countDirEntries 沿 NextEntryOffset 链数条数。
+func countDirEntries(tb testing.TB, buf []byte) int {
+	n, pos := 0, 0
+	for {
+		if pos+aaplDirEntryFixed > len(buf) {
+			tb.Fatalf("目录项在 %d 处被截断", pos)
+		}
+		n++
+		next := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+		if next == 0 {
+			return n
+		}
+		pos += next
+	}
+}
+
 // splitDirEntries 把目录项链切成「名字 → 该条目的固定部分+名字」的原始字节。
 func splitDirEntries(t *testing.T, buf []byte, out map[string][]byte) {
 	t.Helper()
@@ -566,4 +619,98 @@ func writeStream(t *testing.T, fs vfs.FileSystem, path, stream string, data []by
 	if _, err := h.WriteAt(data, 0); err != nil {
 		t.Fatalf("写流 %s:%s: %v", path, stream, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 大目录性能：readdir_attr 开 vs 关
+// ---------------------------------------------------------------------------
+//
+// 动机：commit 9b7185b 在 vfs 层量过纯枚举，结论是「无需优化」。
+// 但 readdir_attr 打开后每条目录项要**额外**向后端问一次 Apple 元数据
+// （LocalFS 里是 lstat + getxattr + open/stat `._name`），
+// 那个结论未必还成立 —— 所以在**命令层**重新量一遍完整路径。
+//
+// 跑法：
+//
+//	go test -run XXX -bench 'BenchmarkQueryDirectory' -benchtime 1x -benchmem \
+//	    ./internal/smb/command/
+//
+// # 实测（AMD EPYC 9K65, linux/amd64, 2 核容器，条目为空文件、无 Apple 元数据）
+//
+//	条目数   readdir_attr 关   readdir_attr 开   倍数   每条增量
+//	 1 000       4.3 ms            12.5 ms       2.9×    8.2 µs
+//	10 000     125   ms           282   ms       2.3×   15.7 µs
+//	50 000     387   ms          1053   ms       2.7×   13.3 µs
+//
+// # 结论：变慢是真的（约 2.5×），但仍不做优化
+//
+//  1. 增量随条目数**线性**，约 13 µs/条，全部花在
+//     LocalFS.AppleInfo 的 4 次系统调用上：
+//     Resolve 的 lstat、AppleInfo 自己又一次 lstat、getxattr(netatalk meta)、
+//     open("._name")。**没有**任何超线性的行为。
+//  2. 客户端感知的是**单页延迟**而不是总时长。64 KiB 输出缓冲一页约装 480 条，
+//     即每页约 10 ms —— 与不开时的 4 ms 同一个量级，离任何客户端超时都很远。
+//  3. 参照物：Samba 的 vfs_fruit 在 FRUIT_META_STREAM 模式下是对每个条目
+//     **完整 CREATE + PREAD + CLOSE** 一个 AFP_AfpInfo 流，比我们一次
+//     getxattr 贵得多。macOS 在真实 Samba 上就是这个体量，说明可接受。
+//  4. 这条路径只在 macOS 协商了 AAPL 之后才走，Windows/Linux 客户端零开销。
+//
+// # 已定位、但不属于本 agent 文件范围的优化点（已报 team-lead）
+//
+//   - internal/vfs/optional.go `LocalFS.AppleInfo` 里的 `os.Lstat(host)` 是**多余**的：
+//     上一行的 `res.Resolve(base)` 已经对每个分量 lstat 过了。去掉可省 1/4 的系统调用。
+//   - 更彻底的做法是给 vfs 加一个目录级批量接口
+//     （`AppleInfoBatch(dir string, names []string)`）：枚举时后端本来就
+//     Readdirnames 过整个目录，能一次性知道哪些 `._name` 存在，
+//     从而对绝大多数没有资源派生的 band 文件**完全免掉** open 探测。
+//     Time Machine 的 band 目录正是「几乎没有一个文件带 Apple 元数据」的场景。
+//
+// 在这两项落地之前不要在命令层加并发 fan-out：那是拿复杂度换一个
+// 尚未证明会造成问题的常数因子（AGENTS.md §5 P6）。
+
+// buildBandFiles 在 root 下造 n 个模拟 .sparsebundle band 的文件。
+func buildBandFiles(tb testing.TB, root string, n int) {
+	tb.Helper()
+	for i := 0; i < n; i++ {
+		p := filepath.Join(root, fmt.Sprintf("%x", i))
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			tb.Fatal(err)
+		}
+	}
+}
+
+func benchmarkQueryDirectory(b *testing.B, n int, aaplOn bool) {
+	root := b.TempDir()
+	buildBandFiles(b, root, n)
+	fs := newQueryDirTestFS(b, root)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ctx, open := newQueryDirTestContext(b, fs, aaplOn)
+		got := drainQueryDirectory(b, ctx, open)
+		if got != n+2 { // +2 是 "." 与 ".."
+			b.Fatalf("枚举到 %d 条, 期望 %d", got, n+2)
+		}
+		open.close()
+	}
+}
+
+func BenchmarkQueryDirectory1k(b *testing.B)      { benchmarkQueryDirectory(b, 1_000, false) }
+func BenchmarkQueryDirectory1kAAPL(b *testing.B)  { benchmarkQueryDirectory(b, 1_000, true) }
+func BenchmarkQueryDirectory10k(b *testing.B)     { benchmarkQueryDirectory(b, 10_000, false) }
+func BenchmarkQueryDirectory10kAAPL(b *testing.B) { benchmarkQueryDirectory(b, 10_000, true) }
+
+func BenchmarkQueryDirectory50k(b *testing.B) {
+	if testing.Short() {
+		b.Skip("建 5 万个文件较慢，-short 下跳过")
+	}
+	benchmarkQueryDirectory(b, 50_000, false)
+}
+
+func BenchmarkQueryDirectory50kAAPL(b *testing.B) {
+	if testing.Short() {
+		b.Skip("建 5 万个文件较慢，-short 下跳过")
+	}
+	benchmarkQueryDirectory(b, 50_000, true)
 }
