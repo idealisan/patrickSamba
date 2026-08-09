@@ -426,7 +426,7 @@ func (h *localHandle) lookupExactLocked(pattern string) (DirEntry, bool) {
 // 一次性 lstat 全部会让首个 QUERY_DIRECTORY 卡住好几秒。
 // 属性在每一批实际返回时才逐条取。
 func (h *localHandle) snapshotLocked() error {
-	f, err := os.Open(h.host)
+	f, err := openHostFile(h.host, os.O_RDONLY, 0)
 	if err != nil {
 		return mapError(err)
 	}

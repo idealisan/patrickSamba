@@ -282,7 +282,7 @@ func (l *LocalFS) openDir(req *OpenRequest, host, name string, exists bool) (Han
 	}
 	// 目录只需读句柄：SMB 对目录的「写」是 SET_INFO（改属性/改名），
 	// 那些操作走路径而不是 fd。
-	f, err := os.OpenFile(host, os.O_RDONLY|openNoFollow, 0)
+	f, err := openHostFile(host, os.O_RDONLY|openNoFollow, 0)
 	if err != nil {
 		return nil, 0, mapError(err)
 	}
@@ -351,7 +351,7 @@ func (l *LocalFS) openFile(req *OpenRequest, host, name string, exists bool) (Ha
 		return h, action, nil
 	}
 
-	f, err := os.OpenFile(host, flag|accessFlags(req.Flags, flag)|openNoFollow, l.cfg.FileMode)
+	f, err := openHostFile(host, flag|accessFlags(req.Flags, flag)|openNoFollow, l.cfg.FileMode)
 	if err != nil {
 		return nil, 0, mapError(err)
 	}
