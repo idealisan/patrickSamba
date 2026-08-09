@@ -5,4 +5,5 @@
 - [必须用 3~5 个子 agent 组队并行开发](feedback_parallel_agent_team.md) — 用户判定串行太慢，要求分工组队；附文件所有权与端口隔离的做法
 - [开发环境固有限制与重启恢复步骤](project_environment_constraints.md) — Go 不在 PATH、mount.cifs 缺 CAP_SYS_ADMIN 永远跑不了、pkill -f 自杀坑、smbclient -c 分号坑
 - [三类隐形 bug 的排查模式](project_bug_patterns.md) — 死字段/被上游架空的逻辑/示例配置跑不起来，只有端到端能发现；附 worktree 负向实验法
+- [共享工作树里的写入纪律](feedback_shared_worktree_write_discipline.md) — Write 前必须 Read，曾整个覆盖队友已完成的 lock.go；附归属判断与 pkill 名字截断坑
 - [Samba 权威源码的在线取用方式](reference_samba_source.md) — 容器能联网 curl gitlab raw；Apple 扩展只有 Samba 源码是权威，附关键文件清单与已改名的坑
