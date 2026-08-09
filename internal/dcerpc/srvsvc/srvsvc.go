@@ -28,7 +28,7 @@ func init() {
 // opnum（MS-SRVS §3.1.4）。
 const (
 	opnumNetShareEnumAll  uint16 = 15 // NetrShareEnum
-	opnumNetShareGetInfo uint16 = 16 // NetrShareGetInfo
+	opnumNetShareGetInfo  uint16 = 16 // NetrShareGetInfo
 	opnumNetServerGetInfo uint16 = 21 // NetrServerGetInfo
 )
 
@@ -41,9 +41,9 @@ const (
 
 // WERROR 码（MS-ERREF / winerror.h / lmerr.h）。
 const (
-	werrOK               uint32 = 0x00000000
-	werrNotSupported     uint32 = 0x00000032 // ERROR_NOT_SUPPORTED (50)
-	nerrNetNameNotFound  uint32 = 0x00000906 // NERR_NetNameNotFound (2310)
+	werrOK              uint32 = 0x00000000
+	werrNotSupported    uint32 = 0x00000032 // ERROR_NOT_SUPPORTED (50)
+	nerrNetNameNotFound uint32 = 0x00000906 // NERR_NetNameNotFound (2310)
 )
 
 // secAddr 是 bind_ack 回送的 secondary address（MS-RPCE §2.2.2.4），必须是 "\\PIPE\\srvsvc"。
@@ -316,23 +316,23 @@ func (h *Handler) netServerGetInfo(pdu *dcerpc.PDU) ([]byte, error) {
 		return marshalServerGetInfoResp(pdu.CallID, req.Level, nil, werrNotSupported), nil
 	}
 	info := &serverInfo{
-		PlatformID:    500, // PLATFORM_ID_NT
-		Name:          h.ServerName,
-		VersionMajor:  h.MajorVersion,
-		VersionMinor:  h.MinorVersion,
-		Type:          0x00800002, // SV_TYPE_NT | SV_TYPE_SERVER
-		Comment:       h.ServerComment,
+		PlatformID:   500, // PLATFORM_ID_NT
+		Name:         h.ServerName,
+		VersionMajor: h.MajorVersion,
+		VersionMinor: h.MinorVersion,
+		Type:         0x00800002, // SV_TYPE_NT | SV_TYPE_SERVER
+		Comment:      h.ServerComment,
 	}
 	return marshalServerGetInfoResp(pdu.CallID, 101, info, werrOK), nil
 }
 
 type serverInfo struct {
-	PlatformID    uint32
-	Name          string
-	VersionMajor  uint32
-	VersionMinor  uint32
-	Type          uint32
-	Comment       string
+	PlatformID   uint32
+	Name         string
+	VersionMajor uint32
+	VersionMinor uint32
+	Type         uint32
+	Comment      string
 }
 
 type serverGetInfoReq struct {

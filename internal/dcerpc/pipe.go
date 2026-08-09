@@ -56,9 +56,9 @@ var ErrMoreData = errors.New("dcerpc: 管道响应超出输出缓冲")
 
 // NCA 状态码（MS-RPCE §3.1.1.1 / C706 §13.2.4.1），用于 fault PDU。
 const (
-	NCAStatusOpRangeError uint32 = 0x1c010002 // nca_op_rng_error：不支持的 opnum
+	NCAStatusOpRangeError  uint32 = 0x1c010002 // nca_op_rng_error：不支持的 opnum
 	NCAStatusProtocolError uint32 = 0x1c010003
-	NCAStatusFault        uint32 = 0x1c000001 // nca_fault
+	NCAStatusFault         uint32 = 0x1c000001 // nca_fault
 )
 
 type pipe struct {
