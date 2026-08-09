@@ -225,10 +225,15 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 
 ## 7. 协作准则（多 agent 并行开发）
 
-### 7.1 并行分工
+### 7.1 并行分工（**强制**，不是可选项）
 
-本项目允许并鼓励**同时使用 3~5 个子 agent 分模块并行开发**，以加快进度。
+**任何非平凡的推进都必须组建 3~5 个子 agent 的团队并行做，禁止 team-lead 一个人串行写。**
+这是项目所有者反复强调过的要求（原话：「现在的工作速度太慢了，你必须使用 3~5 个子 agent，
+分工合作形成团队去完成工作」）。串行开发在本项目被明确判定为不可接受。
+
 分工按 §5 的分层切分，模块之间**通过接口契约解耦**，先定接口再并行实现。
+
+初始按分层划分的角色：
 
 | Agent 角色 | 负责范围 |
 |---|---|
@@ -237,6 +242,28 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 | `vfs` | `internal/vfs` — 可写 VFS 接口与本地磁盘实现、路径安全、属性映射 |
 | `server` | `internal/server`、`internal/smb/command` — 连接/会话/树/句柄状态机与命令分发 |
 | `mdns` | `internal/mdns`、`internal/config`、`cmd/` — mDNS responder、配置、启动装配 |
+
+随着 `internal/smb/command` 变大，该目录内部要**按文件再切分**，否则三个 agent 会互相覆盖。
+实际使用中验证有效的切法（可按当期重点调整，但必须落到**文件级**）：
+
+| Agent | `internal/smb/command` 下拥有的文件 | 另外拥有 |
+|---|---|---|
+| `server` | `dispatch/context/conn/session/tree/close/open/echo/negotiate/session_setup/tree_connect/smb1/settings/read_write/cancel` | `internal/server`、`internal/smb/dialect` |
+| `info` | `query_info/set_info/ioctl/pipe` | `internal/smb/wire/query_info.go` 等对应报文文件 |
+| `apple` | `aapl/create/query_directory` | `internal/mdns` 的 Time Machine 广播部分 |
+| `qa` | （不改产品代码） | `test/`、`scripts/` |
+
+配套规则：
+
+- **每个 agent 的 prompt 里必须写死「能改哪些文件 / 明确不能改哪些」**。
+  5 个 agent 共用同一个工作树 `/workspace`，不做文件级隔离一定会互相破坏。
+- 公共文件（如 `internal/smb/wire/const.go`）规定为**只追加、加完立刻单独提交**。
+- 每个 agent 分配**专属调试端口**（例：4451~4455），否则起服务互相抢 445/4445。
+- agent 需要改别人的文件时，**发消息给 team-lead 协调**，不要自己动手。
+- team-lead 收到 agent 的调研结论后要**自己消化再下发具体规格**（文件路径 + 行号 + 改什么），
+  不要把「based on your findings, go fix it」这种话丢回去 —— 那等于没做分工。
+- 每个 agent 的 prompt 必须是**自包含**的：它看不到 team-lead 的对话历史，
+  项目背景、环境坑（见 §10.3）、提交纪律、文件所有权都要重复写一遍。
 
 ### 7.2 **尽快提交，尽快推送**（重要）
 
@@ -303,3 +330,71 @@ CGO_ENABLED=0 go build ./... && git add -A && git commit -m "<模块>: <做了�
 - **不确定的字段值不要猜**。查不到就抓包验证，或在代码注释里明确标注 `// TODO: 待验证`。
 - 写死的常量必须在注释里注明规范章节号。
 - 发现规范与真实客户端行为不一致时，**以真实客户端行为为准**，并在注释里记录这个差异和原因。
+
+---
+
+## 10. 会话历史、记忆与开发环境（**血泪教训，必读**）
+
+> **本项目的开发容器会不定期崩溃并重启，清空 git 仓库以外的一切。**
+> 已经真实发生过多次：Go 工具链消失、python3/smbclient 消失、agent 记忆被清空、
+> 整个 CodeBuddy 会话历史丢失。**凡是不在 git 里的东西都不可信。**
+
+### 10.1 CodeBuddy 会话历史存在哪、怎么救回来
+
+**存放位置**（全部在仓库外，重启即失）：
+
+| 路径 | 内容 |
+|---|---|
+| `~/.codebuddy/projects/workspace/<uuid>.jsonl` | 会话主线完整记录（每行一条消息，含 reasoning 与工具调用） |
+| `~/.codebuddy/projects/workspace/<uuid>/subagents/agent-*.jsonl` | 每个子 agent 的完整分支记录 |
+| `~/.codebuddy/projects/workspace/<uuid>/tool-results/` | 大块工具输出缓存（可从 jsonl 推出，不必备份） |
+| `~/.codebuddy/projects/workspace/memory/`、`MEMORY.md` | agent 记忆的**工作副本**（权威副本在仓库 `memory/`，见 §10.2） |
+| `~/.codebuddy/history.jsonl` | 跨项目的历史 prompt 列表（只是输入框历史，不含回答） |
+
+**入库**：`scripts/save-history.sh` —— 把上面的 jsonl 快照进仓库 `history/`，
+自动生成 `history/INDEX.md`（列出每个会话的行数、大小、时间、首条用户消息），并提交推送。
+**team-lead 应当在每个里程碑、以及任何一次长时间工作之后主动跑一次。**
+
+**恢复**（重启后）：
+
+```sh
+scripts/restore-history.sh          # 看仓库里存了哪些会话
+scripts/restore-history.sh 3dfd1b74 # 把该会话（支持 uuid 前缀）放回 ~/.codebuddy
+codebuddy --resume=3dfd1b74-3275-4b3f-9728-7234708c415e
+```
+
+**关键事实（已实测验证）**：
+
+- `codebuddy --resume=<uuid>` 是**可用**的，前提是那个 uuid 的 jsonl 在
+  `~/.codebuddy/projects/workspace/` 下。恢复只是把历史上下文读回来，
+  **不会重跑任何工作**，代价远低于从头再来。
+- **`codebuddy -c` / `--continue` 是陷阱**：它接的是「最近一次」会话。崩溃后你新开的
+  那个空会话就是最近的，于是恢复出一个空壳 —— 这就是「resume 不管用」的真相，
+  不是 resume 坏了，是接错了会话。**永远用 `--resume=<uuid>` 指名道姓。**
+- uuid 从 `history/INDEX.md` 里挑：**挑行数最多的那个，不是时间最新的那个**。
+- 子 agent 的 jsonl 单独存在 `<uuid>/subagents/` 下。团队并行时这里往往比主线还大
+  （实测主线 1.8 MB、5 个子 agent 合计 1.9 MB），排查「某个 agent 当时到底做了什么」
+  只能看这些文件，务必一起备份。
+
+### 10.2 记忆必须入库
+
+agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../memory` 只是当次会话的
+工作副本，重启即失。任何记忆的新增/修改都要写进 `/workspace/memory/` 并 git 提交。
+
+### 10.3 环境固有限制与避坑清单
+
+1. **Go 不在 PATH**：每个新 shell 都要 `export PATH=$PATH:/usr/local/go/bin`。
+   真没了就重装 `go1.25.0.linux-amd64.tar.gz` 到 `/usr/local/go`。
+2. **`mount.cifs` 在本容器永远跑不通** —— 缺 `CAP_SYS_ADMIN`，报
+   `Unable to apply new capability set`。这是环境限制不是服务端 bug，
+   `scripts/acceptance.sh` 已把它做成 skip(rc=77)。§3 要求的「至少三种第三方客户端通过」
+   由 **smbclient + impacket + go-smb2** 三家满足。不要因为它 fail 就判定验收不通过。
+3. **impacket 用 apt 装，不要用 pip**：`apt-get install python3-impacket`
+   （pip 装会和已有的 cryptography 版本冲突）。
+4. **致命坑一：`pkill -f <路径>` 会自杀**。该模式会匹配到执行它的 shell 自己的命令行，
+   把父 shell 一起杀掉，表现为「命令无输出 / 被 SIGTERM / 服务起不来」，极难排查。
+   一律用 `pkill -x stupidsamba`。起后台服务用
+   `setsid nohup ... > log 2>&1 < /dev/null & disown`。
+5. **致命坑二：smbclient 4.22 的 `-c` 不按换行分割命令**。多条命令必须用**分号**分隔。
+   写成多行会产生 `NT_STATUS_NO_SUCH_FILE listing \get` 这种**假故障**，
+   看起来像服务端 bug，其实是测试脚本的问题。
