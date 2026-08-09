@@ -320,9 +320,18 @@ CGO_ENABLED=0 go build ./... && git add -A \
 export PATH=$PATH:/usr/local/go/bin
 git -C /workspace worktree add /work/<agent 角色> -b <agent 角色>/<主题> origin/main
 cd /work/<agent 角色>
+git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由见下
 ```
 
 例：`git -C /workspace worktree add /work/auth -b auth/smb30-encryption origin/main`
+
+> **第 4 行「先把空分支推上去」是必做的，不是可选的。**
+> `worktree add -b <分支> origin/main` 会把新分支的 **upstream 设成 `origin/main`**——
+> 也就是说你开工那一刻，分支的默认推送目标就是**别人的 main**。
+> 在这个状态下裸跑 `git push` 会被 `push.default=simple` 拒绝（响雷，不算致命），
+> 但它正是 §7.2 里那个「refspec 静默丢提交」事故的土壤。
+> 立刻推一次空分支，upstream 当场纠正为你自己的分支，之后 `git push` 才是安全的。
+> 附带好处：分支在远端立刻可见，PM 盘点进度时能第一时间看到你已开工。
 
 要点：
 
