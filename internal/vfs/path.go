@@ -79,21 +79,6 @@ const (
 //     先拆成 OpenRequest.Path + OpenRequest.Stream，到这里不允许再出现。
 const invalidNameChars = `"*/:<>?\|`
 
-// reservedNames 是 Windows 的设备名（MS-DOS 遗留）。
-//
-// 为什么在 Linux 上也拒绝：本项目要跨平台（AGENTS.md C7），同一份路径
-// 逻辑必须在 Windows 宿主上也安全 —— 在 Windows 上 open("CON") 打开的是
-// 控制台设备而不是文件。统一拒绝可以避免「Linux 上能建、Windows 上变成
-// 设备」这种平台相关的惊吓。代价是宿主机上真实存在的名为 `aux` 的
-// POSIX 文件将不可访问，这是可接受的取舍（Windows 客户端本来也建不出来）。
-var reservedNames = map[string]struct{}{
-	"CON": {}, "PRN": {}, "AUX": {}, "NUL": {},
-	"COM1": {}, "COM2": {}, "COM3": {}, "COM4": {}, "COM5": {},
-	"COM6": {}, "COM7": {}, "COM8": {}, "COM9": {},
-	"LPT1": {}, "LPT2": {}, "LPT3": {}, "LPT4": {}, "LPT5": {},
-	"LPT6": {}, "LPT7": {}, "LPT8": {}, "LPT9": {},
-}
-
 // SplitPath 校验并规范化一条**共享内相对路径**，返回各路径分量。
 //
 // 输入约定见 OpenRequest.Path：'/' 分隔、不以 '/' 开头、空串表示共享根。
@@ -163,11 +148,12 @@ func CleanPath(p string) (string, error) {
 }
 
 // ValidateComponent 校验单个路径分量的**字符层面**合法性：
-// 非空、不超长、无控制字符、无 SMB 非法字符、不是 Windows 保留设备名。
+// 非空、不超长、无控制字符、无 SMB 非法字符，以及 winpath.go 里那套
+// Windows 名字规则（设备名、宿主会归一的结尾点/空格）。
 //
 // ⚠️ **它不是防路径穿越的屏障。** 本函数**故意放行 "." 与 ".."** ——
 // 它的唯一调用方 SplitPath 在 switch 里先行处理了那两个分量
-// （见上方 :139~:145），轮不到这里。
+// （见上方 :124~:130），轮不到这里。
 //
 // 因此「拿到一个来自客户端的名字 → ValidateComponent → filepath.Join」
 // 这个模式**是有洞的**：`Join(dir, "..")` 直接就是父目录。
@@ -176,6 +162,16 @@ func CleanPath(p string) (string, error) {
 //
 // 这不是假设：AppleInfoAt 的第一版就是这么写的，被自己的用例逼出来。
 func ValidateComponent(name string) error {
+	return validateComponent(name, hostNormalizesTrailingDotSpace)
+}
+
+// validateComponent 是 ValidateComponent 的实现，把宿主归一行为做成参数。
+//
+// 与 validateWindowsName 同样的理由（见 winpath.go 那段注释）：结尾点/空格
+// 规则只在 Windows 宿主上生效，而本项目没有 Windows 机器。做成参数之后，
+// 「接线之后 Windows 侧到底会不会拒」这件事能在 Linux 上被直接断言，
+// 否则那半边逻辑等于没写（AGENTS.md §3 验收判据必须可证伪）。
+func validateComponent(name string, hostTrimsTrailingDotSpace bool) error {
 	if name == "" {
 		return fmt.Errorf("%w: 空的路径分量", ErrInvalidPath)
 	}
@@ -192,15 +188,19 @@ func ValidateComponent(name string) error {
 			return fmt.Errorf("%w: 路径分量 %q 含非法字符 %q", ErrInvalidPath, name, rune(c))
 		}
 	}
-	// 设备名判定取第一个 '.' 之前的部分：Windows 下 "CON.txt" 同样是设备。
-	base := name
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
+	// "." 与 ".." 不满足 validateWindowsName 的输入约定：它的第 1 条规则看的是
+	// 结尾字符，会把这两个连坐拒掉。而本函数按契约要放行它们（见上方说明），
+	// 所以在此先行返回 —— 既满足被调方的前置条件，也保证同一个输入在三个平台
+	// 上得到同一个结论，不会出现「Linux 放行、Windows 拒绝」的漂移。
+	//
+	// 这不是死代码：把它删掉，validateComponent("..", true) 会开始返回错误
+	// （path_wiring_test.go 有对应断言）。本包现有的四个调用方都在调用前
+	// 自行处理了这两个分量，所以删不删都影响不到它们 —— 正因如此才必须
+	// 用参数化的 validateComponent 直接断言，光靠调用方是测不出来的。
+	if name == "." || name == ".." {
+		return nil
 	}
-	if _, bad := reservedNames[strings.ToUpper(base)]; bad {
-		return fmt.Errorf("%w: %q 是 Windows 保留设备名", ErrInvalidPath, name)
-	}
-	return nil
+	return validateWindowsName(name, hostTrimsTrailingDotSpace)
 }
 
 // Resolver 把共享内相对路径解析为宿主机绝对路径，并保证结果不逃出根目录。

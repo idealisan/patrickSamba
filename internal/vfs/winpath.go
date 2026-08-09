@@ -11,9 +11,10 @@ package vfs
 //
 // # 为什么设备名三平台一致
 //
-// 与 path.go 里 reservedNames 的理由相同（见 path.go :84~:88）：同一份共享
-// 内容要能在平台间搬迁，如果 Linux 上能建 `CON`、搬到 Windows 宿主上就变成
-// 控制台设备，那是平台相关的惊吓。误伤概率极低——没人把文件叫 `CONIN$`。
+// 同一份共享内容要能在平台间搬迁：如果 Linux 上能建 `CON`、搬到 Windows
+// 宿主上就变成控制台设备，那是平台相关的惊吓。代价是宿主机上真实存在的、
+// 名为 `aux` 的 POSIX 文件从此不可访问，这是可接受的取舍——Windows 客户端
+// 本来也建不出来，误伤概率极低，没人把文件叫 `CONIN$`。
 //
 // # 为什么结尾的点与空格**不能**三平台一致
 //
@@ -39,7 +40,7 @@ package vfs
 // 该平台上并不存在的威胁。所以防御只在会别名的宿主上生效。
 //
 // 代价（仅 Windows 宿主）：宿主机上真实存在的、名字以点或空格结尾的文件
-// 不可访问。这与 reservedNames 同类，是已知且接受的取舍——Windows 客户端
+// 不可访问。这与上面设备名那条同类，是已知且接受的取舍——Windows 客户端
 // 本来也造不出这种名字。
 
 import (
@@ -53,18 +54,19 @@ import (
 // 那些属于控制字符，已被 ValidateComponent 的 c < 0x20 挡在前面。
 const winTrimmedChars = ". "
 
-// winReservedNames 是 Windows 的设备名，比 path.go 的 reservedNames 更全。
+// winReservedNames 是 Windows 的设备名，是本包唯一的一张设备名表。
 //
-// 补齐的三类（出处：MS Docs "Naming Files, Paths, and Namespaces" →
-// "Naming Conventions"，以及 .NET runtime 的 PathInternal.Windows.cs）：
+// 它取代了 path.go 里那张只有 CON/PRN/AUX/NUL + COM1~9/LPT1~9 的旧表
+// （已随接线一并删除），相对旧表补齐三类（出处：MS Docs "Naming Files,
+// Paths, and Namespaces" → "Naming Conventions"，以及 .NET runtime 的
+// PathInternal.Windows.cs）：
 //
 //  1. COM0 / LPT0 —— 较新的 Windows 文档已把 0 纳入保留集合。
 //  2. COM¹ COM² COM³ / LPT¹ LPT² LPT³ —— 上标数字（U+00B9 / U+00B2 / U+00B3）
 //     变体同样被识别为设备。这条极易漏，且正因为长得像普通文件名而危险。
 //  3. CONIN$ / CONOUT$ —— 控制台输入/输出句柄的别名。
 //
-// AUX/PRN/NUL/CON 与 COM1~9/LPT1~9 在 path.go 已有，这里重复列出以便本表
-// 自洽——validateWindowsName 只查本表，不再回头查 path.go 那份。
+// 旧表的内容全部包含在本表内，winpath_test.go 的 superset 用例把这一点钉死。
 var winReservedNames = func() map[string]struct{} {
 	m := map[string]struct{}{
 		"CON": {}, "PRN": {}, "AUX": {}, "NUL": {},
