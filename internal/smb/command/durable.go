@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
@@ -21,6 +22,23 @@ import (
 // Session.Close）时普通句柄被关闭，持久句柄则要搬进 durableRegistry 进入
 // 「等待重连」态，直到被重连认领或超时回收。本服务端是单进程单实例，
 // 用一个包级登记表即可，无需引入 server 级对象。
+
+// ---------------------------------------------------------------------------
+// 加锁次序（改这个文件之前必读）
+//
+//	o.mu → r.mu     Open.close() 内部会调 durableTable.remove()。
+//	s.mu → r.mu     Session.RemoveTree/Close 先摘句柄，再调 disconnect()。
+//
+// 由此得出一条铁律：**持有 r.mu 时绝对不许再去取 o.mu 或 s.mu**，否则与上面
+// 两条形成加锁顺序反转。具体到本文件：
+//
+//   - reap() 必须「锁内摘表、锁外 close」。在 r.mu 内调 o.close() 会经
+//     remove() 再次申请 r.mu，sync.Mutex 不可重入 —— 直接自死锁。
+//   - reconnect() 必须先释放 r.mu 再调 session.rebindOpen()（它取 s.mu）。
+//
+// 反过来，只写 DurableState 自己字段（key / Invalidated）的操作**必须**放在
+// r.mu 内：它们不碰任何别的锁，不会把死锁请回来，而放在锁外就是 data race。
+// ---------------------------------------------------------------------------
 
 // durableRegistry 是跨连接存活的持久句柄登记表。
 var durableRegistry = newDurableRegistry()
@@ -55,9 +73,13 @@ type DurableState struct {
 	timeout time.Duration
 
 	// Invalidated 表示因 lease break 等导致 durable 资格丧失，不可再重连。
+	//
+	// **由 durableRegistry.mu 保护**（读写都要在 r.mu 内），不要裸读裸写。
 	Invalidated bool
 
 	// key 是登记表里的键，便于 disconnect/remove 定位（reconnect 后置空）。
+	//
+	// **由 durableRegistry.mu 保护**，同上。
 	key string
 }
 
@@ -66,11 +88,7 @@ type DurableState struct {
 //
 // 调用方只需持有 *Open，不必知道登记表内部细节。
 func (o *Open) InvalidateDurable() {
-	if o.Durable == nil {
-		return
-	}
-	o.Durable.Invalidated = true
-	durableRegistry.remove(o)
+	durableRegistry.invalidate(o)
 }
 
 // durableEntry 是登记表里的一条记录：一个正在「等待重连」的持久句柄，
@@ -88,22 +106,88 @@ type durableEntry struct {
 }
 
 type durableTable struct {
-	mu             sync.Mutex
-	entries        map[string]*durableEntry
-	defaultTimeout time.Duration
+	mu sync.Mutex
+	// entries 由 mu 保护；每条记录里的 open.Durable.key / .Invalidated
+	// 也一并由 mu 保护（见文件头的加锁次序说明）。
+	entries map[string]*durableEntry
 }
 
 func newDurableRegistry() *durableTable {
-	return &durableTable{
-		entries:        make(map[string]*durableEntry),
-		defaultTimeout: defaultDurableTimeout,
-	}
+	return &durableTable{entries: make(map[string]*durableEntry)}
 }
+
+// invalidate 标记句柄丧失 durable 资格并摘除其登记。
+//
+// Invalidated 与 key 都在 r.mu 内改动 —— 原实现在锁外写 Invalidated，
+// 与 reconnect 里的读构成 data race（`go test -race` 可复现）。
+func (r *durableTable) invalidate(open *Open) {
+	if open == nil || open.Durable == nil {
+		return
+	}
+	r.mu.Lock()
+	d := open.Durable
+	d.Invalidated = true
+	r.detachLocked(open)
+	r.mu.Unlock()
+}
+
+// detachLocked 摘除 open 的登记项并清空它的键。调用前必须持有 r.mu。
+//
+// 只在「表里那条记录确实属于这个 open」时才删：键碰撞的情况下按键裸删会把
+// **别人的**登记删掉，受害者从此再也无法重连，而且日志里什么都看不到。
+func (r *durableTable) detachLocked(open *Open) {
+	d := open.Durable
+	if d == nil || d.key == "" {
+		return
+	}
+	if e := r.entries[d.key]; e != nil && e.open == open {
+		delete(r.entries, d.key)
+	}
+	d.key = ""
+}
+
+// nextPersistentID 是 FileId.Persistent 的**全进程**分配器。
+//
+// MS-SMB2 §3.3.1.10：服务端把每个 Open 挂进 GlobalOpenTable，索引是
+// Open.FileId 的 Persistent 部分，作用域是**整个服务端**，不是单个会话。
+// 原实现把它设成 Session 内的计数器（session.go 的 AddOpen），于是每条
+// 连接的第一个句柄 Persistent 都是 1。
+//
+// 这对 durable handle 是致命的：v1 重连（DHnC，§2.2.13.2.3）客户端带回来的
+// 就是这个 Persistent 值，服务端只能拿它当登记表键。两个会话撞在同一个键上
+// 时，后登记的会顶掉先登记的，重连时服务端把**另一个文件的句柄**交回去 ——
+// 一条跨会话的数据泄漏路径，身份校验拦不住（同一用户开两条连接完全正常）。
+//
+// 修法只能是让 Persistent 本身全进程唯一：键必须能从客户端带回的值反推，
+// 所以不存在「另起一个内部唯一键」的选项。
+//
+// **不变量（改这里之前必读）**：返回值永远落在 [1, 0xFFFFFFFFFFFFFFFF) 内，
+// 两端都不能碰：
+//
+//   - 0 保留作「未分配」。Add 先加后返，首值即 1，天然避开。
+//   - 全 1（0xFFFFFFFFFFFFFFFF）是 wire.CompoundFileID 的一半 —— 复合请求里
+//     「复用上一条 CREATE 返回的句柄」的占位值（§3.2.4.1.4，macOS 大量使用）。
+//     单调递增到它需要 1.8e19 次分配，实际不可达；而且 IsCompound() 要求
+//     Persistent 与 Volatile **同时**为全 1，Volatile 是会话内计数器，更够不着。
+//
+// 将来若有人把这里改成「从别处取值」（复用回收的 ID、取时间戳、取随机数），
+// 上面两条就不再自动成立，**必须显式排除这两个值** —— 否则一个正常句柄会被
+// IsCompound() 误判成复合占位符，客户端拿到的句柄直接串号。
+//
+// 不考虑回绕与复用：每秒分配一百万个也要 58 万年。
+var nextPersistentID atomic.Uint64
+
+// newPersistentID 分配一个全进程唯一的 FileId.Persistent。见上面的不变量。
+func newPersistentID() uint64 { return nextPersistentID.Add(1) }
 
 // durableKey 计算登记表键。
 //
 //	v1：persistent FileId（DHnC 重连时客户端带回的就是它）
 //	v2：CreateGuid（不透明 16 字节，逐字节比较，绝不当 UUID 解析）
+//
+// v1 的唯一性完全由 newPersistentID 的全局单调性保证；v2 的键是**客户端
+// 自己给的** CreateGuid，服务端管不住，恶意客户端可以故意重复 —— 那一侧
+// 靠 register() 的占位检查兜底。
 func durableKey(v2 bool, guid [16]byte, persist uint64) string {
 	if !v2 {
 		return "v1:" + fmt.Sprintf("%d", persist)
@@ -112,13 +196,31 @@ func durableKey(v2 bool, guid [16]byte, persist uint64) string {
 }
 
 // register 在授予时登记句柄（deadline 为零，表示尚未断连）。
-func (r *durableTable) register(open *Open) {
+//
+// 返回 false 表示**不能登记**：这个键已经被另一个仍然存活的句柄占着。
+// 调用方必须据此**放弃授予**（当普通句柄处理），绝不能假装授予成功 ——
+// 两个句柄共用一个键时，后登记的会静默顶掉先登记的，重连时服务端就会把
+// **另一个文件的句柄**交给客户端。这是一条跨会话的数据泄漏路径，
+// 身份校验拦不住它（同一个用户开两条连接是完全正常的场景）。
+func (r *durableTable) register(open *Open) bool {
 	d := open.Durable
 	if d == nil || !d.Granted {
-		return
+		return false
 	}
+
+	// 顺手清一遍过期项。本表刻意不起常驻回收 goroutine（「起了个 goroutine
+	// 但没人管它生命周期」在本项目是另一类坑），改为在每次新登记时做一次
+	// 机会式回收 —— 有新句柄进来才可能增长，正好在这里堵住无界增长。
+	// 必须在取 r.mu **之前**调用：reap 自己会加锁，且会在锁外 close 句柄。
+	r.reap(time.Now())
+
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	key := durableKey(d.v2, d.guid, open.Persistent)
+	if e := r.entries[key]; e != nil && e.open != open {
+		return false
+	}
 	r.entries[key] = &durableEntry{
 		open:     open,
 		v2:       d.v2,
@@ -130,21 +232,35 @@ func (r *durableTable) register(open *Open) {
 		timeout:  d.timeout,
 	}
 	d.key = key
-	r.mu.Unlock()
+	return true
 }
 
 // disconnect 在连接断开时调用：把句柄搬进「等待重连」态（设置 deadline）。
 //
 // 幂等且可重复：重连成功后句柄离开登记表，若之后再次断连，这里会
 // 用 DurableState 里记下的元数据重建记录，不会丢。
-func (r *durableTable) disconnect(open *Open) {
+//
+// 返回 false 表示这个句柄**不能**转入等待态（不是持久句柄、已作废、或键被
+// 别的存活句柄占着）。调用方必须据此把它当普通句柄关掉 —— 既不进等待表又
+// 不关闭的话，fd 会永久泄漏。
+func (r *durableTable) disconnect(open *Open) bool {
 	d := open.Durable
 	if d == nil || !d.Granted {
-		return
+		return false
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if d.Invalidated {
+		return false
+	}
 	key := durableKey(d.v2, d.guid, open.Persistent)
 	e := r.entries[key]
+	if e != nil && e.open != open {
+		// 键被别人占着。顶掉他等于把他的句柄变成孤儿（永不关闭、永不可
+		// 重连），所以这里认输：本句柄放弃 durable，由调用方正常关闭。
+		return false
+	}
 	if e == nil {
 		e = &durableEntry{
 			open:     open,
@@ -160,40 +276,69 @@ func (r *durableTable) disconnect(open *Open) {
 	}
 	e.deadline = time.Now().Add(d.timeout)
 	d.key = key
-	r.mu.Unlock()
+	return true
 }
 
-// remove 从句柄表摘除（显式 CLOSE 或作废时调用）。
+// remove 从句柄表摘除（显式 CLOSE 或作废时调用）。带归属校验，见 detachLocked。
 func (r *durableTable) remove(open *Open) {
-	if open.Durable == nil {
+	if open == nil || open.Durable == nil {
 		return
 	}
 	r.mu.Lock()
-	if open.Durable.key != "" {
-		delete(r.entries, open.Durable.key)
-	}
+	r.detachLocked(open)
 	r.mu.Unlock()
 }
 
-// reap 回收所有已过期的等待记录（惰性调用，避免常驻 goroutine）。
+// reap 回收所有已过期的等待记录：摘表**并关闭底层句柄**。
+//
+// 只 delete 不 close 是原实现的缺陷：*Open 与它持有的 fd 会永久泄漏，
+// Windows 上还会一直占着文件不让删/改名，FILE_DELETE_ON_CLOSE 创建的句柄
+// 也永远不会执行那次删除。
+//
+// 注意「锁内摘表、锁外关闭」的写法不是风格问题：Open.close() 会回头调
+// durableTable.remove() 再次申请 r.mu，在临界区里调它就是自死锁。
 func (r *durableTable) reap(now time.Time) {
+	var expired []*Open
 	r.mu.Lock()
 	for k, e := range r.entries {
-		if !e.deadline.IsZero() && now.After(e.deadline) {
-			delete(r.entries, k)
+		if e.deadline.IsZero() || !now.After(e.deadline) {
+			continue
 		}
+		delete(r.entries, k)
+		if e.open == nil {
+			continue
+		}
+		if d := e.open.Durable; d != nil {
+			d.key = ""
+			d.Invalidated = true // 超时之后不再具备重连资格
+		}
+		expired = append(expired, e.open)
 	}
 	r.mu.Unlock()
+
+	for _, o := range expired {
+		o.close()
+	}
 }
 
 // reconnect 认领一个等待重连的持久句柄。
 //
+// tree 是本次 CREATE 所在的树连接（重连必然发生在一次新的 TREE_CONNECT 上）；
+// 共享名从它取，因此不可能出现「传进来的 share 名与实际树不是同一个」这种
+// 参数不一致。tree 为 nil 时按空共享名处理（一定校验失败）。
+//
 // 返回 (*Open, status.Success) 表示成功；其它 status 表示失败原因，
 // *Open 为 nil。校验项（§3.3.5.9.9）：
-//   - 记录存在、未作废、未过期、且已处于「等待重连」态（deadline 非零）；
+//   - 记录存在；
 //   - 重连到的共享名与授予时一致；
-//   - 重连身份与授予时一致。
-func (r *durableTable) reconnect(session *Session, intent *wire.DurableIntent, shareName string) (*Open, status.Status) {
+//   - 重连身份与授予时一致；
+//   - 未作废、未过期、且已处于「等待重连」态（deadline 非零）。
+//
+// **次序不能改**：share/身份校验必须排在所有「删除登记」的分支之前。
+// 原实现把作废/过期两个删除分支放在授权校验之前，于是任何一个已认证会话
+// （含 guest）只要猜中键，就能把别人的登记删掉 —— v1 的键就是 1、2、3…
+// 这样的小整数，猜中的成本约等于零。
+func (r *durableTable) reconnect(session *Session, tree *Tree, intent *wire.DurableIntent) (*Open, status.Status) {
 	var key string
 	switch {
 	case intent.ReconnectV1 != nil:
@@ -203,58 +348,92 @@ func (r *durableTable) reconnect(session *Session, intent *wire.DurableIntent, s
 	default:
 		return nil, status.ObjectNameNotFound
 	}
+	shareName := ""
+	if tree != nil && tree.Share != nil {
+		shareName = tree.Share.Name
+	}
 
 	r.reap(time.Now())
 
-	r.mu.Lock()
-	e := r.entries[key]
-	if e == nil {
-		r.mu.Unlock()
-		return nil, status.ObjectNameNotFound
-	}
-	if e.open.Durable.Invalidated {
+	// expired 在临界区外关闭（close 会回头取 r.mu，见文件头加锁次序）。
+	var expired *Open
+
+	open, st := func() (*Open, status.Status) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		e := r.entries[key]
+		if e == nil {
+			return nil, status.ObjectNameNotFound
+		}
+
+		// —— 先授权 ——（下面才允许动登记表）
+		if e.share != shareName {
+			return nil, status.ObjectPathInvalid
+		}
+		if !sameIdentity(e.identity, session.Identity()) {
+			return nil, status.AccessDenied
+		}
+
+		// —— 再驱逐 ——
+		if e.open == nil || e.open.Durable == nil || e.open.Durable.Invalidated {
+			delete(r.entries, key)
+			return nil, status.ObjectNameNotFound
+		}
+		if e.deadline.IsZero() {
+			// 句柄仍在正常使用、尚未断连：重连无效，但**不删记录** ——
+			// 那条记录对应的句柄还活着，删了它一旦真的断连就再也接不回来。
+			return nil, status.ObjectNameNotFound
+		}
+		if time.Now().After(e.deadline) {
+			delete(r.entries, key)
+			e.open.Durable.key = ""
+			e.open.Durable.Invalidated = true
+			expired = e.open
+			return nil, status.ObjectNameNotFound
+		}
+
+		open := e.open
 		delete(r.entries, key)
-		r.mu.Unlock()
-		return nil, status.ObjectNameNotFound
+		// 认领成功，清掉等待态。这一步**必须在 r.mu 内**：key 是受 r.mu
+		// 保护的字段，锁外写会与并发的 remove/disconnect 构成 data race
+		// （-race 能稳定复现）。它只写一个字段、不取任何别的锁，
+		// 放进临界区不会把死锁请回来。
+		open.Durable.key = ""
+		return open, status.Success
+	}()
+
+	if expired != nil {
+		expired.close()
 	}
-	// deadline 为零表示句柄仍在正常使用、尚未断连：重连无效。
-	if e.deadline.IsZero() || time.Now().After(e.deadline) {
-		delete(r.entries, key)
-		r.mu.Unlock()
-		return nil, status.ObjectNameNotFound
-	}
-	if e.share != shareName {
-		r.mu.Unlock()
-		return nil, status.ObjectPathInvalid
-	}
-	if !sameIdentity(e.identity, session.Identity()) {
-		r.mu.Unlock()
-		return nil, status.AccessDenied
+	if st != status.Success {
+		return nil, st
 	}
 
-	open := e.open
-	delete(r.entries, key)
-	r.mu.Unlock()
-
-	// 重新认领：搬回新会话的句柄表，清掉等待态。
-	open.Session = session
-	session.rebindOpen(open)
-	open.Durable.disconnectedAtZero()
+	session.rebindOpen(open, tree)
 	return open, status.Success
-}
-
-// disconnectedAtZero 清掉等待态（reconnect 成功后调用）。
-func (d *DurableState) disconnectedAtZero() {
-	d.key = ""
 }
 
 // rebindOpen 把一个已存在（Volatile 不变）的句柄重新挂回会话句柄表。
 //
 // 重连拿回的是「同一个句柄」，FileId 必须保持不变，所以沿用原 Volatile。
-func (s *Session) rebindOpen(o *Open) {
+//
+// **树必须一起改绑**：旧树随旧连接一起销毁了，而每个命令入口的 resolveOpen
+// 都会校验 o.Tree == ctx.Tree（close.go）。不改绑的话，重连本身会返回成功、
+// FileId 也对，但之后每一个 READ/WRITE/CLOSE 都拿到 STATUS_INVALID_PARAMETER
+// —— 一个「看起来成功、实际是死的」句柄，比直接失败更难排查。
+func (s *Session) rebindOpen(o *Open, t *Tree) {
 	s.mu.Lock()
 	o.Session = s
+	if t != nil {
+		o.Tree = t
+	}
 	s.opens[o.Volatile] = o
+	// 新会话的 Volatile 计数器从 0 起，若不抬高，它后续分配到 o.Volatile 时
+	// 会**覆盖掉刚认领回来的句柄**（map 同键写入，静默丢失）。
+	if o.Volatile > s.nextVolatile {
+		s.nextVolatile = o.Volatile
+	}
 	s.mu.Unlock()
 }
 
@@ -302,12 +481,7 @@ func handleDurableReconnect(ctx *Context, intent *wire.DurableIntent) error {
 	if ctx.Session == nil || !ctx.Session.Established() {
 		return status.UserSessionDeleted
 	}
-	shareName := ""
-	if ctx.Tree != nil {
-		shareName = ctx.Tree.Share.Name
-	}
-
-	open, st := durableRegistry.reconnect(ctx.Session, intent, shareName)
+	open, st := durableRegistry.reconnect(ctx.Session, ctx.Tree, intent)
 	if st != status.Success {
 		return st
 	}
