@@ -126,10 +126,16 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 
 v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 
-- Release 页：`https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.1.0`
-- 附件直链（下载后用 `SHA256SUMS` 核对）：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.1.0/SHA256SUMS`）
+- **Release 页（推荐，普通用户点这里下载）**：
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.1.0`
+  页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
+- **原始文件直链（给脚本 / CI 用）**：
+  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.1.0/SHA256SUMS`）。
+  注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
+  最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
+  ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
+  `curl` 的链接——它不下发文件，需用上面的 `api.cnb.cool` 形态。
 
 每个压缩包内含二进制、本 `README.md`、`CHANGELOG.md` 与 `configs/example.yaml`：
 
@@ -143,13 +149,20 @@ v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-curl -LO https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_linux_amd64.tar.gz
-curl -LO https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/SHA256SUMS
+# 普通用户：直接去上面的 Release 页点「下载」即可，无需命令行。
+# 下面给需要脚本 / CI 自动下载的场景（需 Bearer token 并跟随重定向）：
+curl -L -H "Authorization: Bearer <你的 token>" \
+  -O https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_linux_amd64.tar.gz
+curl -L -H "Authorization: Bearer <你的 token>" \
+  -O https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/SHA256SUMS
 sha256sum -c SHA256SUMS
 tar -xzf stupidsamba_v0.1.0_linux_amd64.tar.gz
 ./stupidsamba_v0.1.0_linux_amd64/stupidsamba -config stupidsamba_v0.1.0_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
+
+> 说明：Release 页面上同时保留 `v0.1.0-test` 条目，那是本版本发布流程的**验证记录**
+> （含预发布与多客户端验收产物），**请勿下载使用**。正式可用的版本是 **`v0.1.0`**。
 
 ### 方式二：从源码构建
 
@@ -383,6 +396,10 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
 | macOS Finder / `mount_smbfs` | 🎯 目标 | Apple 扩展（AAPL / `_adisk` / `readdir_attr`）为其服务；Time Machine 见[上](#timemachine) |
 | Windows 资源管理器 | 🎯 目标 | 签名、`guest` 策略、属性页 |
 | `mount.cifs`（Linux 内核客户端） | ✅ 服务端支持 | 见[上文](#notes)：本项目 CI / 开发容器缺 `CAP_SYS_ADMIN` 跑不通，真实 Linux 主机可正常挂载 |
+
+> 想核实「你说支持，凭什么」？完整的多客户端验收报告见
+> [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md)（smbclient / impacket / go-smb2
+> 三家客户端栈逐项实测，含加密 fail-closed 验证），基线 commit `5428bcd`。
 
 ---
 
