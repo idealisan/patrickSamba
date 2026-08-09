@@ -19,6 +19,8 @@ func TestKnownValues(t *testing.T) {
 	}{
 		{Success, 0x00000000, "STATUS_SUCCESS"},
 		{Pending, 0x00000103, "STATUS_PENDING"},
+		{Notify, 0x0000010B, "STATUS_NOTIFY_CLEANUP"},
+		{NotifyEn, 0x0000010C, "STATUS_NOTIFY_ENUM_DIR"},
 		{BufferOverflow, 0x80000005, "STATUS_BUFFER_OVERFLOW"},
 		{NoMoreFiles, 0x80000006, "STATUS_NO_MORE_FILES"},
 		{Unsuccessful, 0xC0000001, "STATUS_UNSUCCESSFUL"},
@@ -34,6 +36,9 @@ func TestKnownValues(t *testing.T) {
 		{ObjectNameCollision, 0xC0000035, "STATUS_OBJECT_NAME_COLLISION"},
 		{ObjectPathNotFound, 0xC000003A, "STATUS_OBJECT_PATH_NOT_FOUND"},
 		{SharingViolation, 0xC0000043, "STATUS_SHARING_VIOLATION"},
+		{LockConflict, 0xC0000054, "STATUS_FILE_LOCK_CONFLICT"},
+		{LockNotGranted, 0xC0000055, "STATUS_LOCK_NOT_GRANTED"},
+		{RangeNotLocked, 0xC000007E, "STATUS_RANGE_NOT_LOCKED"},
 		{LogonFailure, 0xC000006D, "STATUS_LOGON_FAILURE"},
 		{FileIsADirectory, 0xC00000BA, "STATUS_FILE_IS_A_DIRECTORY"},
 		{NotSupported, 0xC00000BB, "STATUS_NOT_SUPPORTED"},
@@ -81,6 +86,50 @@ func TestSeverity(t *testing.T) {
 	}
 	if !AccessDenied.IsError() {
 		t.Error("STATUS_ACCESS_DENIED 应属于错误类（Sev=3）")
+	}
+}
+
+// TestNonErrorStatusesCarryBody 锁死「非错误级状态不等于失败」这条契约。
+//
+// 这几个状态码都会**带着完整响应体**返回，调用方（internal/smb/command 的
+// dispatch）必须让 handler 设 ctx.Status 后 return nil，而不是把它们当成
+// error 返回 —— 后者会走 Context.fail()，响应体被换成 9 字节 ERROR Response，
+// 客户端拿不到数据：
+//
+//	STATUS_BUFFER_OVERFLOW(0x80000005)   Sev=10 警告：QUERY_INFO / IOCTL / READ
+//	                                     截断返回，体里是能放下的那部分数据
+//	STATUS_NOTIFY_ENUM_DIR(0x0000010C)   Sev=00 成功：CHANGE_NOTIFY 缓冲区放不下
+//	STATUS_MORE_PROCESSING_REQUIRED      Sev=11 错误级，但 SESSION_SETUP 必须带
+//	                                     体（NTLM challenge），是规范定的特例
+//	STATUS_PENDING(0x00000103)           Sev=00 成功：异步 interim response
+func TestNonErrorStatusesCarryBody(t *testing.T) {
+	// 警告级：既不是成功也不是错误。
+	if !BufferOverflow.IsWarning() {
+		t.Error("STATUS_BUFFER_OVERFLOW 必须是警告级（最高两位 10）")
+	}
+	if BufferOverflow.IsError() || BufferOverflow.IsSuccess() {
+		t.Error("STATUS_BUFFER_OVERFLOW 既不是错误级也不是成功级")
+	}
+	// STATUS_NOTIFY_ENUM_DIR 的最高两位是 00 —— 它是**成功**类，
+	// 千万别因为名字像"出问题了"就当错误处理。
+	if !NotifyEn.IsSuccess() {
+		t.Error("STATUS_NOTIFY_ENUM_DIR 是成功类（Sev=0），不是错误")
+	}
+	if !Notify.IsSuccess() || !Pending.IsSuccess() {
+		t.Error("STATUS_NOTIFY_CLEANUP / STATUS_PENDING 都是成功类")
+	}
+	// 反面：这些是真错误。
+	for _, s := range []Status{Cancelled, LockNotGranted, RangeNotLocked, ObjectNameNotFound} {
+		if !s.IsError() {
+			t.Errorf("%s 应属于错误类（Sev=3）", s)
+		}
+	}
+	// 透传：Status 作为 error 传递时不能被 FromVFSError 折成 Unsuccessful，
+	// 否则警告级状态会退化成错误。
+	for _, s := range []Status{BufferOverflow, NotifyEn, Cancelled, LockNotGranted, RangeNotLocked} {
+		if got := FromVFSError(s); got != s {
+			t.Errorf("FromVFSError(%s) = %s, 应原样透传", s, got)
+		}
 	}
 }
 
