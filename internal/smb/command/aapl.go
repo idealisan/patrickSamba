@@ -179,7 +179,14 @@ func negotiateAAPL(ctx *Context, req *wire.CreateRequest) ([]byte, error) {
 	out := buildAAPLResponse(r.RequestBitmap, serverCaps,
 		aaplVolumeCapabilities(ctx), DefaultAppleModel)
 
-	if readdirAttr {
+	// 只有客户端**真的请求了 ServerCapabilities** 时才启用 readdir_attr。
+	//
+	// Samba check_aapl() 把 `config->readdir_attr_enabled = true` 写在
+	// `if (req_bitmap & SMB2_CRTCTX_AAPL_SERVER_CAPS)` 分支**内部**。
+	// 没请求这一段的客户端收不到 ServerCapabilities，也就无从得知我们支持
+	// readdir_attr —— 此时若仍改写目录项布局，它会把 rfork_size 与压缩
+	// FinderInfo 当成真正的 8.3 短名去解析。宁可不开也不能开错。
+	if readdirAttr && r.RequestBitmap&aaplServerCaps != 0 {
 		ctx.Conn.aapl.readdirAttr.Store(true)
 	}
 	ctx.Log.Debug("AAPL 协商",

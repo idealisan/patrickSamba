@@ -280,6 +280,38 @@ func TestNegotiateAAPL(t *testing.T) {
 	}
 }
 
+// TestNegotiateAAPLReaddirAttrNeedsServerCapsBit：RequestBitmap 里没有
+// kAAPL_SERVER_CAPS 时，即使客户端声明了 READ_DIR_ATTR 也不得启用 readdir_attr。
+//
+// Samba check_aapl() 把 readdir_attr_enabled 的赋值放在
+// `if (req_bitmap & SMB2_CRTCTX_AAPL_SERVER_CAPS)` 分支内部：客户端没请求
+// 这一段就拿不到 ServerCapabilities，无从知道服务端会改写目录项布局，
+// 会把 rfork_size + 压缩 FinderInfo 误读成 8.3 短名。
+func TestNegotiateAAPLReaddirAttrNeedsServerCapsBit(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bitmap uint64
+		want   bool
+	}{
+		{"只请求 ModelInfo", aaplModelInfo, false},
+		{"只请求 VolumeCaps", aaplVolumeCaps, false},
+		{"bitmap 为 0", 0, false},
+		{"请求 ServerCaps", aaplServerCaps, true},
+		{"macOS 的全 bitmap", aaplServerCaps | aaplVolumeCaps | aaplModelInfo, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newAAPLTestContext(t, true, false, true)
+			req := aaplCreateRequest(aaplServerQuery, tc.bitmap, aaplSupportsReadDirAttr)
+			if _, err := negotiateAAPL(ctx, req); err != nil {
+				t.Fatalf("negotiateAAPL: %v", err)
+			}
+			if got := ctx.Conn.AAPLReaddirAttr(); got != tc.want {
+				t.Errorf("bitmap=%#x 时 readdir_attr = %v, 期望 %v", tc.bitmap, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNegotiateAAPLAbsent：请求里没有 AAPL context 时不产生响应，也不置状态。
 func TestNegotiateAAPLAbsent(t *testing.T) {
 	ctx := newAAPLTestContext(t, true, false, true)
