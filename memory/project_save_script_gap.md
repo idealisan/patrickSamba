@@ -1,6 +1,6 @@
 ---
 name: save.sh 的三道门（历史盲区已修，别再拆掉）
-description: scripts/save.sh 现在有 go vet / gofmt / 路径归约三道门；记录它们各自是为堵哪个真实事故而加的
+description: scripts/save.sh 的 go vet / gofmt / 路径归约三道门各堵哪次事故；外加推送段三个「照常打印、事情没发生」的已修 bug 与现成的反向测试
 type: project
 ---
 
@@ -30,8 +30,24 @@ type: project
 **Why:** 本项目栽过两类事故——全队互相推不能编译的代码而彼此阻塞；以及不合规/半成品
 代码直到发布前才被发现。这三道门分别对应这些根因。
 
+**推送段（第 3 节）另有三个已修 bug（PR #17，2026-08-09）**，形态都是"照常打印、
+事情没发生"，改这段前务必了解：
+1. 写死 `git push origin main` → worktree 共享 .git，refspec `main` 解析成**本地 main**，
+   自己的提交一个都没出去还打印成功。已改为读当前分支。
+2. retry 里 `git pull --rebase origin main` 恒定 rebase 到 main → 特性分支上既拿不到
+   `origin/$BRANCH` 的新提交（6 次重试全空转），又白改写本分支历史。已改为
+   rebase 到 `origin/$BRANCH`，且**只在 `git ls-remote --heads` 确认远端有该分支时才 rebase**
+   （远端没有时失败原因是鉴权/网络，rebase 治不了病只添乱）。
+3. 锁写在 `$REPO/.git/` 下 → worktree 里 `.git` 是**文件**，mkdir 恒 ENOTDIR，
+   空转 120 秒后超时退出，**worktree 工作流下 save.sh 100% 推不出去**。
+   已改为 `git rev-parse --git-common-dir`；rebase 状态检测改 `--git-path`。
+
 **How to apply:**
 - 改 save.sh 前先想清楚要拆的是哪一道门、它当初堵的是什么。`scripts/` 属 qa。
-- 给这类"门禁"做改动后**必须做反向测试**：造一个应当被拦的输入，确认它真的
-  非零退出且没有产生提交。验证方法：在 `/tmp` 里 `git clone` 一份、把 origin 指向
-  一次性裸库再测，这样"万一没拦住"也只会污染那个裸库，不会推上 main。
+- 给这类"门禁"做改动后**必须做反向测试**。现在已有现成的：
+  `test/ci/save-sh-scenarios.sh`（离线，本地裸库当 origin，4 场景 17 断言，
+  断言查的是**远端实际状态**不是脚本输出）。改完必须再跑一次
+  `test/ci/save-sh-scenarios.sh test/ci/testdata/save-legacy.sh`（修复前的冻结快照），
+  **它必须 FAIL**；若它也全绿，说明测试没覆盖到被修的东西，是测试先坏了。
+- 沙箱里 git 提交要 `git config commit.gpgsign false`，否则全局签名配置会让
+  假作者直接 403 `Author is invalid`。

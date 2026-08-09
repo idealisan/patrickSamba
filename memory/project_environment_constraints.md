@@ -1,6 +1,6 @@
 ---
 name: stupidSamba 开发环境的固有限制与重启后恢复步骤
-description: 容器会重启并清空工具链与仓外文件；mount.cifs 因缺 CAP_SYS_ADMIN 永远跑不了；smbclient/pkill 的两个致命坑
+description: 容器会重启并清空工具链与仓外文件；mount.cifs 因非初始 user namespace 永远跑不了（与 capability 无关）；pkill/smbclient/worktree 下 .git 是文件等致命坑
 type: project
 ---
 
@@ -18,8 +18,13 @@ Go 工具链消失、python3/smbclient 消失、`/root/.codebuddy/.../memory` �
    `go1.25.0.linux-amd64.tar.gz` 到 `/usr/local/go`。
 2. **记忆必须写进 `/workspace/memory/` 并 git 提交**，仓外的
    `/root/.codebuddy/projects/workspace/memory` 只是当次会话的工作副本，重启即失。
-3. **`mount.cifs` 在本容器永远跑不通** —— 缺 `CAP_SYS_ADMIN`，报
-   `Unable to apply new capability set`。这是环境限制不是服务端 bug，
+3. **`mount.cifs` 在本容器永远跑不通** —— **真死因不是缺 `CAP_SYS_ADMIN`**
+   （此处原先归因错误，2026-08-09 被决定性实验推翻）：`/proc/self/uid_map` 显示
+   我们在**非初始 user namespace** 里，内核只放行带 `FS_USERNS_MOUNT` 的文件系统
+   （tmpfs/proc/sysfs/fuse…），cifs 没这个标志，直接 EPERM。反向对照：
+   `mount -t tmpfs` 成功（排除 seccomp 全局禁 mount），`/proc/filesystems` 里有 cifs
+   （排除缺模块）。所以 `--privileged`、任何 `--cap-add` 都救不了，
+   **别再花时间加 capability 或换 docker 参数**。这是环境限制不是服务端 bug，
    `scripts/acceptance.sh` 已把它做成 skip(rc=77)。AGENTS.md §3 要求的"至少三种
    第三方客户端通过"由 **smbclient + impacket + go-smb2** 三家满足，不要在
    mount.cifs 上浪费时间，也不要因为它 fail 就判定验收不通过。
@@ -56,6 +61,18 @@ Go 工具链消失、python3/smbclient 消失、`/root/.codebuddy/.../memory` �
     `SMBConnection(..., preferredDialect=SMB2_DIALECT_311)`。传 `'3.1.1'` 会抛
     `Exception: Unknown dialect %s`（impacket 自己的报错串没格式化），
     极易误判成"服务端不支持 3.1.1"。
+
+11. **worktree 里 `<工作树>/.git` 是文件不是目录** —— 内容是一行
+    `gitdir: /workspace/.git/worktrees/<名字>`。任何 `"$REPO/.git/xxx"` 的写法
+    （`mkdir` 上锁、`[ -d .git/rebase-merge ]` 判状态）在 worktree 下**必然失效**，
+    而且失效得很安静：`mkdir` 报 ENOTDIR 被吞掉当成"锁被别人占着"，
+    `[ -d ]` 恒为 false 让检测形同虚设。`scripts/save.sh` 就栽在第一种上——
+    在 worktree 里空转 120 秒后报"等待推送锁超时"退出 1，
+    **提交已落地但推送从未发生**，等于 §7.3 强制的 worktree 工作流下它 100% 不可用。
+    一律改用 `git rev-parse --git-common-dir`（所有 worktree 共享的那个 .git，
+    正是跨 worktree 上锁该用的位置）和 `git rev-parse --git-path <名字>`
+    （自动解析到当前 worktree 的私有目录）。写 shell 工具时凡是要落文件到 git 目录，
+    先想一想它会不会在 worktree 里跑。
 
 **在共享工作树里做破坏性实验的正确姿势**：用 `git worktree add --detach /tmp/wt HEAD`
 另开一份，在 /tmp 里随便改随便编译，做完 `git worktree remove --force /tmp/wt`。
