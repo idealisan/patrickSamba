@@ -14,5 +14,7 @@
 - [验收判据必须可证伪](feedback_falsifiable_assertions.md) — 加密曾用「能读到内容」判定而漏掉明文旁路；探针要有反向对照，失败用例不许 skip
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
-- [CNB PR API 的调用方式与四个坑](reference_cnb_pr_api.md) — 合并须 PUT 非 POST、参数 merge_style 非 merge_method、commit_title 必填、GET/PUT 都要 Accept: application/json
-- [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — isAbsPath=filepath.IsAbs 致 example.yaml 在 Windows 跑不起来；metadata_path「会被忽略」却硬拦启动
+- [CNB PR API 的调用方式与四个坑](reference_cnb_pr_api.md) — PUT 不是 POST、merge_style 不是 merge_method、commit_title 必填、GET/PUT 都要 Accept: application/json（报错文案却说 content type）
+- [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 六个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 后的代码从未编译
+- [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — example.yaml 在 Windows 上仍跑不起来；metadata_path 同源 bug 已由 PR #18 修掉（跳过+平台形参+平台化判定）
+- [查 CNB 流水线状态的正确姿势与「假红」陷阱](reference_cnb_ci_status.md) — 没有 statuses API 用 /-/build/logs?sourceRef=；push 与 pull_request 事件跑不同 .cnb.yml，结论可相反
