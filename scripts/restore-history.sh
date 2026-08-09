@@ -18,7 +18,9 @@
 # 注意：这是**开发脚本**，不是软件运行时依赖，不违反 AGENTS.md C3。
 set -e
 
-DST=${CODEBUDDY_PROJECT_DIR:-/root/.codebuddy/projects/workspace}
+# 坑：**不要用 $CODEBUDDY_PROJECT_DIR** —— 那是 CodeBuddy 导出的项目根 `/workspace`，
+# 不是会话目录。覆盖请用 SS_SESSION_DIR。
+DST=${SS_SESSION_DIR:-${HOME:-/root}/.codebuddy/projects/workspace}
 
 cd "$(dirname "$0")/.."
 SRC="$(pwd)/history"

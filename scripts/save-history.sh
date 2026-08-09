@@ -16,17 +16,35 @@
 # 注意：这是**开发脚本**，不是软件运行时依赖，不违反 AGENTS.md C3。
 set -e
 
-SRC=${CODEBUDDY_PROJECT_DIR:-/root/.codebuddy/projects/workspace}
-
 cd "$(dirname "$0")/.."
 REPO=$(pwd)
 DST="$REPO/history"
 
-if [ ! -d "$SRC" ]; then
-    echo "!!! 找不到 CodeBuddy 会话目录: $SRC" >&2
-    echo "    可以用 CODEBUDDY_PROJECT_DIR=<路径> 覆盖。" >&2
+# 会话目录的定位。
+#
+# 坑：**不要用 $CODEBUDDY_PROJECT_DIR** —— 那个变量是 CodeBuddy 自己导出的，
+# 值是项目根 `/workspace`，不是会话目录。误用会把整个仓库的 md 拷进 history/。
+# 覆盖请用 SS_SESSION_DIR。
+SRC=$SS_SESSION_DIR
+if [ -z "$SRC" ]; then
+    BASE="${HOME:-/root}/.codebuddy/projects"
+    # 优先认本次会话所在的目录，其次退化到唯一的那个目录。
+    if [ -n "$CODEBUDDY_SESSION_ID" ]; then
+        hit=$(ls "$BASE"/*/"$CODEBUDDY_SESSION_ID".jsonl 2>/dev/null | head -1)
+        [ -n "$hit" ] && SRC=$(dirname "$hit")
+    fi
+    if [ -z "$SRC" ]; then
+        n=$(ls -d "$BASE"/*/ 2>/dev/null | wc -l | tr -d ' ')
+        [ "$n" = "1" ] && SRC=$(ls -d "$BASE"/*/ | head -1)
+    fi
+fi
+
+if [ -z "$SRC" ] || [ ! -d "$SRC" ]; then
+    echo "!!! 找不到 CodeBuddy 会话目录（试过 \$SS_SESSION_DIR 与 ${HOME:-/root}/.codebuddy/projects/*）" >&2
+    echo "    用 SS_SESSION_DIR=<路径> scripts/save-history.sh 指定。" >&2
     exit 1
 fi
+echo ">>> 会话目录: $SRC"
 
 mkdir -p "$DST"
 
@@ -34,7 +52,8 @@ mkdir -p "$DST"
 #
 # 只取会话主线 jsonl、子 agent 分支 jsonl 与记忆 md。
 # tool-results/ 下是大块的工具输出缓存，体量大且可从 jsonl 推出，不入库。
-( cd "$SRC" && find . -type f \( -name '*.jsonl' -o -name '*.md' \) \
+( cd "$SRC" && find . -type f \
+    \( -name '*.jsonl' -o -name 'MEMORY.md' -o -path './memory/*.md' \) \
     -not -path './*/tool-results/*' ) | while read -r f; do
     mkdir -p "$DST/$(dirname "$f")"
     cp -p "$SRC/$f" "$DST/$f"
@@ -66,6 +85,7 @@ INDEX="$DST/INDEX.md"
         [ -n "$first" ] || first="(无法解析)"
         subs=$(ls "$DST/$uuid/subagents"/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
         [ "$subs" = "0" ] || first="$first （含 $subs 个子 agent 分支）"
+        [ "$uuid" = "$CODEBUDDY_SESSION_ID" ] && uuid="$uuid ← 快照时的当前会话"
         echo "| \`$uuid\` | $lines | $size | $mtime | $first |"
     done
     echo
@@ -105,6 +125,12 @@ trap 'rm -rf "$LOCK"' EXIT INT TERM
 
 git commit -q -m "history: 快照 CodeBuddy 会话历史（容器随时崩溃，仓外内容不可信）"
 echo ">>> 已提交"
-git pull --rebase -q
-git push -q
-echo ">>> 已推送"
+# --autostash 是必须的：其他 agent 的未提交改动会让 rebase 直接拒绝。
+if git push -q origin main 2>/dev/null; then
+    echo ">>> 已推送"
+elif git pull --rebase --autostash -q origin main && git push -q origin main; then
+    echo ">>> 已推送（同步远端后）"
+else
+    echo "!!! 推送失败，请手工处理" >&2
+    exit 1
+fi
