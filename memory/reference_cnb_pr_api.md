@@ -1,6 +1,6 @@
 ---
-name: CNB PR API 的调用方式与七个坑
-description: cnb.cool 创建/更新/合并 PR 的写法，以及 merge 用 PUT、更新用 PATCH（PUT 会 404）、参数名是 merge_style、commit_title 必填、GET/PUT 都要求 Accept: application/json、已合并的 PR 仍回 merged=null，且 squash 合并下祖先关系判定也会假阴性（要比内容）
+name: CNB PR API 的调用方式 + null 陷阱 + 判「合并会带来什么/合没合/SHA 在不在」三条命令的分工
+description: cnb.cool 创建/更新/合并 PR 的写法（merge 用 PUT、更新用 PATCH 否则 404、参数名 merge_style、commit_title 必填、都要 Accept: application/json）；CNB 的 null 陷阱（PR 的 merged 与 Release 的 latest 恒为 null，null 表示「不回答」不是「否」）；判定改动是否进主干时两点 diff 会造出「大规模删除」幻觉、三点 diff 与祖先判定在 squash 下双双假阴性，最终判据只有内容
 type: reference
 ---
 
@@ -57,18 +57,41 @@ cnb pulls patch-pull --repo finalappstore/stupidSamba --number 35 \
 | `400` | 漏了 `commit_title`；它是必填不是可选 | 必填 `commit_title` |
 | `406` `{"errcode":406,"errmsg":"either of 'application/json' or 'application/vnd.cnb.api+json' content type supported"}` | **GET 和 PUT 都要求 `Accept: application/json`**，缺了就报 406。报错文案说的是 content type，极易误导你去查 `Content-Type` 头——但 `Content-Type: application/json` 明明已经带了，真正缺的是 `Accept` | 请求务必带 `-H "Accept: application/json"`（上面两段 curl 已经带了，照抄即可，别漏） |
 
+## ⚠️ CNB API 的 null 陷阱（已实测两个实例，同一个形态）
+
+**CNB 用 `null` 表达「我不回答这个问题」，调用方却几乎总是读成「否」。**
+两个实例分属不同接口，坑法完全一样，所以并在一起记：
+
+| 接口 | 恒为 null 的字段 | 该看的字段 | 误读的后果 |
+|---|---|---|---|
+| `GET /-/pulls/<号>` | `merged` / `merged_at` / `merge_commit_sha` | **git 内容比对**（见下文三条命令的分工） | 已合并的 PR 被判成「关掉但没合」，进而重推、重做、在已合并分支上继续 rebase 造重复提交 |
+| `GET /-/releases/tags/<tag>` | `latest` | **`is_latest`**（bool） | 「所有 Release 都不是最新版」，发版核对时会以为 Release 没生效 |
+
+**判据**：`null` ≠ `false`。看到 null 先问「这个字段是不是压根没被填过」，
+再找**另一个真的被填了的字段**或**绕开 API 用 git/内容判**。
+只要一个字段在**已知为真**的样本上也回 null（PR #120 确已合并、`v0.0.99` 确已发布），
+它就是不可用字段，不要在任何判定里出现它。
+
+同型提醒：这是本项目「成功回显 ≠ 事情真的发生」的镜像版——
+那边是**说成了其实没成**，这边是**做成了却回显说没有**。两边都不能只信一个字段。
+Release 侧的完整实测见 `reference_cnb_release_api.md`。
+
 **⚠️ 判断 PR 是否已合并：不要信 `.merged` / `.merged_at` / `.merge_commit_sha`。**
 CNB 的 `GET /-/pulls/<号>` 对**已经合并**的 PR 依然返回
 `state=closed, merged=null, merged_at=null, merge_commit_sha=null` ——
 三个字段全空，看起来就像「被关掉但没合」。实测：PR #120 已合进 main
 （main HEAD 就是 `Merge pull request #120`），API 照样报 null。
 照这个字段判会得出**完全相反**的结论，属于本项目「成功回显 ≠ 事情真的发生」的镜像版
-（这次是「事情发生了但回显说没有」）。**一律用 git 祖先关系判**：
+（这次是「事情发生了但回显说没有」）。**改用 git 判**，但用哪条命令要看你到底想知道什么
+（见下方「三条命令的分工」表）。最常被误用的是这条：
 
 ```sh
 git fetch -q origin && git merge-base --is-ancestor <你的提交> origin/main \
-  && echo "已合并" || echo "未合并"
+  && echo "该 SHA 在主干历史里" || echo "该 SHA 不在主干历史里"
 ```
+
+它回答的是「**某个 SHA** 在不在主干历史」，**不等于**「这份改动有没有进主干」——
+squash 之下 SHA 已经变了，见下。
 
 顺带：拿文件内容判「改动是否进了 main」时，grep 的字符串要从**文件正文**里取，
 别顺手抄 PR 标题——标题和正文常常差几个字，grep 落空会让你误判成没合。
@@ -99,6 +122,73 @@ git diff --stat origin/main <你的分支> -- <你负责的那几个文件>   # 
 
 先看合并提交有几个父，再决定用哪种判据：
 `git show --no-patch --format='%P' <合并提交>` 输出一个 SHA = squash，两个 = 真 merge。
+
+### 三条命令的分工（先想清楚要回答哪个问题，再挑命令）
+
+这三条命令**回答的是三个不同的问题**，互相不能替代。本项目三条都用错过，
+每次都造成了实质误判，所以按「想知道什么」排表，不再按「坑」排：
+
+| 想知道什么 | 用什么 | 为什么别的不行 |
+|---|---|---|
+| **合并会带来什么改动** | `git diff A...B`（三点）+ `git merge-tree --write-tree A B` 试合 | 两点 `git diff A B` 把「分支落后于 main」也算成删除。实测 PR #139：两点显示 146 文件 **-21298**，三点是 9 文件 **+955/-0**、merge-tree rc=0 无冲突。团队差点据此判定该 PR「大规模删除他人工作」 |
+| **内容是否已在 main** | 比内容：`git rev-parse main:<路径>` 与 `分支:<路径>` 的 blob hash 对比，或 `git diff --stat origin/main <分支> -- <路径>` 为空 | 三点 diff 与祖先判定在 squash 下**双双假阴性**，见下 |
+| **某个 SHA 在不在主干历史** | `git merge-base --is-ancestor <sha> origin/main` | 只对**同一个 SHA** 有效。squash 之后主干上的 SHA 已经不是分支上那个了，问它等于问一个不存在的东西 |
+
+**特别提醒：三点 diff 非空 ≠ 没合并。** 这条是本项目 2026-08-09 才补上的认知。
+squash 让 main **独立引入**同一份内容，`merge-base` 不动，于是 `A...B` 仍然把那份内容
+算成「B 独有」，三点 diff 非空——看着像完全没合。
+它和祖先判定假阴性**是同一个根因的两种表现**：两者都建立在 ref 拓扑上，
+而 squash 恰好切断了拓扑与内容的对应关系。
+**判「合没合」的最终判据只有内容。** 实测 PR #139：三点 diff 9 文件 +955/-0（看着有货），
+但 9 个文件的 blob hash 与 main **逐个相同**，内容早由 `a8db071` 进的主干，合并是彻底的 no-op。
+
+同源提醒：判「工作有没有丢」也一样不能靠 ref 关系，见
+[PM 盘点法](project_pm_inventory_method.md)——`git log origin/<b>..<b>` 逐分支问会得出
+41 笔「未推送」的假警，正确做法是 `git log --branches --not --remotes` 一次性问全部远端 ref，
+再对剩下的候选比内容。**判「有没有丢」和判「有没有合」是同一个母题。**
+
+## null 陷阱：API 用 `null` 表达「我不回答这个问题」，调用方却读成「否」
+
+2026-08-09 ci-trigger 在 Release 链路实测中发现，与「已合并 PR 仍回 `merged=null`」**同型**：
+
+| 字段 | 实测值 | 真实含义 | 读成「否」会得出 |
+|---|---|---|---|
+| PR `merged` | `null`（即便已合并） | 「我不回答合并状态，去看内容」 | 「没合并」→ 以为白干了 |
+| Release `latest` | `null`（**恒为 null**） | 「我不回答是否最新，去看 `is_latest`」 | 「所有 Release 都不是最新版」 |
+| Release `is_latest` | `true`/`false` | 这才是真判据 | — |
+
+**共同母题**：CNB 的 REST 层遇到「它不想/不能在该端点回答」的字段，统一返回 **`null` 而不是省略或 false**。
+调用方用 `"if d.get('merged')"` / `"if d.get('latest')"` 判定 → `null` 是 falsy →
+**把「不知道」读成了「否」**。这与本项目反复出现的「成功回显 ≠ 事情真的发生了 / 没发生」是同一类：
+回显说没有，其实发生了（PR 已合、Release 是最新），只是字段不负责告诉你。
+
+**判据改写**：
+- 判 PR 合没合 → 比内容（`git diff --stat origin/main <分支> -- <文件>` 为空 = 已合），**绝不**信 `merged` 字段。
+- 判 Release 是否最新 → 看 **`is_latest`（bool）**，**绝不**看 `latest`。
+- 任何字段是 `null` 时，先假设「该端点不回答」，去找它指定的替代字段，不要当 false 用。
+
+另见 `reference_cnb_release_api.md`（Release 字段、`git:release` 的 `options` 不支持变量替换、
+按 tag 名分渠道用两个互斥 stage + `if:`）。
+
+**Why**：PR `merged=null` 与 Release `latest=null` 已各造成一次反向误判；两条并成一条规则后，
+凡是遇到 CNB 返回的 `null` 字段，统一先查「它有没有指定替代字段」。
+
+**How to apply**：写任何消费 CNB API 的代码/巡检脚本时，对 `merged`/`latest` 这类「状态」字段，
+一律改用内容判据或 `is_latest`；脚本里 `d.get('x')` 之前先确认 x 不会是「null=不知道」的语义。
+
+## 分支 tip 也会陈旧（判「工作合没合」的额外陷阱）
+
+**禁止**用 `<分支远端 tip> --is-ancestor origin/main` 当「这份工作进了 main」的判据。
+分支的 `origin/<b>` 只反映上次 fetch 的远端状态，可能落后于本地、也落后于 main 演进；
+若那个 tip 正好是分支开工时从 main 拉进来的旧合并提交（例如「Merge #136」），
+`--is-ancestor` 会**静默通过**——因为它本来就是 main 的祖先，与「工作是否合并」无关。
+判「工作进了 main」死用内容：`git show origin/main:<该工作必删/改的文件>` 是否仍是旧样。
+详见 `feedback_stale_sha_refetch_and_batch_spotcheck.md` 的「新形态」小节。
+
+**Why**：2026-08-09 19:00 pm 自己用分支旧 tip 做祖先判定，把 Blocker②（R17，oscap 接线）
+**误报成已合入 main**，而真实状态是 PR #159 还在跑 CI。代价是给最大的阻塞项发了假绿灯。
+
+**How to apply**：任何「某分支工作进了 main 吗」的提问 → 比内容，不比分支 tip 的祖先关系。
 
 **Why**：这些坑每一条都有人真的踩过并浪费时间排查，团队要求写进
 `docs/dev-workflow.md` 免得下一个人再试一遍。

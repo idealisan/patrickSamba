@@ -1995,3 +1995,1030 @@ team-lead 的只读副本（指认不成立）。
   UUID 归并 + 写入归属统计），不是先改结论再补理由。
 - **为什么把这段写进看板**：改判过程如果不留痕，后来者只会看到「结论变过一次」，
   既不知道被什么推翻，也学不到证伪的做法 —— 下一轮换个人还会再来一遍。
+
+---
+
+# 第 19 轮（2026-08-09 18:12–18:16 CST）：PM 交接 + 本轮 6 人分工板
+
+上一任 PM 在 17:40 左右随进程消失，本轮由新 pm 接手（worktree `/work/pm-r2`，分支 `pm/v020-board`）。
+基线：`main = 96afd87`（Merge PR #136），push 事件 SUCCESS / 132.5s。
+
+## 19.1 本轮团队与产出（18:15:28 实测，非自述）
+
+| Agent | 分支 | 领先 main 的提交 | 判定 |
+|---|---|---|---|
+| `vfs-deflake` | `vfs/deflake-path-perf` | 1（`514326f` 18:09，路径解析改全扫计数判据、去掉墙钟比值假红） | 🟢 有产出 |
+| `ci-trigger` | `ci/skip-docs-only`（PR #143） | 6（含 4 个 ifModify 探针） | 🟡 有产出，但**有冲突**，见 19.3 |
+| `pm` | `pm/v020-board` | 本文件 | 🟢 |
+| `docs-honesty` | `docs/v020-honesty-audit` | **0** | ⏳ 18:02 建分支，观察中 |
+| `oscap-wire` | `oscap-wire/vfs-xattr-seam` | **0** | ⏳ 18:02 建分支，观察中 |
+| `env-patch` | **无分支** | — | ⏳ 尚未按 §7.3.1 开树建分支 |
+
+判据：`git log --oneline origin/main..origin/<分支>`。**分支存在 ≠ 有产出**，
+零提交超过 20 分钟即报阻塞（当前三例均在 15 分钟内，不算阻塞，下一轮复查）。
+
+## 19.2 R17 🔴 `internal/oscap` 建成了，但**产品数据路径一行都没消费它**
+
+**这是本轮最高优先级风险，因为它直接决定 v0.2.0 的 CHANGELOG 能不能声称「OS 能力抽象已落地」。**
+
+实测（`main = 96afd87`，18:15:28）：
+
+```sh
+grep -rn 'internal/oscap' --include='*.go' internal/ cmd/ | grep -v '^internal/oscap/'
+# internal/config/filesystem_mode_test.go:8   ← 测试
+# internal/config/validate.go:12              ← 仅用于校验配置字符串合法性
+grep -rn 'oscap' --include='*.go' internal/vfs/     # → 空输出
+find internal/oscap -name '*.go' | wc -l            # → 62
+```
+
+即：**62 个 Go 文件的 port + native + builtin + 三态 Mode + portable CI 门禁全部建成，
+唯一的产品调用点只是「校验 `filesystem_mode` 这个字符串写得对不对」。**
+运行期没有任何代码根据这个值改变行为 —— `auto` / `native` / `portable` 三个取值
+**在数据路径上完全等价**。
+
+这是 §2.3「零产品调用点」那类 bug 的第 2 例（第 1 例是 PR #7），而且体量大得多。
+
+**处置**：`oscap-wire` 正在接 `CapXattr` 这一项进 `internal/vfs`，用来证明接缝真的成立。
+**判据必须可证伪**（§AGENTS 记忆 `feedback_falsifiable_assertions`）：
+不能只验「`auto` 下能读到 xattr」，必须同时验 **`portable` 下走的是 builtin 旁路而不是 xattr**
+—— 否则又是「只测了允许那条路」的老毛病（`encryption_required` 假阳性同型）。
+
+**在 R17 关闭之前，CHANGELOG 只能写「oscap 抽象层与 portable 门禁已就位（尚未接入数据路径）」，
+不许写「OS 能力抽象已落地」。** 这条由 `docs-honesty` 负责在诚实性审计里把关。
+
+## 19.3 开放 PR 处置（18:14–18:15 实测）
+
+| PR | 分支 | merge-tree 试合并 | CI | 建议 |
+|---|---|---|---|---|
+| #133 | `lead/crash-forensics` | 干净（`2600354`） | SUCCESS 108.8s | **合并**（先改 1 行索引，见 19.4） |
+| #139 | `qa-e2e/ci` | 干净（`021beb8`） | SUCCESS 136.0s | **关闭**（内容已在 main，合并是 no-op，见 19.4） |
+| #140 | `pm/agents-md-r18` | 干净（`4ce3963`） | — | 可合 |
+| #143 | `ci/skip-docs-only` | ⚠️ **冲突 1 个文件** | — | 冲突面只有 `scripts/ci-status.sh`；`.cnb.yml` 自动合并成功 |
+
+#143 的冲突面**精确到一个文件**，不是「整体冲突」：
+
+```
+$ git merge-tree --write-tree --name-only origin/main origin/ci/skip-docs-only
+scripts/ci-status.sh
+自动合并 .cnb.yml
+冲突（内容）：合并冲突于 scripts/ci-status.sh
+```
+
+已同步给 `ci-trigger`：只需 rebase 时解 `scripts/ci-status.sh` 一处。
+
+## 19.4 ⛔ 再次撤回「合并会大规模删除」的判断——又是两点 diff 假象
+
+这是本看板第 **2** 次栽在同一处（第 1 次见 §17.2），所以单独立节。
+
+```
+                    两点 diff (A B)                        三点 diff (A...B)
+qa-e2e/ci    146 files, +292, -21298      →     9 files, +955, -0
+crash-forens  60 files, +169,  -8210      →     2 files,  +96, -0
+```
+
+两点 diff 把「分支落后于 main 的部分」也算成删除；**PR 合并走三点/三方合并，不会删这些**。
+两次试合并 rc=0、零冲突，证实了这一点。
+
+**纪律（第二次写，希望不用写第三次）**：判断「合并会带来什么」一律用
+`git diff --stat A...B`（三个点）+ `git merge-tree --write-tree A B`，
+**永远不要用 `git diff --stat A B`**。
+
+### #139 → 关闭：目的已达成，内容已在 main
+
+按记忆 `reference_cnb_pr_api` 的「判合并要比内容，不要用 `merge-base --is-ancestor`」判据，
+逐文件对 blob hash：
+
+```
+SAME  test/e2e/smoke.sh / mutate.sh / reverse-control.sh / client_smbclient.sh
+SAME  test/e2e/client_impacket.py / client_gosmb2.sh
+SAME  test/e2e/client_gosmb2/{main.go,go.mod,go.sum}        ← 9/9 全 SAME
+$ git diff --stat origin/main origin/qa-e2e/ci -- test/e2e/   → 空输出
+$ git log --oneline origin/main -- test/e2e/smoke.sh          → a8db071（同标题，已在 main）
+```
+
+该分支的三点 diff **只有**这 9 个文件，所以合并是**完全的 no-op**。PR 标题自述
+「防丢失，非请求合并」——目的已达成，关闭不丢任何东西。
+
+### #133 → 合并：错误结论**已由分支自己撤回**，不存在「固化错误记忆」
+
+分支尖端第 2 笔 `deb2d0f`（17:25）标题即「撤回『双进程造成写冲突』的因果结论」。
+正文现在写着「那个因果结论是错的，已撤回」，并给两路独立反证
+（363 次写入跨 owner = 0；影子进程 24 行 vs 本体 6627 行日志），
+按「已证实（codebuddy 自己的 file-history / subagents）／已撤回（`/work` 代码树）」两档分开摆，
+死因段明写「拿不到直接证据就写查不到，不要编一个死因」。
+main 的 `memory/` 无同主题文件（`git ls-tree -r --name-only origin/main -- memory/` 28 项，无匹配），合并是净增。
+
+**唯一残留**：`memory/MEMORY.md` 索引行仍写 `双进程=两套同名 agent 共写 /work`，
+读起来像已证实。合并前应改成 `…两套同名 agent（机制风险，本次未证实造成事故）…`。
+索引行是末尾追加，无冲突面。
+
+## 19.5 待决（需 team-lead 拍板）
+
+- **D19-1** #139 关闭 / #133 合并（PM 已给证据，等确认；PM 不自行操作 PR）。
+- **D19-2** R17 未闭合时 CHANGELOG 对 oscap 的措辞口径（见 19.2 建议）。
+- **D19-3** `env-patch` 是否需要建分支 —— 若其产物是 CodeBuddy 侧的补丁脚本而非仓库代码，
+  要明确它落到仓库哪个路径，否则又是一份「只存在于磁盘上的成果」（§R7 同型）。
+
+## 19.6 D19-1 已闭环（18:20 复核）+ 一条盘点方法订正
+
+**#133 已合并进 main**：`main = b026e0a`「memory: 双 CodeBuddy 进程同挂一个 session 的实证记录（含因果撤回）」。
+PM 建议的索引行订正也被采纳并落地，main 与分支尖端逐字一致：
+
+```
+$ git show origin/main:memory/MEMORY.md | grep dual_codebuddy
+- […] codebuddy -c 不查占用；「双进程=两套同名 agent 共写 /work」是机制推演，
+  本次实测**未发生**（跨 owner 写冲突 0 次），当危险信号看、别当事故成因；…
+```
+
+`git diff origin/main origin/lead/crash-forensics -- memory/` 的输出里**没有**
+`project_dual_codebuddy_session.md` → 正文两侧字节相同，内容已完整吸收，分支可以不再动。
+
+### ⚠️ 方法论订正：三点 diff 也不能当「是否已合并」的判据
+
+§19.4 刚立的纪律要补一句。#133 合进 main 之后再跑：
+
+```
+$ git diff --stat origin/main...origin/lead/crash-forensics
+ memory/MEMORY.md                         |  1 +
+ memory/project_dual_codebuddy_session.md | 95 +++++++++++++++
+ 2 files changed, 96 insertions(+)      ← 仍然是 +96，看着像「还没合」
+```
+
+**为什么**：squash 合并让 main 独立地引入了同一份内容，而 merge-base 仍停在 `46f3252`。
+三点 diff 问的是「分支相对共同祖先加了什么」，**不是**「main 里有没有」。
+
+所以三类命令各管各的，别串台：
+
+| 想知道 | 用什么 | 不能用什么 |
+|---|---|---|
+| 合并会带来/删掉什么 | `git diff A...B` + `git merge-tree --write-tree A B` | `git diff A B`（两点，把落后算成删除） |
+| 内容是否已进 main | **逐文件比 blob hash** 或 `git diff main 分支 -- <文件>` 为空 | `git diff A...B`（squash 后仍非空）、`merge-base --is-ancestor`（squash 后假阴性） |
+| 分支落后多少 | `git log 分支..main` | — |
+
+### 盘点方法订正：远端 ref 与磁盘 worktree 必须**两路对账**
+
+PM 本轮 §19.1 只扫 `refs/remotes/origin`，把 `env-patch` 判成「无分支 / 未开工」。**判错了。**
+实测（18:18:59）：`/work/env-patch` 上有分支 `env/patch-codebuddy` 与 1 笔**未推**提交
+（`9212877` patch-codebuddy.sh），共享任务板上他的两项任务已标 completed —— **活干完了，成果只在磁盘上。**
+
+记忆 `project_pm_inventory_method` 记的是「分支存在 ≠ 推上去了」；
+**这次是它的镜像版：分支不存在 ≠ 没干活。** 正确盘点法是两路对账：
+
+```sh
+# 路 1：远端有什么
+git for-each-ref --sort=-committerdate --format='%(committerdate:format:%H:%M) %(refname:short)' refs/remotes/origin
+# 路 2：磁盘上各 worktree 实际有什么（差集就是「只存在于磁盘上的成果」）
+for d in /work/*/; do (cd "$d" && b=$(git branch --show-current); \
+  printf '%-28s %-32s ahead=%s unpushed=%s dirty=%s\n' "$d" "$b" \
+    "$(git log --oneline origin/main..HEAD 2>/dev/null | wc -l)" \
+    "$(git log --oneline origin/$b..HEAD 2>/dev/null | wc -l)" \
+    "$(git status --porcelain | wc -l)"); done
+```
+
+`unpushed>0` 就是现行 R7。PM 报警后 env-patch 已于 18:16 推送，风险解除。
+
+## 19.7 18:20 复盘快照
+
+| Agent | 分支 | ahead(main) | unpushed | 判定 |
+|---|---|---|---|---|
+| `ci-trigger` | `ci/skip-docs-only` | 8 | 0 | 🟢（另开 `ci/p4-mixed` 18:19） |
+| `docs-honesty` | `docs/v020-honesty-audit` | 1 | 0 | 🟢（18:20 首推） |
+| `env-patch` | `env/patch-codebuddy` | 1 | 0 | 🟢（18:16 首推，报警后解除） |
+| `vfs-deflake` | `vfs/deflake-path-perf` | 1 | 0 | 🟢 |
+| `pm` | `pm/v020-board` | 1→2 | 0 | 🟢 |
+| `oscap-wire` | `oscap-wire/vfs-xattr-seam` | **0** | **0** | 🟠 **18 分钟零产出** |
+
+`oscap-wire` 的判定有硬证据，不是「没推」而是**没写**：
+`find /work/oscap-wire -newermt '18:13' -not -path '*/.git/*' -type f` → **空**，
+即工作树自 18:12 创建后**一个文件都没被改过**。R17 是本轮最高优先级风险且只有他在做，
+到 20 分钟阈值仍无产出即上报 team-lead。
+
+## 19.8 🔴 D19-4：`docs-honesty` 与 `oscap-wire` 的叙事互斥（18:23 发现，待 team-lead 拍板）
+
+两名成员正朝**相反方向**写同一件事，且都已有产出，必须现在定边界。
+
+- `docs-honesty` 已推 3 笔（`2a1b917`，CHANGELOG/AGENTS/README 共 +191/-33），CHANGELOG 里写死：
+  > 「**接线（改 `internal/vfs` 经由 port 取能力）留到 v0.3.0。** 在那之前不要根据这个开关下任何部署结论」
+- `oscap-wire` 的任务**正是现在**把 CapXattr 接进 `internal/vfs`。
+
+两者不能同时为真。若 oscap-wire 本轮落地，CHANGELOG 当场变成错的 —— 而且是**「谎报未完成」这种反向的不诚实**，
+比夸大更隐蔽（读者不会去质疑一个自称没做完的声明）。
+
+**PM 建议**（范围由 team-lead 定，PM 不替定）：v0.2.0 只接 CapXattr 一项作为**接缝存在性证明**，
+其余五项 v0.3.0；docs-honesty 措辞改为「已接入 1/6 项（xattr），其余五项留 v0.3.0」。
+
+### R17 判据升级：采用 docs-honesty 更硬的那条
+
+PM 原判据是 `grep -rn 'internal/oscap'`（证明「没人 import」）。docs-honesty 给出更不可辩驳的一条：
+
+```sh
+go list -deps ./cmd/stupidsamba | grep -c oscap     # = 1
+```
+
+**只有 port 包被链进发布二进制**（还是被 `internal/config` 为了 `ParseMode` 拉进来的），
+`oscap/native` 与 `oscap/builtin` **根本没进二进制**。
+接线成功的机器判据因此是：该计数 **≥2 且 native/builtin 至少一个出现在 deps 列表里**。
+这比任何自述都强，已要求 oscap-wire 写进 PR 描述。
+
+### 🔴 R18（新）：xattr 存在两份独立实现，接线时必须一并拆旧
+
+| 位置 | 状态 |
+|---|---|
+| `internal/vfs/xattr_unix.go` | 数据路径**实际在用** |
+| `internal/oscap/native/xattr_posix.go` | 另一份，**当前无人调用** |
+
+接线若只做「让 vfs 去调 oscap」而不拆旧的那份，就是两份实现并存 ——
+**与 R11 完全同型**（`internal/meta` 与 `internal/vfs/metadata_windows.go` 撞同一文件/bucket，
+**静默吐垃圾**，无报错，查了很久才定位）。已转告 oscap-wire 作为实现约束。
+
+### 附带发现：`configs/example.yaml:21-35` 会误导部署者
+
+该段按**设计意图**描述 `filesystem_mode`（「逐项探测宿主支持情况……不支持就自动换成自带实现」），
+**没有提示它在 v0.2.0 无运行期效果**。这是 R17 的用户可见面，应随 R17 一并处置。
+
+### ✅ 排除一个担心：#140 与 docs-honesty 不撞 AGENTS.md
+
+两条分支都改 `AGENTS.md`，实测**无冲突**，任意顺序可合：
+
+```
+$ git merge-tree --write-tree --name-only origin/pm/agents-md-r18 origin/docs/v020-honesty-audit
+c6543c0…        ← 只有 tree oid，无冲突文件
+```
+行区间完全错开：#140 改 584–860（§7 / §10），docs-honesty 改 173–390（§1.2 / §5）。
+
+## 19.9 R7 探测器订正：**逐分支数未推提交会报 41 笔假警，真实丢失风险是 0**
+
+§19.6 给的两路对账法（远端 ref + 磁盘 worktree）方向对，但**计数方式错了**，PM 用它扫全仓时当场炸出一堆假警。
+
+**错的做法**（逐分支 `git log origin/$b..$b`）：
+
+```
+  main:                        1 笔未推
+  qa-e2e/ci:                  29 笔未推
+  vfs/deflake-path-perf:       8 笔未推
+  win-meta/agents-append-only: 3 笔未推        ← 合计 41 笔，看着像大出血
+```
+
+**逐条查完，41 笔里 0 笔真丢**：
+
+| 分支 | 报的 | 真相 |
+|---|---|---|
+| `main` | 1 | `62c8458` 已推，只是推在 `origin/oscap-gate/memory-silent-failures` 上 |
+| `vfs/deflake-path-perf` | 8 | 7 笔是 main 的历史；唯一新的 `db96df8` 已随**新分支** `vfs-deflake/memory-freebsd-gate` 推出去了 |
+| `win-meta/agents-append-only` | 3 | 两笔是 PR #124/#122 的 merge 提交（内容在 main），一笔在 `origin/qa-proto/memory-deferral` 上 |
+| `qa-e2e/ci` | 29 | 27 笔是 main 的历史；余 2 笔是 rebase 前的重复 SHA，**内容已在 main**（blob hash 逐个 SAME，见 §19.4） |
+
+**根因**：`git log origin/$b..$b` 问的是「这些提交在**同名**远端分支上吗」，
+而人是会换分支的（vfs-deflake 就把 memory 提交带去了新分支）、内容是会被 squash 进 main 的。
+**同名分支不是唯一的持久化去处。**
+
+### ✅ 正确的 R7 探测器（两步，缺一不可）
+
+```sh
+# 第 1 步：本地有、而**任何**远端 ref 都没有的提交
+git log --oneline --branches --not --remotes
+# 第 2 步：对第 1 步的每个候选，比内容确认是否已由别的路径进了 main
+git diff --stat origin/main <sha> -- <该提交碰过的文件>     # 空 = 已进，不算丢
+```
+
+第 1 步的 `--branches --not --remotes` 是关键：它一次性问「所有远端 ref」，
+而不是逐个问同名分支。本轮实跑：
+
+```
+$ git log --oneline --branches --not --remotes
+265bcaf test: 失败对照实验 reverse-control.sh，6 个变异全部被定点抓住
+ad27691 test: 三客户端端到端冒烟套件 test/e2e/smoke.sh + 变异生成器
+```
+
+只剩 2 个候选（41 → 2），再走第 2 步比内容，两笔的产物 `test/e2e/*` 9 个文件与 main **blob hash 逐个相同**
+→ **真实丢失风险 = 0**。
+
+这条与 §19.6 的「三点 diff 不能判已合并」是同一个母题的两个面：
+**判「有没有丢」和判「有没有合」都不能靠 ref 关系，最终判据都是内容。**
+
+## 19.10 18:27 快照
+
+| Agent | 分支 | ahead | unpushed | 备注 |
+|---|---|---|---|---|
+| `vfs-deflake` | `vfs-deflake/memory-freebsd-gate`（**已换第 2 条**） | 2 | 0 | 首条已合入 main（`d5e11ca`） |
+| `docs-honesty` | `docs/v020-honesty-audit` | 3 | 0 | CHANGELOG/AGENTS/README 诚实化，质量高，见 §19.8 |
+| `env-patch` | `env/patch-codebuddy` | 3 | 0 | 报警后已推，风险解除 |
+| `ci-trigger` | `ci/skip-docs-only` + `ci/p4-mixed` | 8 | 0 | #143 冲突面已定位（单文件） |
+| `oscap-wire` | `oscap-wire/vfs-xattr-seam` | 0 | dirty=2 | **已开工**，见下 |
+| `pm` | `pm/v020-board` | 4 | 0 | 本文件 |
+
+`oscap-wire` 18:25 起有在制品（新建 `internal/vfs/oscap_xattr.go` + 改 `local.go` +31），
+文件头注释方向正确（**刻意不留「Provider 为 nil 就走老代码」的分支**，符合 §1.2 对
+「if 窄平台 { 走另一套 }」的禁令）。§19.7 那条「20 分钟零产出」到此解除。
+
+**但 PM 实测出一个接线完整性缺口并已转告**：旧实现 `newXattrAccessor` / `readMetaXattrFast`
+在树里**还有 9 个活着的调用点**，其中 **6 个在命名流路径**
+（`stream_xattr.go` ×4、`stream_store.go` ×2、`stream_handle.go` ×1）、1 个是
+`optional.go:304` 的快路径。而 `internal/oscap/ports.go:132` 自己写着
+「命名流事实上建立在 CapXattr 之上」—— 命名流正是 Apple 扩展 / Time Machine 主路径。
+
+**只改 `local_handle.go:498` 的话，`portable` 下 AFP_AfpInfo / AFP_Resource 仍会直穿宿主 setxattr，
+而普通 xattr 那条路的测试照样全绿** —— 这就是「接了但没接全」的假阳性，比完全没接更危险。
+因此 R17 的收口判据要求**两条**反向对照：普通 xattr 一条 + **命名流一条**。
+只接部分是可以接受的，**前提是 PR 里如实写明接了几处、剩几处**。
+
+## 19.11 18:38 巡检：**TM 降级为可选** + v0.2.0 阻塞项收敛为三条
+
+### 19.11.1 🔻 决定：Time Machine 真机验收退出 v0.2.0 阻塞路径
+
+**项目所有者 18:25 口述**：「time machine 暂时没有时间真机测试，这个需求先放一放，
+先做其他的需求，这个需求从 0.2.0 也作为可选项，不强制要求了。」
+
+| 变的 | 不变的 |
+|---|---|
+| TM 真机验收**从 v0.2.0 发布检查单里摘出**，不再是 tag 的阻塞项 | Apple 扩展代码（AAPL create context / ADS / `_adisk._tcp`）**全部保留，不回滚** |
+| 本看板此前多处「TM 验收判据在 Rxx 修复前不可标 ✅」的**发布约束**解除 | AGENTS.md §2 阶段二的长期目标不改；单测与协议级用例继续跑 |
+| —— | **文档口径必须如实**：任何地方不许出现未经真机证实的「支持 Time Machine」。正确写法是「已实现 Apple 扩展 X/Y/Z，**尚未在真机上验收**」 |
+
+**降级的是验收要求，不是功能。** 之所以要专门写这句：本项目反复栽在「结论对、证据假」上，
+一个**当前无法证伪**的验收标准挂在发布路径上，只有两个结局——要么卡死发布，
+要么诱使团队用「代码看起来实现了」冒充「验收通过」。摘掉它是为了不给第二种结局留门。
+文档订正由 `docs-honesty` 执行。记忆已同步进仓库 `memory/project_timemachine_optional.md`。
+
+### 19.11.2 v0.2.0 阻塞项：**三条**（TM 已移出）
+
+| # | 阻塞项 | 负责人 | 状态 |
+|---|---|---|---|
+| ① | **发布渠道 `preRelease` 写死**：`.cnb.yml:235-240` 的 `git:release` 硬编码 `preRelease: true` / `latest: false`，且 `tag_push` 对任何 tag 都触发 → 照现状打 `v0.2.0` 会发成**预发布** | `ci-trigger` | 分支 `ci/release-channel`（`768ba52`，`.cnb.yml` +45/-7）已推，改为按 tag 名判定（带 `-` = 预发布）。**收口判据：`v0.0.99-probe` / `v0.0.99` 两个一次性 tag 双向实测**，只测一侧不算 |
+| ② | **oscap 悬空 / 接线**（R17） | `oscap-wire` | 在制品，见 §19.11.4 |
+| ③ | **文档诚实性** | `docs-honesty` | `docs/v020-honesty-audit` 8 提交，18:36 仍在推进；新增 TM 口径订正 |
+
+其余已闭环：main 上的计时假红由 **#149（`d5e11ca`）** 解决；#139 已关闭（no-op）；#133 待合。
+
+### 19.11.3 R17 判据加严：**两个方向都要有正例**
+
+原判据只要求「`portable` 下宿主 `getfattr` 读不到、我们接口读得到」。
+team-lead 18:19 加严一档，看板照此更新：
+
+| 方向 | 断言 | 缺了它会怎样 |
+|---|---|---|
+| `portable` | 宿主 `unix.Llistxattr` 在真实文件上**一个都读不到**，同时我们自己的接口**读得回来** | —— |
+| `auto`/`native` | 宿主上**必须看得到** `user.DosStream.*` | **只验 portable 一侧，可以被「接口根本没写任何东西、两边都读不到」平凡满足** |
+| 变异体 | Provider 方法返回哨兵错误 → 用例**当场变红** | 证明这条线真的被调用，而不是「测试碰巧通过」 |
+
+这是本项目 `encryption_required` 假阳性的同型防护（见 `memory/feedback_verify_policy_switch_both_paths.md`）：
+**一个只测单侧的开关，等于没测**。三条都由 `oscap-wire` 在本 PR 内给出。
+
+### 19.11.4 `oscap-wire`：范围扩大到两项能力；**在制品体量已很大**
+
+18:22 他自报进展，18:38 我扫工作树核实，两边一致：
+
+- **范围变更（team-lead 定夺）**：从「只接 CapXattr」扩大为 **CapXattr + CapNamedStream 两项**，
+  `internal/vfs/xattr_unix.go` / `xattr_other.go` **整个删除**。
+  原因是 `internal/oscap/native/posix.go:90` 的 `reservedStreamPrefix = "DosStream."` 会显式拒绝命名流，
+  而 builtin 侧不拒——**只接一半会让 `portable` 档的命名流继续直落宿主 xattr**，
+  正是 §19.10 记的那种「接了但没接全」的假阳性。
+- **他的两条实测（都已被 team-lead 采信，写进风险登记）**：
+  1. **`filesystem_mode: native` 在所有 POSIX 平台恒定启动失败**——`probe_linux.go:36-43` 对
+     `CapDOSAttributes` 无条件 `false`（POSIX 客观上没有 DOS 属性位）× native 档「有一项不支持就报错」
+     的语义，两者相乘 = **native 档实际只有 Windows 能用**。定夺：**语义不改，只改诊断**，
+     把「本平台没有该能力的 native 实现」与「有实现但本宿主 fs 不支持」在错误信息里分开。
+  2. **同一 Root 开两个 builtin adapter 会阻塞 4.97 秒后失败**（bbolt flock 超时 5s，`builtin/store.go:54`）。
+     生产形态是「两个共享配了同一个 `metadata_path`」→ **现在是启动失败**，是真缺陷。
+     已批准在本 PR 内加同进程按路径引用计数。
+
+### 19.11.5 🔴 本轮最大丢失敞口：`oscap-wire` **15 个文件零提交**（已告警）
+
+| 项 | 值 |
+|---|---|
+| 分支 `oscap-wire/vfs-xattr-seam` | 停在 `96afd87`（开分支时的 main），**本地提交数 = 0** |
+| 脏文件 | **15**（改 9 / 删 2 / **未跟踪 4**） |
+| 体量 | 改动 +277/-159，删除 -234 |
+| 未跟踪 4 个 | `oscap_xattr.go`、`oscap_seam_test.go`、`hostxattr_unix_test.go`、`hostxattr_other_test.go` |
+
+**未跟踪文件连 `git stash` 都救不回来**，而那 3 个 `_test.go` 恰好就是 §19.11.3 的三条反向对照。
+18:38 已直接告警。这不是进度问题是**丢失风险**，按 team-lead 18:27 通告口径
+（「半成品必须提交，编译不过就写 `wip: 尚未编译通过`」）应当立刻提交推送。
+
+### 19.11.6 🟠 10 笔「保命提交」提交了但**没推**（in-flight，需确认收口）
+
+18:34 有人在离队 agent 的工作树里做了一轮保命提交，**10 笔全部只在本地**：
+
+```
+fix-ci/c9-gate-name  oscap-gate/c9-constraint  oscap/config  rel-docker/image
+rel-v010/cnb-image   tm-dev/timemachine        tm-vfs/stream-sync
+tui-diag/tui-hang    win-backend/final-path-verify  win-meta/c9-negative-control
+```
+
+体量不小（`rel-docker/image` 单笔 +331、`tm-dev/timemachine` +216、`win-meta/c9-negative-control` +207）。
+**这正是保命提交本身要防的那件事**：commit 挡住了「工作树被清」，但挡不住「容器整个没了」。
+这些分支的原主人已离队，**没有人会自己来推**，需要执行那轮清扫的人补一条
+`git push origin <分支>`。检测命令：`git log --oneline --branches --not --remotes`。
+
+### 19.11.7 两条方法论入板
+
+1. **「产物只存在于磁盘上」的检测方法是 `git ls-remote origin`，不是看 worktree。**
+   worktree 里有提交但没推，`git worktree list` 照样显示得好好的——它只证明目录存在，
+   不证明任何东西到过远端。§19.1 里 `env-patch` 那条 ⚠️ 据此解除
+   （18:19 `git ls-remote origin 'refs/heads/env/*'` 已返回 `9212877 refs/heads/env/patch-codebuddy`）。
+2. **「零产出」要再细分成「等决策 / 在读代码 / 真卡住」。**
+   工作树文件 mtime 只能区分「写没写」，区分不了「为什么没写」。
+   最省事的补充判据：**看 team-lead 与该 agent 最近一次消息的方向**——
+   如果最后一条是 agent 发出的问题，那是在等决策，**账记在 team-lead 头上不是 agent 头上**。
+   `oscap-wire` 18:17~18:20 那段零提交就属此类（他明确写了「我没动手，等你回复」），
+   本看板 §19.7 原先记的「20 分钟零产出」按此口径**订正为「按令处于调研阶段」**。
+
+### 19.11.8 CI 额度硬约束入板（18:23 全员通告）
+
+**CNB 每月 160 核心小时**，单条流水线 `metricCoreHours ≈ 0.14`（约 130 秒 × 4 核）→ 约 **1140 条/月**。
+7 人各自每 10 分钟推一次，一小时就能烧掉几十条。规矩：
+
+- **本地门禁全绿再 push**：`sh test/ci/check-test-compile.sh && gofmt -l . && go vet ./...`（约 18 秒，四平台 × 全 tag × 含 `_test.go`）。**把 CI 当「第一次编译检查」是最贵的用法。**
+- **commit ≠ push**：§7.2 的「尽快提交」指 commit（本地、免费、防崩溃）；push 攒成可评审单元。
+  （18:27 的保命推送**临时暂停**了这一条，保命优先；本轮之后恢复。）
+- **探针一律 `go test -overlay`，不开分支推 CI**。`vfs-deflake` 这轮 3 个变异体 + 12 次配对对照，**零 CI 消耗**。
+- **不要「重跑一次看看」**——假红时重跑是双倍浪费且什么都证明不了，抓 runner 原始日志定位根因。
+- **不许为省 CI 砍掉的两件事**：① 合并前确认目标分支 CI 绿（唯一挡住 main 变红的关口）；
+  ② 反向对照 / 变异测试（本来就在本地跑，不占额度）。
+- **新增共享门禁 stage 要先算账**：之后每次 push 和每个 PR 都为它付费。批准条件两条缺一不可：
+  **(1) 能挡住真实发生过的事故；(2) 本地跑不了。** 只满足 (1) 的做成本地脚本 + 推送前自检清单。
+
+### 19.11.9 18:38 分支快照
+
+| Agent | 分支 | ahead | 未推 | 脏 | 备注 |
+|---|---|---|---|---|---|
+| `oscap-wire` | `oscap-wire/vfs-xattr-seam` | 0 | 0 | **15** | 🔴 见 §19.11.5，体量大且含 4 个未跟踪文件 |
+| `ci-trigger` | `ci/release-channel` | 1 | 0 | 0 | 阻塞项①，待 `v0.0.99-probe`/`v0.0.99` 双向实测 |
+| `ci-trigger` | `ci/release-tag-channel` | 1 | 0 | — | 记忆更新（ci-status rc=5 / 0-pipeline 假绿） |
+| `docs-honesty` | `docs/v020-honesty-audit` | 8 | 0 | 2 | 阻塞项③，18:36 仍在推进 |
+| `env-patch` | `env/patch-codebuddy` | 4 | 0 | 0 | 落点 `scripts/env/patch-codebuddy.sh`（D19-3 已拍板，**不是** `scripts/diag/`） |
+| `vfs-deflake` | `vfs-deflake/memory-freebsd-gate` | 3 | 0 | 0 | 首条已合入 main（`d5e11ca` / #149） |
+| `pm` | `pm/v020-board` | 5+ | 0 | 0 | 本文件 + 记忆同步 |
+| 离队分支 ×10 | 见 §19.11.6 | — | **各 1** | 0 | 🟠 保命提交未推 |
+
+**记忆同步（§10.2）**：本轮把 4 份**只存在于仓外**的记忆搬进仓库并登记索引——
+`project_timemachine_optional.md`、`feedback_ci_quota_frugality.md`、
+`project_timing_criteria_flaky.md`、`project_rebase_onto_stale_main.md`，
+另更新 `reference_cnb_pr_api.md`（三条命令的分工表）与 `reference_cnb_ci_status.md`。
+`reference_cnb_ci_status.md` 与 `ci/release-tag-channel` 上那份 **blob 完全相同**（`50c0b73`），
+两边同改同内容，合并时不会冲突。
+
+## 19.12 18:47 巡检：main 前进 6 笔，D19-4 已被「可替换块」化解
+
+### 19.12.1 main 自 18:31 起前进 6 笔，两个阻塞项各进一步
+
+| 提交 | 内容 | 对应 |
+|---|---|---|
+| `3ada731` | **CodeBuddy 危险命令确认面板补丁脚本化**（幂等/自证/可回滚） | `env-patch` 交付，D19-3 落点 `scripts/env/patch-codebuddy.sh` **已进主干** |
+| `c939fd5` | **v0.2.0 诚实性审计**——oscap 未接线 / `metadata_path` 校验 / freebsd 编译盲区如实记账 | 阻塞项③ `docs-honesty` **首批已合**（其分支仍 ahead 8，尚未收口） |
+| `e664a47`+`3d4c33e` | 判据抽纯函数 + **给判据本身补反向对照**，并补 freebsd 编译盲区 | `vfs-deflake` 第 2 条 |
+| `ca8dbca` | 会话历史快照入库 | §10.1 例行 |
+| `d2d1413` | AGENTS.md 第 18 轮实证订正 | team-lead |
+
+**`freebsd 编译盲区：7 个兜底文件从未被编译`** 值得单记一笔：又一例
+「代码写了、但没有任何一关会编译它」，与 `memory/project_silent_success_failures.md`
+里那七个同形态事故同源（build tag 后的代码从未编译、`go build` 不编译 `_test.go`）。
+`test/ci/check-test-compile.sh` 已补 freebsd。**本项目至此已在同一母题上栽过至少九次**，
+新增平台/新增 tag 时把「它真的被编译了吗」当成默认怀疑对象，而不是例外情况。
+
+### 19.12.2 D19-4（叙事互斥）**已化解**，不需要 team-lead 再拍板
+
+`docs-honesty` 的解法比「二选一」高明：在 `CHANGELOG.md:217` 放了一个**带时间戳的可替换块**
+
+```
+<!-- BEGIN-OSCAP-WIRING-STATUS：oscap-wire 的接线 PR 一合入 main，整段替换本块，不要散改别处 -->
+**尚未接线（本版本的实际行为边界；本块截至 2026-08-09 18:35 CST 为当下事实…）**
+```
+
+块内是四条**可复算判据**，而不是形容词。于是「现在没接线」与「马上要接线」不再互相否定——
+前者被明确限定为**某一时刻的事实**，后者到来时整段替换即可。
+**这个写法值得推广**：凡是「写下时正确、但已知会很快变」的陈述，都该带时间戳并圈成可替换块，
+而不是含糊其辞地写「部分支持」。
+
+**遗留一个耦合点（已转告 `oscap-wire`）**：那个块目前**只在 `docs/v020-honesty-audit` 分支上，
+尚未进 main**。若接线 PR 先合，替换目标不存在；若两边同时改同一段则冲突。
+建议合并顺序 **docs-honesty → oscap-wire**，由 team-lead 定。
+
+### 19.12.3 R17 判据 PM 独立复算（不转述，自己跑）
+
+在 `origin/main` 基线（我的分支产品代码与 main 同源，三点 diff 只有 `docs/` + `memory/`）上实跑：
+
+```
+go list -deps ./cmd/stupidsamba | grep -c oscap        = 1
+包外真实调用点（排除 _test.go 与 internal/oscap/ 自身）  = 1
+```
+
+唯一真实调用是 `internal/config/validate.go:239` 的 `oscap.ParseMode`（配合 244 行 `ModeNames`）；
+`config.go:25` / `config.go:190` / `validate.go:231-235` 四处命中全是**注释**。
+**R17 成立，`docs-honesty` 的判据经 PM 独立复算无误。**
+
+### 19.12.4 `oscap-wire` 敞口部分收口：16 → 1，但**仍未推送**
+
+18:38 告警 → 18:45 复查 `dirty=16→1`、本地多出 1 个提交。**工作已落进 git**，
+但 `git rev-list --count origin/main..origin/oscap-wire/vfs-xattr-seam` 仍是 **0**，远端一无所有。
+已再次催 push。这与 §19.11.6 那 10 笔是同一形态：**commit 挡住工作树被清，挡不住容器整个消失。**
+
+### 19.12.5 🟡 新发现：阻塞项①的双向实测有一个**删不掉的副作用**（已转告 `ci-trigger`）
+
+收口判据要求推 `v0.0.99-probe` / `v0.0.99` 两个一次性 tag。其中 **`v0.0.99` 会真的产出一个
+`preRelease: false` / `latest: true` 的 Release** —— 从那一刻起仓库 Release 页的
+**latest 指向 `v0.0.99`**，直到下一个正式版顶掉它。
+而按 `memory/feedback_conversation_exports.md` 的口径，**测试 Release 属于「珍贵记录，别删」**，
+所以不能靠事后清理收场。
+
+已给 `ci-trigger` 三个处置选项（接受并写进发布后复核清单 / 确认 `latest` 生效方式 /
+只推预发布那条真 tag、正式版侧用本地 `case` 矩阵取证）。
+**注意第三条只证明 `case` 语句对，没证明 CNB 的 `if:` 真按退出码 skip stage**，
+所以在 team-lead 点头前，①的收口判据仍是「两条真 tag」不放宽。
+
+顺带复核了 `ci/release-channel`（`768ba52`）的改法，**论证站得住**：用两个互斥 `if:` stage
+而不是往内置任务 `options` 里塞 `$VAR`（后者是赌一个没写进文档的行为）；
+并且把风险从「人忘了改配置」（不可见）挪到「人打错 tag 名」（tag 名印在 Release 标题上，当场可见）。
+
+### 19.12.6 本轮自查：我差点踩自己刚写进记忆的坑
+
+复算 R17 时我先跑了 `git diff --stat origin/main HEAD`，输出 **104 文件 -27125**，
+第一反应是「我的分支怎么删了这么多东西」。**这正是 §19.6 / #139 那个两点 diff 幻觉** ——
+真相是 main 前进了 6 笔而我的分支基于更早的 main。改用三点 `origin/main...HEAD` 后是
+**9 文件 +771/-6，全在 `docs/` 与 `memory/`**，干净。
+
+记一笔是因为：**我是写下这条订正的人，仍然在四小时后差点栽进去。**
+说明这类判据不能靠「记住」，要靠**每次都用对命令**——
+`memory/reference_cnb_pr_api.md` 里那张「想知道什么 → 用什么」的分工表就是为此存在的。
+
+## 19.13 18:53 巡检：三条订正（含我自己的一次误报）+ 两条新规矩入板
+
+### 19.13.1 ⛔ 新规矩（项目所有者直接下达）：**功能分支 push 不许再当 CI 手段**
+
+原话：「还在用 push 触发 ci 吗？这个要明令禁止，ci 额度很紧张。」
+
+| 用途 | 允不允许 |
+|---|---|
+| 为了「看看 CI 过不过」而 push | ❌ **禁止**。本地 18 秒：`sh test/ci/check-test-compile.sh && gofmt -l . && go vet ./...`（四平台 × 全 tag × 含 `_test.go`），覆盖门禁绝大部分 |
+| 开探针分支推上去跑流水线做实验 | ❌ **禁止**。一律 `go test -overlay`，工作树零修改 |
+| **保存工作、防环境回收丢失** | ✅ **照常推**。环境 2026-08-10 01:55 硬回收，丢工作比多跑一条流水线贵得多 |
+| 开 PR 之前把分支放上去 | ✅ 允许 |
+| PR 事件的 CI | ✅ **唯一合法用途**，也是唯一的合并把关点 |
+
+**为什么这是最大的一处浪费**：同一份代码现在付三次钱 —— 分支 push 一次 → 开 PR 再一次 →
+PR 每次更新又一次，而**分支 push 那次的结论会被 PR 事件完全覆盖，纯属重复付费**。
+今天一个 agent 在单条分支上推了 8 笔 = 8 条流水线 ≈ **1.1 核心小时全白花**。
+
+**结构性修复在做**：`ci-trigger` 正把 `.cnb.yml` 的 `push:` 事件限定为**只有 `main` 才跑**；
+`pull_request:`（唯一把关点）与 `tag_push:`（发布路径）两段不动。**他合入前靠自觉。**
+
+### 19.13.2 🔧 订正 §19.11.6：那 10 笔**早就推上去了，是我的检测命令有盲区**
+
+**我 18:42 报的「10 笔保命提交没推」是误报。** 它们 18:34 就已在远端，推的是 `refs/rescue/*`：
+
+```
+$ git ls-remote origin 'refs/rescue/*' | wc -l      # 18:52 实测
+22
+6fdde7c… refs/rescue/fix-ci-c9-gate-name        2b02cfa… refs/rescue/oscap-config
+e961cd9… refs/rescue/oscap-gate-c9-constraint   86230c6… refs/rescue/rel-docker-image
+bd7304b… refs/rescue/rel-v010-cnb-image         …（SHA 与本地那 10 笔逐个吻合）
+```
+
+**盲区根因**：`git log --oneline --branches --not --remotes` 里的 `--remotes`
+**只展开 `refs/remotes/*`**（远程跟踪分支）。服务端的 `refs/rescue/*` 在本地**没有对应的
+跟踪引用**，于是那 10 笔在本地看永远是「未推送」。
+
+这与我 §19.9 刚刚订正过的那个盲区**是同一类**：`git log origin/<b>..<b>` 逐分支问会报 41 笔假警。
+**两次都是「拿本地引用推断远端状态」。** 唯一可信的判据是直接问服务端：
+
+```sh
+git log --oneline --branches --not --remotes    # 仍要跑，但它只覆盖 refs/heads
+git ls-remote origin 'refs/rescue/*'            # 补上 rescue ref 这一块
+git ls-remote origin 'refs/heads/*'             # 分支的权威答案
+```
+
+**看板从此把 `ls-remote` 列为盘点的必跑项**，`--branches --not --remotes` 降级为初筛。
+
+### 19.13.3 ✅ 新手法入板：**别人正在写文件时的保命提交（rescue ref）**
+
+`oscap-wire` 那 16 个在途文件由 team-lead 代存了，**且没有碰他的工作树** ——
+没有用 `git add -A && commit`（那正是今天已发生三次的「同名双实例卷走在途文件」事故形态），
+而是用**独立索引造提交对象**：
+
+```sh
+cd /work/<对方的树>
+export GIT_INDEX_FILE=/tmp/<我的角色>-rescue-idx   # 关键：不是 .git/index
+git read-tree HEAD && git add -A                   # 只影响临时索引
+TREE=$(git write-tree); unset GIT_INDEX_FILE
+C=$(git commit-tree "$TREE" -p HEAD -m "wip(rescue): …")
+git push origin "$C:refs/rescue/<角色>-inflight-<时间>"
+```
+
+结果：`4e0978e…` 已在远端，而他的工作树复查 **dirty 仍是 16**、`git status` 毫无变化，
+可以继续写。取回用 `git fetch origin refs/rescue/<名字>`。
+
+**两条配套事实**：
+
+1. **`refs/rescue/*` 不触发 CI** —— CNB 事件只挂 `refs/heads/*` 与 tag，实测 9 次 rescue
+   推送零流水线。相比之下推 10 个分支 = 10 条流水线 ≈ 1.4 核时。**与 §19.11.8 的 160 核时并列。**
+2. **`$(git commit-tree …)` 输出带尾部 CR**，直接拼 `$C:refs/…` 会得到 `<sha>efs/…`
+   （`:r` 被 CR 吃掉）报「源引用规格没有匹配」。要么 `tr -d '\r'`，要么把 sha 抄下来单独推。
+
+已写入 `memory/project_rescue_ref_inflight.md`。
+
+**但 §19.11.6 里那句判断依然成立、且要原样保留**：
+**commit 挡住的是「工作树被清」，挡不住「容器整个没了」。** 造完提交对象**必须推**。
+
+### 19.13.4 「可替换块」升格为规则（team-lead 批准）
+
+> **凡是「写下时正确、但已知会很快变」的陈述，一律圈成带 BEGIN/END 标记的可替换块，
+> 块内写可复算判据 + 事实截止时间戳，不写形容词。**
+
+比「记得回来改」强在哪：**它把「改哪儿」从人的记忆里挪到了文件里，且下一个人 grep 得到。**
+样板见 `CHANGELOG.md:217` 的 `BEGIN-OSCAP-WIRING-STATUS`。
+三要素缺一不可：① 时间戳（限定成某一时刻的事实）；② 可复算判据（读者能自己跑）；
+③ 唯一替换点标记（整段替换，不必满文档追着改）。已同步进
+`memory/feedback_falsifiable_assertions.md`。
+
+**合并顺序已定：`docs-honesty` → `oscap-wire`。** 理由：替换目标必须先存在，
+否则接线 PR 合入后没有块可替，那段「尚未接线」会以**已经过期的形式**留在 main 上 ——
+正好变成我们一直在防的那类谎。
+
+### 19.13.5 阻塞项①判据**不放宽**：两条真 tag 都推
+
+team-lead 采纳了我的反驳：本地 `case` 矩阵只证明 `case` 语句写对了，
+**没有证明 CNB 的 `if:` 真的按退出码 skip 掉 stage** —— 这两件事之间隔着一整个 CI 引擎的行为，
+而那正是要验的东西。「报绿但什么都没跑」本项目已攒到第九例，不能在发版当天再加一例。
+
+`latest` 被污染判为**可接受且自愈**（v0.2.0 一小时内就推，正式版落地即顶回；
+退一步就算 CNB 按 semver 算，`v0.0.99 < v0.2.0` 同样 v0.2.0 赢）。
+代价两条 tag_push ≈ 0.28 核时，**买的是「发版通道真的能用」这个事实**。
+
+**新增约束**：两个探针 Release 的正文**第一行必须写明**
+「本 Release 为发布通道验证探针，不是可用版本，请勿下载使用」——
+按记忆规矩这两条记录不删、留着当证据，那就得让后来的人一眼看出它是什么。
+
+另：team-lead 已批准 `ci-trigger` 把镜像 `--latest` 一并接上。原注释写着「两处必须同时改」，
+**只改一边等于亲手制造它自己警告过的状态**。
+
+### 19.13.6 「写了但没被验证」母题计数 **9 → 10**，且第 10 次是**新形态**
+
+前九次全是**「代码没被编译/没被执行」**。第十次不一样，就在同一个提交里：
+
+```
+test/ci/check-test-compile.sh:113   # 负向对照见 test/ci/negative-verify.sh 的 freebsd 段
+$ grep -c -i freebsd test/ci/negative-verify.sh
+0
+```
+
+**注释宣称了一个不存在的实体。** 这比前九次更隐蔽 ——
+**前九次至少还有编译器/CI 有机会发现，这一次连编译器都不会看它一眼**，
+它只会在某个人照着注释去找、发现找不到时才暴露，而那时他多半会以为是自己看漏了。
+
+**判据**：凡是注释里出现「见 `<文件>` 的 `<某段>`」，写的时候就 grep 一次证明它存在；
+review 时同样 grep 一次。已派 `vfs-deflake` 补 freebsd 段。
+
+### 19.13.7 #153 冲突已解（用 merge，不是 rebase）
+
+`mergeable_state: conflict` 的成因：#152 合入（`3ada731`）后 main 动了，撞在
+`memory/MEMORY.md`（双方各自追加索引行）与 `memory/project_timing_criteria_flaky.md`（add/add）。
+
+处置：**在我分支上 `git merge origin/main`**（按 team-lead 要求不用 rebase ——
+我上一轮刚栽在 rebase 上）。
+- `MEMORY.md`：**两边都保留**，去重，没删对方任何一行。
+- `project_timing_criteria_flaky.md`：main 那版 70 行是我这版 32 行的**严格超集**
+  （多出配对对照的完整命令、`kill $(jobs -p)` 收尾纪律、`/tmp` 角色名前缀等），
+  **取 main 版**，我这版没有任何 main 缺少的内容。
+
+合并后三点 diff 复核：**10 文件 +897/-6，全在 `docs/` 与 `memory/`**，无产品代码。
+
+---
+
+## §19.13 第 19 轮巡检（18:55 CST，盘点法 Task 3 第三轮）
+
+> 纪律重申：本轮**全程用三点 diff（`A...B`）+ blob 内容判据**，不再踩两点 diff「大规模删除」幻觉（18:46 我自己刚踩过一次：104 文件 -27125，实为主干前进 6 提交，三点才是 9 文件 +771/-6）。
+
+### 19.13.1 分支/PR 状态快照（全部用 `git fetch -q origin --prune` 后判定）
+
+| 项 | 状态 | 判据 |
+|---|---|---|
+| **#133**（lead/crash-forensics） | ⚠️ **closed 但改动未落地** | `memory/MEMORY.md:30` 在 **main 与分支里都还是旧文**「双进程=两套同名 agent 共写 /work」；head `38696c9c` 不在 main（`--is-ancestor`=NO）；三点 diff 2 文件 +96/-0（那份 95 行 `project_dual_codebuddy_session.md` + 1 行）**未进 main**。team-lead 18:16 的「改一行再合并」**这一行从未改、PR 也关了** |
+| **#139**（qa-e2e/ci） | ✅ 正确关闭 | 内容走 `a8db071` 进的主干，PR 当 no-op 关；抢救目标达成：`qa-e2e/ci` 远端 `3ff7cd8` 在，2 笔「仅存磁盘」提交已安全落远端（本地 worktree 另有 2 笔未推，不影响抢救） |
+| **#153**（pm/v020-board） | 🟡 open，已推 | 本轮把 7 笔本地积压（含一次把 main 合入的 merge）推上去，远端 `36529a1`，等 team-lead 合 |
+| **oscap-wire/vfs-xattr-seam** | ✅ **已合入 main** | 远端 `96afd87` `--is-ancestor origin/main`=YES；xattr 接缝工作落地。本地 `43f75ac` 还领先远端 3 笔（未推）——提醒 oscap-wire 推一下 |
+| **env/patch-codebuddy**（D19-3） | 🟡 open，ahead 4 | 落点 `scripts/env/patch-codebuddy.sh`（非 `scripts/diag/`）；待合 |
+| **docs/v020-honesty-audit**（blocker② R17 + blocker③ 文档诚实） | 🟡 open，ahead 15 | 两块阻塞项的解法都在这条分支的 CHANGELOG 可替换块里；未合 |
+| **ci/push-main-only**（blocker① 后续） | ⚠️ 见 19.13.3 | `.cnb.yml` 34 插 16 删**未进 main** |
+| **ci/p4-mixed** | 🟡 open，ahead 1 | probe 脚本 194 行，独立功能 |
+| **ci/memory-release-api** | 🟡 open，ahead 1 | 新记忆 `reference_cnb_release_api.md` |
+
+### 19.13.2 blocker 收敛复核（team-lead 18:25 定三条）
+
+- **① `.cnb.yml:235-240` preRelease 硬码** → **已解（main `25e92d2`「Release 渠道由 tag 名 SemVer 判定（带连字符=预发布），双向实测+跨配置对照」）**。但见 19.13.3 的冗余疑点。
+- **② R17 oscap 架空逻辑** → 解法在 `docs/v020-honesty-audit` 的 `BEGIN-OSCAP-WIRING-STATUS` 可替换块（4 条可复算判据），未合。
+- **③ 文档诚实（TM 降级/双实现撞车/盲区如实记账）** → 同分支，未合。
+
+> TM 已从 v0.2.0 阻塞项移除（18:25 决策），降级为可选；Apple 代码保留、docs-honesty 校正文档。
+
+### 19.13.3 🔴 需 team-lead 拍板的两件事
+
+**(A) #133 改行从未执行。** 18:16 明确「把 `memory/MEMORY.md:30` 从『双进程=两套同名 agent 共写 /work』改成『双进程=两套同名 agent（机制风险，本次未证实造成事故）』再合并」——现在 PR 关了，但那一行**两处都没动**。请指示：要我（或 team-lead）补改并合并，还是维持现状当已放弃？
+
+**(B) ci/push-main-only 与已合入的 `25e92d2` 疑似重复改 `.cnb.yml`。** main 已有 preRelease 修复，但 `ci/push-main-only`（`39af64a`）仍有 `.cnb.yml` 34 插 16 删未进 main。需 ci-trigger 确认：这条分支是陈旧重复、还是含 25e92d2 之外的必要补充？避免合进来和已上线的修复打架。
+
+### 19.13.4 🟡 v0.0.99 的 `latest` 副作用已发生
+
+`git ls-remote --tags` 确认**远端已有 `v0.0.99` 与 `v0.0.99-probe` 两个真实 tag**（commit `768ba528`）。这正是 18:45 我给 ci-trigger 预警的「两个真 tag 测试 → 造出 `latest:true` Release」副作用。按 memory 规定该 Release 不可删。请 ci-trigger 回：选了三条路里的哪条（①合前先删测试 tag ②加 tag 名白名单 guard ③接受并文档化），目前 `v0.0.99` 是否已按修复判为预发布而非 latest。
+
+### 19.13.5 10 笔 wip 提交仍滞留本地（同 19.12，未动）
+
+仍需 cleanup 执行者 `git push origin <分支>` 把以下 10 笔（本地有、远端无/不一致）推出去，否则环境一崩就丢：
+`fix-ci/c9-gate-name`、`oscap-gate/c9-constraint`、`oscap/config`、`rel-docker/image`、`rel-v010/cnb-image`、`tm-dev/timemachine`、`tm-vfs/stream-sync`、`tui-diag/tui-hang`、`win-backend/final-path-verify`、`win-meta/c9-negative-control`。
+
+> 自保：本轮已把 `pm/v020-board` 的 7 笔本地积压推上远端（`36529a1`），进度板+记忆同步安全。
+
+### 19.13.6 方法学复记
+
+- **盘点法**：`git log --branches --not --remotes` 一次性问全部远端 ref，再对候选比内容；`git log origin/<b>..<b>` 逐分支会造 41 笔「未推送」假警（前轮已验证）。
+- **两点 diff 幻觉**：`git diff A B` 把「分支落后 main」算成删除；本项目两次实测（#139 的 -21298、本次自己的 -27125）都靠三点 diff 救回。
+
+## 19.14 18:56 巡检：**R17 接线已落地并经 PM 独立验证**（阻塞项② 实质完成，待 PR）
+
+### 19.14.1 判据从 1 变 3、从 0 变 8 —— 我自己在他分支上跑的
+
+`oscap-wire/vfs-xattr-seam` 远端已有 **3 笔**（`e92b3c0` / `ed2fe69` / `a6e38d5`），
+**18 文件 +1594/-393**。我开临时 worktree 检出该分支实跑：
+
+| 判据 | main 基线 | 接线后 | 含义 |
+|---|---|---|---|
+| `go list -deps ./cmd/stupidsamba \| grep -c oscap` | **1** | **3** | `internal/oscap` + **`/native` + `/builtin` 两个适配器真的被链进发布二进制了** |
+| 包外真实调用点（排除 `_test.go` 与 oscap 自身） | **1**（还是个 `ParseMode`） | **8** | 数据路径真的在调 |
+| 旧实现 `newXattrAccessor` / `readMetaXattrFast` | 9 处活调用 | **0 处**（仅剩 2 处**注释**提及） | R18 双实现风险**解除**，不是并存而是替换 |
+
+`xattr_unix.go`（-211）与 `xattr_other.go`（-23）**已整个删除**。
+第三笔 `e92b3c0` 把 `filesystem_mode` 从装配层**逐共享**传下去 ——
+这一步才是让配置项真正生效的那一环，此前它只被校验、无人消费。
+
+### 19.14.2 三条反向对照**两个方向都有正例**，我本地跑过（零 CI 消耗）
+
+```
+--- PASS: TestSeamReverseControl                 （注入哨兵错误 Provider → 用例当场变红才算数）
+--- PASS: TestNamedStreamGoesThroughProvider
+--- PASS: TestAppleFastPathGoesThroughProvider   （覆盖 optional.go:304 那条快路径）
+--- PASS: TestPortableWritesNothingToHostXattr   （portable：宿主 xattr 一个都没有）
+--- PASS: TestNativeWritesToHostXattr            （native：宿主上必须看得到 ← §19.11.3 加严的那一条）
+ok  github.com/finalappstore/stupidsamba/internal/vfs  0.251s
+```
+
+**§19.11.3 要求的两个方向都有正例，落实了。** 另有
+`TestNativeModeFailsFastOnPosix`（native 档在 POSIX 恒定启动失败，语义不改只改诊断）、
+`TestSameRootTwoSharesShareOneStore` / `TestStoreReleasedWhenAllSharesClose`
+（同 Root 双 builtin adapter 的引用计数，即他 18:22 报的 4.97 秒锁超时缺陷）、
+`TestBothModesSameBehaviour`、`TestNamedStreamOnDiskFormatSamba`、
+`TestFinderInfoOnDiskFormatNetatalk`（落盘格式对齐 Samba/netatalk）。
+
+**判据是「哨兵错误」而不是「随便一个错误」**（`oscap_seam_test.go:90-93` 有注释说明原因）：
+这样断言能区分「我们注入的实现被调用了」与「碰巧也失败了」。这正是本项目要的可证伪写法。
+
+### 19.14.3 阻塞项②状态更新：**实质完成，剩 PR + 合并顺序**
+
+| 项 | 状态 |
+|---|---|
+| 接线（CapXattr + CapNamedStream 两项） | ✅ 已完成并推送 |
+| 旧实现删除（R18） | ✅ `xattr_unix.go` / `xattr_other.go` 整删，0 处活调用残留 |
+| 两向反向对照 | ✅ 本地实跑全 PASS |
+| 装配层消费 `filesystem_mode` | ✅ `e92b3c0` |
+| **开 PR** | ⬜ 未开 |
+| **CHANGELOG 可替换块整段替换** | ⬜ 待 `docs-honesty` 先合（顺序已定，见 §19.13.4） |
+
+**接线 PR 里必须一并做的事**：整段替换 `CHANGELOG.md` 的 `BEGIN-OSCAP-WIRING-STATUS` 块，
+把四条「未接线」判据换成接线后的可复算判据（本节表格里的 1→3 / 1→8 / 9→0 可直接引用），
+并写清**接了两项、六项能力里还剩四项**。按 §19.10 口径，只接部分完全可以接受，**前提是如实写明**。
+
+### 19.14.4 18:56 分支快照（已按 §19.13.2 用 `ls-remote` 复核）
+
+| Agent | 分支 | ahead | 备注 |
+|---|---|---|---|
+| `docs-honesty` | `docs/v020-honesty-audit` | **15** | 阻塞项③，量最大；合并顺序排第一 |
+| `pm` | `pm/v020-board` | 11 | PR #153，冲突已解（merge 非 rebase） |
+| `env-patch` | `env/patch-codebuddy` | 4 | 主体已进 main（`3ada731`） |
+| `oscap-wire` | `oscap-wire/vfs-xattr-seam` | **3** | 阻塞项②实质完成，见上 |
+| `vfs-deflake` | `vfs-deflake/memory-freebsd-gate` | 3 | 另需补 §19.13.6 那条不存在的 freebsd 段 |
+| `ci-trigger` | `ci/release-channel` | 1 | 阻塞项①，待双向 tag 实测 |
+| rescue ref | `refs/rescue/*` | **22 条** | 全在远端，§19.11.6 的误报已订正 |
+
+初筛 `git log --branches --not --remotes` 报 12，其中 10 笔已由 rescue ref 覆盖（SHA 逐个吻合），
+2 笔是我自己刚提交、随本轮一并推送。**真实丢失敞口 = 0。**
+
+---
+
+## §19.15 第 19 轮巡检订正（19:00，采信 team-lead 18:56 的三条纠正 + 两处拍板）
+
+> 本轮我自己报了 **一处假阳性**（把最大的阻塞项误报成已解），根因值得单记。
+
+### 19.15.1 🔴 纠正 1：oscap 接线**没有**合入 main（最要命的一条）
+
+我 §19.13.1 写「远端 `96afd87` 已 `--is-ancestor origin/main`=YES，xattr 接缝工作已合入 main」——**错的**。三条独立判据说不是：
+
+```
+git show origin/main:internal/vfs/xattr_unix.go   → 文件【还在】main 上
+git merge-base --is-ancestor e92b3c0 origin/main  → NO
+git show origin/main:internal/vfs/local.go | grep -c oscap  → 0
+```
+
+**假阳性根因（新形态，记一笔）**：`96afd87` 的提交标题是 **`Merge pull request #136`**——
+它是该分支**开工时**从 main 拉进来的那个合并提交，当然已经是 main 的祖先。我拿分支的**旧远端 tip**
+去做祖先判定，判的其实是「这个分支曾经基于 main」，不是「这份工作进了 main」。这正是
+`feedback_stale_sha_refetch_and_batch_spotcheck.md` 的延伸：**分支的远端 tip 也会落后于本地**，
+而祖先判定对「落后的 fork-base tip」是**静默容忍**的。判据必须换成**内容**：
+`git show origin/main:<该工作必然会删/改的文件>`（这次就是 `xattr_unix.go` 在不在，一条命令无歧义）。
+
+**真实状态**：oscap-wire 18:56 交付 **PR #159**（head `e92b3c0`），team-lead 已独立复核：
+- `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（`oscap`+`native`+`builtin` 真进二进制），main 基线 1；
+- `xattr_unix.go`/`xattr_other.go` 在他分支上已删（R11 双写消除）；
+- 9 调用点全改完（A 组 `CapXattr` / B 组 4 处 `CapNamedStream`）。
+
+**→ Blocker②（R17）改回 🔴 未合，但终于有了可合的 PR #159。** 板子已更正，不标已解。
+
+### 19.15.2 🟢 纠正 2：10 笔保命提交**已在远端**，18:47 team-lead 推的
+
+`git ls-remote origin 'refs/rescue/*-1846' | wc -l` = **10**，走 `refs/rescue/<分支名>-1846`，
+**零 CI 消耗**（CNB 只对 `refs/heads/*` 和 tag 触发）。「需 cleanup 执行者 git push」**划掉**。
+
+**推的时候踩的坑（记下来省得下个人踩）**：zsh 会把 `$b:refs/...` 里的 `:r` 当成变量修饰符
+**吃掉冒号**，refspec 变成 `refs/heads/xxxefs/rescue/...` 然后报「源引用规格没有匹配」。
+用变量拼接（`dst="refs/rescue/$b"; git push origin "$src:$dst"`）绕开。
+
+### 19.15.3 🟢 纠正 3：env-patch D19-3 **已在 main**
+
+`git show origin/main:scripts/env/patch-codebuddy.sh` 存在（`3ada731`，#152 已合）。
+板子上「ahead 4，未合」是旧状态，**划掉**。
+
+### 19.15.4 决策 (A)：#133 那行——改，但事实已变，且**等 #155 合入后**再动手
+
+- 18:26 事实变了：同名双实例交叉写入被**直接观测到 3 起**（`f6952a7` vfs-deflake B 实例
+  `git add -A` 把 A 实例在飞的 `check-test-compile.sh` 扫进同一提交；`b39b2bf` docs-honesty；
+  `768ba52` ci-trigger）。放大器是 `git add -A`；最早信号「`git status` 本该脏却显示 clean」。
+- 两件事分开写：①「两进程同挂一个 session」→ 观测到但**未证实**造成事故（pid 统计 24 vs 6627，
+  旧进程空转），保留「危险信号非事故成因」；②「同名双实例交叉写入同工作树」→ **已直接观测、3 起**，
+  写成既成事实，不能再叫「机制推演」。
+- **先别动手**：`memory/MEMORY.md` 正在 #155 冲突解决里（docs-honesty 改同一文件）。
+  **等 #155 合入后**我再做 docs-only PR 改 `MEMORY.md:30` + 把 95 行 `project_dual_codebuddy_session.md` 带进主干。
+
+### 19.15.5 决策 (B)：ci/push-main-only 归 ci-trigger（team-lead 已问，不重复）
+
+team-lead 18:57 已连同别的一起发给他。我不重复问。
+
+### 19.15.6 🔴 v0.0.99 副作用：team-lead 批的可接受+自愈，但**首行告警缺失**
+
+team-lead 要求 Release 正文第一行写死「⚠️ 本 Release 为发布通道验证探针，不是可用版本，请勿下载使用」。
+**巡检核对结果：两 tag 的首行都是 `# Changelog …`，告警句不在。** 实测字段：
+
+```
+v0.0.99      prerelease=False is_latest=True  latest=None  | 首行: # Changelog …
+v0.0.99-probe prerelease=True  is_latest=False latest=None  | 首行: # Changelog …
+```
+
+`latest=None` 印证 #158 记的 null 陷阱（判最新看 `is_latest`）。但**告警首行缺失**——这是 team-lead
+明确点名要核的一条，目前没满足。需 ci-trigger 补：在 `.cnb.yml` 的 `git:release` 阶段把这句
+（或一段 probe 说明）写进 Release body 头部。`is_latest`/`prerelease` 判定本身正确（v0.0.99 真 latest、
+v0.0.99-probe 真预发布），自愈逻辑成立。
+
+### 19.15.7 当前合并队列（板子照此更新）
+
+1. **#155** docs-honesty —— 解 squash 后遗症 4 处冲突（`CHANGELOG.md`/`README.md`/
+   `docs/v020-honesty-audit.md` add/add + `memory/MEMORY.md`）。成因：#150 从**同分支** squash，
+   分支没 rebase 就继续写。
+2. **#159** oscap-wire —— 判据已复核（1→3），**等 #155 先落地**（他要替换 `CHANGELOG.md:217`
+   的 `BEGIN-OSCAP-WIRING-STATUS` 块）。
+3. **#153** 我的板子 —— docs-only，#155 之后随时可合（同样碰 `memory/`，避免撞车）。
+4. 然后 team-lead 推 **v0.2.0 tag**。
+
+### 19.15.8 #157 压着不合（team-lead 决策）
+
+ci-trigger #157（push 只限 main）CI 绿，但 team-lead 压到 v0.2.0 发版之后。原因：它把 `push` 移到
+顶层 `main:` 键、`tag_push` 留 `$:`，依赖「CNB 对 main 会把 `main:` 与 `$:` 按事件合并」这个**只有文档
+旁证、未实测**的假设。若不成立 → `tag_push` 不触发 → v0.2.0 **无 Release/无附件/无镜像，且静默失败**。
+发版走**已验证**的当前 `tag_push`（刚被 `v0.0.99`/`v0.0.99-probe` 两条真 tag 实测过）。
+这是「不在关键路径上引入未实测变更」的具体案例，入板。
+
+### 19.15.9 #143 ifModify 洞 = 「报绿但什么都没跑」**第 11 例**（自造）
+
+实证：#155 里 `configs/example.yaml` 改了 24 行（非文档），但最后一次 push 是纯记忆提交，
+于是整条跳过，**那 24 行 YAML 从没被门禁看过**，PR 却是绿的。`ifModify` 按「本次 push 改了什么」
+判定，不按「PR 全量」判定。team-lead 已让 ci-trigger 出方案。登记为**新风险 R-发布门禁**。
+
+### 19.15.10 三项入记忆/板
+
+1. `refs/rescue/*` 零 CI 保命推法（9 次实测零流水线）—— 已订正 §19.11.6 的误报，根因是
+   `git log --branches --not --remotes` 看不见 `refs/rescue/*`；正确检测 `git ls-remote origin 'refs/rescue/*'`。
+2. 独立索引代存法（别人正在写、必须保命时）：`GIT_INDEX_FILE=/tmp/x git read-tree HEAD && git add -A`
+   → `write-tree` → `commit-tree` → 推 `refs/rescue/*`，全程不碰对方 index/HEAD。team-lead 18:43 用它救了
+   oscap-wire 的 16 个在制文件，对方 `git status` 无变化。
+3. **CNB API 的 null 陷阱**（ci-trigger 发现，记进 `reference_cnb_pr_api.md` 的「null 陷阱」小节）：
+   Release 的 `latest` 字段**恒为 null**，判最新看 `is_latest`；与 PR 的 `merged=null` 同型——**API 用 null
+   表达「我不回答这个问题」，调用方却读成「否」**。
+
+---
+
+## §19.16 19:03 复盘：本次巡检我自己造的假阳性（与第 11 例同源）
+
+同一轮里我同时是「假阳性制造者」和「第 11 例记录者」，两条都源于同一个习惯：**拿工具的回显当真相**。
+
+| 我造的 | 根因 | 正确判据 |
+|---|---|---|
+| Blocker② 误报已解 | 用分支**陈旧 fork-base tip** 做 `--is-ancestor`，静默通过 | 比内容：`git show origin/main:<该工作必删/改的文件>` |
+| 「10 笔没推」误报（§19.11.6，上轮已订正） | `git log --branches --not --remotes` 看不见 `refs/rescue/*` | `git ls-remote origin 'refs/rescue/*'` |
+| #143 ifModify 第 11 例 | `ifModify` 按「本次 push 改了什么」判定 | 按 PR 全量判定 |
+
+**共同母题**：CI/工具说「绿/无/已合」，调用方直接采信 → 与 `merged=null`/`latest=null` 是同一类
+「回显说没有，其实发生了 / 或没发生」。**判据永远要比一层：回显说的，和实际内容一致吗？**
+
+oscap-wire 那条假阳性我已发消息向他更正（他 PR #159 才是正确载体）。
+
+---
+
+## 19.15 19:03 巡检：**阻塞项②不是「CI 跑着」而是 conflict**；R17 改判为已收口
+
+本轮唯一重要的事：team-lead 18:56 报「#159 已开、CI 跑着、可等合并」，
+**19:01 实测是 `mergeable_state: conflict`**。差别不是措辞——一个是「等机器」，
+一个是「等人动手」，后者在发版前无人认领就会静默停摆。
+
+### 19.15.1 三条阻塞项 19:01 实测状态（`GET /-/pulls/<号>`，非转述）
+
+| # | 阻塞项 | PR | 实测 state / mergeable_state | 判断 |
+|---|---|---|---|---|
+| ① | Release 渠道按 tag 名判定 | #156 | `closed` / **`merged`** | ✅ 已进 main（`25e92d2`） |
+| ② | oscap 接进真实数据路径 | #159 | `open` / **`conflict`** | 🔴 **需 oscap-wire 动手**，不是等 CI |
+| ③ | 文档诚实性 | #155 | `open` / **`conflict`** | 🟡 需 docs-honesty 动手 |
+| — | PM 进度板 | #153 | `open` / **`mergeable`** | ✅ 冲突已解并推送（`c5d35be`） |
+| — | push 只限 main | #157 | `open` / `mergeable` | ⏸ **刻意压到发版后**，理由见 §19.15.4 |
+
+**三条开放 PR 里两条是 conflict，且都撞在 `memory/MEMORY.md` 的同一行位置。**
+这已经是本项目 MEMORY.md 索引行的第 N 次三方撞车：它是全队都会追加的单行列表，
+天然的热点。处理规矩固定为**两边都留、去重**，不要挑一条。
+
+### 19.15.2 #159 的冲突范围我试合过：**一个文件、一行，代码零冲突**
+
+```
+git merge-tree --write-tree origin/main b3eff66   → rc=1
+  仅 memory/MEMORY.md 三方冲突（stage 1/2/3 各一份 blob）
+  main 侧新增：reference_cnb_release_api.md 索引行
+  他侧新增：  project_port_wiring_acceptance.md 索引行
+  两行都插在第 33 行
+```
+
+用 `merge-tree` 而不是 `git diff` 是 §19.4 那条教训的直接应用：
+**两点 diff 会把「分支落后于 main」算成大规模删除**，据此判断冲突范围会得出恐怖且错误的结论。
+精确改法已直接发给 oscap-wire（merge 不 rebase、两行都留、push 前单跑 `gofmt -l .`）。
+
+### 19.15.3 R17 🔴 → ✅ **已收口**（判据是我自己在他分支上跑出来的）
+
+| 判据 | 结果 |
+|---|---|
+| `go list -deps ./cmd/stupidsamba \| grep oscap` | `internal/oscap` + **`/builtin`** + **`/native`** 三行 —— 两个适配器真的被链进二进制 |
+| `internal/vfs/xattr_unix.go` / `xattr_other.go` | **文件已不存在**（R18 双实现风险解除） |
+| vfs 产品代码里 `unix.[GSL]etxattr` 残留 | grep 命中 1 处，**逐行看过是 `oscap_xattr.go:7` 的一句注释**，零个真实调用 |
+
+第三条特意写出来，是因为「grep 计数不为 0」很容易被当成「还有残留」直接上报——
+**计数是线索，不是判据；判据是把那一行看完。**
+
+R17 的原始表述「`internal/oscap` 建成了但产品数据路径一行都没消费它」自此作废。
+准确的新表述是：**v0.2.0 接了六项能力里的两项（CapXattr + CapNamedStream），其余四项留 v0.3.0。**
+这句话要原样进 CHANGELOG 与 AGENTS.md §1.2，**不许简写成「oscap 已接线」**——
+那会把「接了 1/3」读成「接完了」，正是本项目反复栽的那种夸大。
+
+### 19.15.4 入档一条排序原则：**不在关键路径上引入未实测的变更**
+
+team-lead 决定 #157（push 只限 main）CI 虽绿但**压到 v0.2.0 发版之后**。理由值得记成通例：
+
+- #157 把 `push` 移到顶层 `main:` 键，`tag_push` 仍留在 `$:`，
+  依赖「CNB 对 main 会把 `main:` 与 `$:` 按事件合并」这个**只有文档旁证、没有实测**的假设。
+- 假设若不成立 → `tag_push` 不触发 → **v0.2.0 没有 Release、没有附件、没有镜像，而且是静默失败**。
+- 当前 main 的 `tag_push` 刚被 `v0.0.99-probe` / `v0.0.99` 两条真 tag 跑通过。
+
+**原则**：发版走**已经被真实事件走通过**的那条路；任何「按文档应该也行」的改动，
+一律排到发版之后。收益（省几条流水线）与风险（发版链路静默失效）不在一个量级。
+
+### 19.15.5 转给 `docs-honesty` 的事实变更清单（#159 合入后立即生效）
+
+`oscap-wire` 报来、我已核对属实。**这些位置合并后会变成假话**：
+
+| 位置 | 现状 | 应改为 |
+|---|---|---|
+| `AGENTS.md` §1.2 表格「运行期消费方」 | ❌ 无 | ✅ `internal/vfs` + `cmd/`（CapXattr / CapNamedStream 两项） |
+| §1.2「已建成 ≠ 已生效」判据 1/2/3 | `go list` 计数为 1、无包外调用 | 数字全变（1→3），第 3 条的 grep 结论反转 |
+| `CHANGELOG.md`（`2a1b917`） | 「接线留到 v0.3.0」 | 「v0.2.0 接两项、余四项留 v0.3.0」 |
+
+**注意时序**：这些改动只有在 #159 真的合入之后才成立。**先改文档后合代码 = 文档先说谎一段时间**，
+本项目已有前科（§19.8 的叙事互斥）。docs-honesty 的可替换块机制正是为此，按块整段替换即可。
+
+### 19.15.6 建议合并顺序：**#159 → #153 → #155**
+
+#159 在关键路径且要重跑 CI，先走；#153（本板子）纯文档、冲突我来吃；
+#155 量最大且与 #159 的事实相关，放最后一次改到位，避免「合完还要再改一遍」。
+
+### 19.15.7 方法学补一条：判「推没推」要问服务端
+
+18:58:54 我 `git fetch -q origin main pm/v020-board` 后读本地 `origin/pm/v020-board`，
+得到 `f247ec3`，据此认为合并提交**尚未推送**；而 19:01 `git ls-remote` 显示服务端
+**已经是 `c5d35be`**。reflog 显示本地跟踪引用在 **18:59:31** 才被 `update by push` 写上——
+也就是说那几十秒里，**本地跟踪引用与服务端事实不一致**。
+
+成因这次没有查到底（可能是并发的推送在途，也可能是我自己被自动后台化的任务在推），
+**所以只记可观测事实，不安因果**：
+
+> **判「推没推」的权威来源是 `git ls-remote origin <ref>`，不是本地 `origin/<分支>`。**
+
+同源：§19.11.6 那次 rescue ref 误报也是本地引用看不见服务端事实，
+两次栽在同一件事的两副面孔上。
