@@ -43,16 +43,20 @@ func ParseEchoResponse(b []byte) (*EchoResponse, error) {
 }
 
 // ---------------------------------------------------------------------------
-// CANCEL（MS-SMB2 §2.2.26）—— 只有请求，没有响应。
+// CANCEL（MS-SMB2 §2.2.30）—— 只有请求，**没有任何响应**。
 //
 //	0 StructureSize(2) = 4
 //	2 Reserved(2)
+//
+// 服务端收到后要去找 MessageId（异步时是 AsyncId）匹配的挂起请求，
+// 让那条请求以 STATUS_CANCELLED 收尾；CANCEL 本身不产生回包
+// （§3.3.5.16）。§2.2.26 是 LOCK Request，别弄混。
 // ---------------------------------------------------------------------------
 
-// cancelStructureSize 是 CANCEL Request 的 StructureSize（MS-SMB2 §2.2.26）。
+// cancelStructureSize 是 CANCEL Request 的 StructureSize（MS-SMB2 §2.2.30）。
 const cancelStructureSize = 4
 
-// CancelRequest 是 SMB2 CANCEL Request（MS-SMB2 §2.2.26）。
+// CancelRequest 是 SMB2 CANCEL Request（MS-SMB2 §2.2.30）。
 type CancelRequest struct{}
 
 // ParseCancelRequest 解析 CANCEL Request。
