@@ -12,7 +12,7 @@ func TestStaticStorePasswordAndNTHash(t *testing.T) {
 	// 同一个口令，一个写明文一个写 nt_hash，得到的 NTHash 必须一致。
 	want := NTHash("Password")
 	s, err := NewStaticStore(config.Auth{Users: []config.User{
-		{Name: "plain", Password: "Password", UID: 1000, GID: 100},
+		{Name: "plain", Password: "Password"},
 		{Name: "hashed", NTHash: hex.EncodeToString(want[:])},
 		// 两者都给时优先 nt_hash。
 		{Name: "both", Password: "something-else", NTHash: hex.EncodeToString(want[:])},
@@ -35,10 +35,6 @@ func TestStaticStorePasswordAndNTHash(t *testing.T) {
 		if a.Domain != "WORKGROUP" {
 			t.Errorf("%s 的 Domain = %q", name, a.Domain)
 		}
-	}
-
-	if a, _ := s.Lookup("plain", ""); a.UID != 1000 || a.GID != 100 {
-		t.Errorf("uid/gid 未透传: %+v", a)
 	}
 }
 

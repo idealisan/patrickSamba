@@ -327,8 +327,6 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 		User:        acct.User,
 		Domain:      m.DomainName,
 		Workstation: m.Workstation,
-		UID:         acct.UID,
-		GID:         acct.GID,
 	}
 	c.sessionKey = append([]byte(nil), esk[:]...)
 	c.done = true

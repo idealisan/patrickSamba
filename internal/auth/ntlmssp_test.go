@@ -59,7 +59,7 @@ func unwrap(t *testing.T, out []byte) []byte {
 // 端到端：SPNEGO + NTLMv2 成功认证，并核对 ExportedSessionKey。
 func TestProviderNTLMv2Success(t *testing.T) {
 	const pw = "s3cret"
-	p := testProvider(t, []config.User{{Name: "alice", Password: pw, UID: 1000, GID: 1000}}, false, false)
+	p := testProvider(t, []config.User{{Name: "alice", Password: pw}}, false, false)
 	ctx := p.NewContext()
 
 	// 第一轮：客户端 NEGOTIATE，包在 SPNEGO negTokenInit 里。
@@ -146,7 +146,7 @@ func TestProviderNTLMv2Success(t *testing.T) {
 	}
 
 	id := ctx.Identity()
-	if id == nil || id.User != "alice" || id.UID != 1000 || id.GID != 1000 {
+	if id == nil || id.User != "alice" {
 		t.Fatalf("Identity = %+v", id)
 	}
 	if id.Guest || id.Anonymous {

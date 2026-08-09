@@ -27,7 +27,11 @@ type Server struct {
 	SigningRequired bool `yaml:"signing_required"`
 	// EncryptionRequired 强制要求 SMB3 加密。
 	EncryptionRequired bool `yaml:"encryption_required"`
-	// MaxConnections 是并发连接数上限，0 表示不限。
+	// MaxConnections 是并发连接数上限。
+	//
+	// 0 或不填 = 使用默认上限（256）。**本项不支持"不限"** ——
+	// AGENTS.md §8 明确要求并发连接数必须有上限，无上限意味着任何人
+	// 都能用建链把服务端的内存与文件描述符吃光。
 	MaxConnections int `yaml:"max_connections"`
 	// SMB1 控制是否响应 SMB1 多协议协商入口，**默认开启**。
 	//
@@ -72,8 +76,6 @@ type User struct {
 	Password string `yaml:"password"`
 	// NTHash 是 32 位十六进制字符串，即 MD4(UTF16LE(password))。
 	NTHash string `yaml:"nt_hash"`
-	UID    uint32 `yaml:"uid"`
-	GID    uint32 `yaml:"gid"`
 }
 
 // Share 是一个共享目录。
@@ -94,22 +96,6 @@ type Share struct {
 	ValidUsers []string `yaml:"valid_users"`
 	// TimeMachine 把本共享宣告为 Time Machine 备份目标（阶段二）。
 	TimeMachine bool `yaml:"time_machine"`
-	// TimeMachineMaxSize 曾计划用于限制 Time Machine 可用容量（字节）。
-	//
-	// **目前没有任何效果**，设了会有一条启动 WARN。请改用 QuotaBytes。
-	//
-	// 原本的设想是把它写进 mDNS 的 _adisk._tcp TXT 记录，让 Finder 在
-	// 「选择备份磁盘」界面显示容量。但 _adisk 的 TXT 词汇表里
-	// （dk<N>=adVN=…,adVF=… / sys=waMa=…,adVF=… / adVU=…）**没有任何
-	// 经过验证的容量键** —— macOS 是从 SMB 的卷容量（
-	// FileFsFullSizeInformation）推断备份磁盘大小的，netatalk 的
-	// "vol size limit" 也是这么做的。AGENTS.md §9 明令不许臆造字段值，
-	// 所以这里不编一个键出来。
-	//
-	// 字段保留而不删除：删掉会让已有配置因"未知字段"直接启动失败
-	// （Load 是严格模式）。等真抓到 macOS 认的容量键再接上，
-	// 或者在下一次不兼容改动时移除。
-	TimeMachineMaxSize uint64 `yaml:"time_machine_max_size"`
 	// QuotaBytes 限制本共享**向客户端上报的卷容量**（字节），0 表示不限。
 	//
 	// 主要给 Time Machine 用：macOS 的 Time Machine 会一直备份到把整个卷吃满
@@ -120,8 +106,9 @@ type Share struct {
 	// 真正的强制配额要靠宿主文件系统，不在本软件职责范围内。
 	//
 	// 这也是限制 Time Machine 备份体积的**唯一**有效手段：
-	// macOS 就是照着 SMB 上报的卷容量决定备份磁盘有多大的。
-	// TimeMachineMaxSize 目前不起作用，见那个字段的注释。
+	// macOS 就是照着 SMB 上报的卷容量决定备份磁盘有多大的
+	// —— mDNS `_adisk._tcp` 的 TXT 词汇表里没有任何经过验证的容量键
+	// （AGENTS.md §9 不许臆造字段值），所以广播那条路走不通。
 	QuotaBytes uint64 `yaml:"quota_bytes"`
 	// MetadataPath 是 POSIX 元数据旁路存储（纯 Go 嵌入式 KV）的落盘路径。
 	//

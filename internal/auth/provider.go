@@ -18,10 +18,6 @@ type Identity struct {
 	Guest bool
 	// Anonymous 表示这是一个匿名/null 会话（对应 SMB2_SESSION_FLAG_IS_NULL）。
 	Anonymous bool
-
-	// UID/GID 是映射到的本地用户，供 VFS 层做权限决策。0 表示不映射。
-	UID uint32
-	GID uint32
 }
 
 // Account 是账户后端中的一条用户记录。
@@ -32,9 +28,6 @@ type Account struct {
 	// NTHash 是 MD4(UTF16LE(password))，即 NTLM 的 NT hash。
 	// 服务端校验 NTLMv2 只需要它，不需要明文口令。
 	NTHash [16]byte
-
-	UID uint32
-	GID uint32
 }
 
 // AccountStore 提供账户查询。实现必须是并发安全的。

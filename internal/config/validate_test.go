@@ -188,26 +188,23 @@ func TestValidateLogFileDirMissing(t *testing.T) {
 	}
 }
 
-// time_machine_max_size 是个还没接上的字段，设了必须明说不生效，
-// 否则用户会以为限额已经起作用，直到 Time Machine 把盘吃满才发现。
-func TestWarningsTimeMachineMaxSizeIsInert(t *testing.T) {
+// 要求加密时 min_dialect 低于 3.0 是"配了不生效"：2.0.2/2.1 没有加密能力，
+// 会在协商阶段被 fail closed 拒掉，min_dialect 写的值实际不可达。
+func TestWarningsEncryptionRequiredWithLowMinDialect(t *testing.T) {
 	c := baseConfig(t)
-	c.Shares[0].TimeMachine = true
-	c.Shares[0].TimeMachineMaxSize = 1 << 40
+	c.Server.EncryptionRequired = true
+	c.Server.MinDialect = "2.0.2"
 
 	ws := strings.Join(Warnings(c), "\n")
-	if !strings.Contains(ws, "time_machine_max_size") || !strings.Contains(ws, "不起任何作用") {
-		t.Errorf("设了 time_machine_max_size 必须告警其不生效，实际:\n%s", ws)
-	}
-	if !strings.Contains(ws, "quota_bytes") {
-		t.Errorf("应当指引用户改用 quota_bytes，实际:\n%s", ws)
+	if !strings.Contains(ws, "min_dialect") || !strings.Contains(ws, "不可达") {
+		t.Errorf("要求加密且 min_dialect<3.0 时必须告警，实际:\n%s", ws)
 	}
 
-	// 已经设了 quota_bytes 的就不必再推荐一遍。
-	c.Shares[0].QuotaBytes = 2 << 40
+	// 抬到 3.0 之后就不该再唠叨。
+	c.Server.MinDialect = "3.0"
 	for _, line := range Warnings(c) {
-		if strings.Contains(line, "time_machine_max_size") && strings.Contains(line, "请改用 quota_bytes") {
-			t.Errorf("已配置 quota_bytes 时不应再推荐它: %s", line)
+		if strings.Contains(line, "min_dialect") {
+			t.Errorf("min_dialect=3.0 时不应再告警: %s", line)
 		}
 	}
 }
