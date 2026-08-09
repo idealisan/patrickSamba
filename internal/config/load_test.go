@@ -143,3 +143,37 @@ func TestLoadEmptyPath(t *testing.T) {
 		t.Fatal("空路径必须报错")
 	}
 }
+
+// TestLoadReportsEveryFieldPath 是「人话错误信息」的验收用例（AGENTS.md §6）：
+// 一份到处写错的配置必须一次性报出全部问题，且每条都指出出错的字段路径，
+// 而不是让用户改一个跑一次。
+func TestLoadReportsEveryFieldPath(t *testing.T) {
+	_, err := loadTestdata(t, "many_errors.yaml")
+	if err == nil {
+		t.Fatal("这份配置到处都是错，必须报错")
+	}
+	msg := err.Error()
+
+	wantFields := []string{
+		"server.name",
+		"server.min_dialect",
+		"listen.addresses[0]",
+		"listen.addresses[2]",
+		"listen.port",
+		"auth.users[0].nt_hash",
+		"auth.users[1].name",
+		"shares[0].valid_users[1]",
+		"shares[1].name",
+		"shares[1].path",
+		"log.level",
+		"log.format",
+	}
+	for _, f := range wantFields {
+		if !strings.Contains(msg, f) {
+			t.Errorf("错误信息里缺少字段路径 %q", f)
+		}
+	}
+	if t.Failed() {
+		t.Logf("实际错误信息:\n%s", msg)
+	}
+}

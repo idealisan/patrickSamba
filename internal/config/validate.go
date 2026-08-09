@@ -140,15 +140,49 @@ func validateServer(c *Config, errs *ValidationErrors) {
 }
 
 func validateListen(c *Config, errs *ValidationErrors) {
+	// 地址会被逐个 net.Listen，只要有一个绑不上整个服务就起不来。
+	// 内核给出的 "address already in use" 对运维毫无信息量，
+	// 这里把已知会冲突的组合在启动前就拦下来并说清楚原因。
+	seen := make(map[string]int, len(c.Listen.Addresses))
+	wildcard := -1 // 第一个通配地址（0.0.0.0 / ::）的下标
+
 	for i, a := range c.Listen.Addresses {
 		field := fmt.Sprintf("listen.addresses[%d]", i)
 		if a == "" {
 			errs.add(field, "不能为空字符串（若要监听全部地址请把 addresses 整个留空）")
 			continue
 		}
-		if net.ParseIP(a) == nil {
+		ip := net.ParseIP(a)
+		if ip == nil {
 			errs.add(field, "不是合法 IP 地址: %q（这里只接受 IP，不接受主机名，端口写在 listen.port）", a)
+			continue
 		}
+
+		// 用解析后的形式做键：'::1' 与 '0:0:0:0:0:0:0:1' 是同一个地址。
+		key := ip.String()
+		if prev, ok := seen[key]; ok {
+			errs.add(field, "地址 %q 与 listen.addresses[%d] 重复，同一地址不能监听两次", a, prev)
+			continue
+		}
+		seen[key] = i
+
+		if ip.IsUnspecified() {
+			if wildcard < 0 {
+				wildcard = i
+			}
+		}
+	}
+
+	// 通配地址已经覆盖了本机全部地址，再列任何地址都会撞端口。
+	// 特别常见的写法是同时写 0.0.0.0 与 ::，直觉上"一个管 v4 一个管 v6"，
+	// 但 Go 的 "tcp" 监听是双栈的：先绑 :: 就已经把 0.0.0.0 也占了，
+	// 第二个 net.Listen 必然 EADDRINUSE。
+	if wildcard >= 0 && len(seen) > 1 {
+		errs.add(fmt.Sprintf("listen.addresses[%d]", wildcard),
+			"通配地址 %q 已经覆盖本机全部地址，不能再与其他地址并列（Go 的 tcp 监听是双栈的，"+
+				"同时写 0.0.0.0 和 :: 也会抢同一个端口）。要监听全部地址请把 addresses 整个留空，"+
+				"要监听指定地址就别写通配地址",
+			c.Listen.Addresses[wildcard])
 	}
 
 	if c.Listen.Port < 1 || c.Listen.Port > 65535 {
@@ -298,10 +332,22 @@ func validateAuth(c *Config, errs *ValidationErrors) {
 	// valid_users 引用的用户必须存在，否则该共享谁都进不去。
 	for i := range c.Shares {
 		s := &c.Shares[i]
+		listed := make(map[string]int, len(s.ValidUsers))
 		for j, name := range s.ValidUsers {
-			if _, ok := seen[strings.ToLower(name)]; !ok {
-				errs.add(fmt.Sprintf("shares[%d].valid_users[%d]", i, j),
-					"共享 %q 引用了未定义的用户 %q（请先在 auth.users 里定义）", s.Name, name)
+			field := fmt.Sprintf("shares[%d].valid_users[%d]", i, j)
+			if strings.TrimSpace(name) == "" {
+				errs.add(field, "共享 %q 的 valid_users 里有空条目（留空的 valid_users 表示所有已认证用户，"+
+					"不要写空字符串）", s.Name)
+				continue
+			}
+			lower := strings.ToLower(name)
+			if prev, ok := listed[lower]; ok {
+				errs.add(field, "共享 %q 的 valid_users 里 %q 与第 %d 项重复", s.Name, name, prev)
+				continue
+			}
+			listed[lower] = j
+			if _, ok := seen[lower]; !ok {
+				errs.add(field, "共享 %q 引用了未定义的用户 %q（请先在 auth.users 里定义）", s.Name, name)
 			}
 		}
 	}
@@ -367,8 +413,24 @@ func validateLog(c *Config, errs *ValidationErrors) {
 	default:
 		errs.add("log.format", "非法日志格式 %q，可选值: text, json", c.Log.Format)
 	}
-	if c.Log.File != "" && !isAbsPath(c.Log.File) {
+	if c.Log.File == "" {
+		return
+	}
+	if !isAbsPath(c.Log.File) {
 		errs.add("log.file", "日志文件必须是绝对路径，当前 %q", c.Log.File)
+		return
+	}
+	// 目录不存在时 os.OpenFile 会失败，但那要等到日志器初始化才暴露 ——
+	// 而校验的承诺是"一次性报出全部问题"，所以提前查。
+	dir := filepath.Dir(c.Log.File)
+	fi, err := os.Stat(dir)
+	switch {
+	case err != nil && os.IsNotExist(err):
+		errs.add("log.file", "日志文件所在目录不存在: %s", dir)
+	case err != nil:
+		errs.add("log.file", "日志文件所在目录无法访问: %v", err)
+	case !fi.IsDir():
+		errs.add("log.file", "日志文件所在路径不是目录: %s", dir)
 	}
 }
 
@@ -419,6 +481,8 @@ func Warnings(c *Config) []string {
 		}
 	}
 
+	w = append(w, sharePathOverlapWarnings(c)...)
+
 	for i := range c.Auth.Users {
 		if c.Auth.Users[i].Password != "" {
 			w = append(w, fmt.Sprintf("auth.users[%d] %q 使用明文口令，建议改用 nt_hash 避免口令落盘",
@@ -431,6 +495,46 @@ func Warnings(c *Config) []string {
 	}
 
 	return w
+}
+
+// sharePathOverlapWarnings 提示互相重叠的共享目录。
+//
+// 只是 WARN 不是错误：把同一个目录导出两遍（一个只读一个可写）是合法用法。
+// 但重叠会带来两个真实的坑，值得说清楚：
+//   - 同一份文件在两个共享里各有一套句柄状态，锁与 oplock 互不可见；
+//   - 只读共享套在可写共享里等于没有保护，客户端换个共享名就能写。
+func sharePathOverlapWarnings(c *Config) []string {
+	var w []string
+	for i := range c.Shares {
+		for j := i + 1; j < len(c.Shares); j++ {
+			a, b := &c.Shares[i], &c.Shares[j]
+			if a.Path == "" || b.Path == "" {
+				continue
+			}
+			switch {
+			case filepath.Clean(a.Path) == filepath.Clean(b.Path):
+				w = append(w, fmt.Sprintf(
+					"shares[%d] %q 与 shares[%d] %q 指向同一个目录 %s，"+
+						"两个共享的文件锁与 oplock 状态互不可见",
+					i, a.Name, j, b.Name, filepath.Clean(a.Path)))
+			case isUnderDir(b.Path, a.Path):
+				w = append(w, nestedShareWarning(j, b, i, a))
+			case isUnderDir(a.Path, b.Path):
+				w = append(w, nestedShareWarning(i, a, j, b))
+			}
+		}
+	}
+	return w
+}
+
+func nestedShareWarning(innerIdx int, inner *Share, outerIdx int, outer *Share) string {
+	msg := fmt.Sprintf("shares[%d] %q 的目录位于 shares[%d] %q 之内（%s ⊂ %s）",
+		innerIdx, inner.Name, outerIdx, outer.Name,
+		filepath.Clean(inner.Path), filepath.Clean(outer.Path))
+	if inner.ReadOnly && !outer.ReadOnly {
+		msg += "；内层是只读共享而外层可写，客户端换个共享名就能绕过只读限制"
+	}
+	return msg
 }
 
 // isUnderDir 判断 p 是否位于目录 dir 之内（不含 dir 自身）。
