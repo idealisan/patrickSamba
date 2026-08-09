@@ -8,4 +8,5 @@
 - [共享工作树里的写入纪律](feedback_shared_worktree_write_discipline.md) — Write 前必须 Read，曾整个覆盖队友已完成的 lock.go；附归属判断与 pkill 名字截断坑
 - [Samba 权威源码的在线取用方式](reference_samba_source.md) — 容器能联网 curl gitlab raw；Apple 扩展只有 Samba 源码是权威，附关键文件清单与已改名的坑
 - [共享工作树里验证自己代码的三个技巧](project_test_verification_tricks.md) — go test -overlay 绕开队友红灯与做变异测试；smbclient 会规范化 .. 验不出路径穿越
-- [macOS SMB 客户端两个反直觉行为](reference_macos_smb_quirks.md) — 流名冒号是 U+F03A 不是裸冒号；xattr 当 ADS 发；目录上三种流三种待遇
+- [macOS SMB 客户端两个反直觉行为](reference_macos_smb_quirks.md) — 流名冒号是 U+F022（非裸冒号、非 U+F03A）；xattr 当 ADS 发；目录上三种流三种待遇
+- [save.sh 的校验盲区](project_save_script_gap.md) — 传文件路径时零编译校验；go build 不编译 _test.go，提交前手跑 go vet
