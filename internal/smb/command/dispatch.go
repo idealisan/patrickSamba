@@ -90,6 +90,9 @@ func Dispatch(ctx *Context) {
 	// 也正因为如此，这里**刻意跳过**会话定位与验签：验签失败同样不能回
 	// 错误响应，只能丢弃。handler 自己不信任任何前置状态。
 	if spec, ok := handlers[ctx.Header.Command]; ok && spec.noResponse {
+		// 计入链内序号：即便不产生响应，它也占据链中的一个位置，
+		// 后面那条消息不能因此被误判成"帧内首条"。
+		ctx.Chain.Count++
 		_ = spec.fn(ctx)
 		ctx.suppress = true
 		ctx.discard()
@@ -136,19 +139,16 @@ func DispatchFailed(ctx *Context, st status.Status) {
 
 // dispatch 执行前置检查与 handler。
 func dispatch(ctx *Context) error {
-	// 复合链中前序已失败：后续 related 消息必须直接失败，不得执行
-	// （MS-SMB2 §3.3.5.2.7）。
-	if ctx.Header.IsRelated() && ctx.Chain.Failed {
-		st := ctx.Chain.FailStatus
-		if st == 0 {
-			st = status.Unsuccessful
-		}
-		return st
-	}
-
 	spec, ok := handlers[ctx.Header.Command]
 	if !ok {
 		spec = handlerSpec{fn: defaultHandler}
+	}
+
+	first := ctx.Chain.Count == 0
+	ctx.Chain.Count++
+
+	if err := ctx.checkChain(first, spec); err != nil {
+		return err
 	}
 
 	// 先定位会话与树（含 related 继承），再校验签名 —— 验签需要会话密钥。
@@ -172,6 +172,53 @@ func dispatch(ctx *Context) error {
 	}
 
 	return spec.fn(ctx)
+}
+
+// checkChain 执行 MS-SMB2 §3.3.5.2.7.2 的复合链前置规则。
+//
+// first 表示当前消息是本帧内的首条。
+func (c *Context) checkChain(first bool, spec handlerSpec) error {
+	if !c.Header.IsRelated() {
+		// 未置 RELATED = 一条新链的开始（Appendix A <117>），
+		// 清掉上一条链遗留的会话/树/句柄与失败状态。
+		c.Chain.reset()
+		return nil
+	}
+
+	// 首条消息没有可继承的前序操作。规范原文："If the first operation has
+	// SMB2_FLAGS_RELATED_OPERATIONS set, the server SHOULD fail processing
+	// the compound chain request."
+	//
+	// 这里把首条判失败即可达到"整条链失败"的效果 —— 失败会置位
+	// Chain.Failed，后续 related 消息随之全部失败。
+	if first {
+		c.Log.Warn("复合链首条消息非法地置了 RELATED_OPERATIONS",
+			"command", c.Header.Command.String(), "remote", c.Conn.RemoteAddr)
+		return status.InvalidParameter
+	}
+
+	if !c.Chain.Failed {
+		return nil
+	}
+
+	// 前序已失败，当前 related 消息一律不执行。错误码按规范分两种：
+	//
+	//   - "When the current operation requires a SessionId or TreeId, and if
+	//     the previous operation failed to create SessionId or TreeId, or the
+	//     previous operation does not contain a SessionId or TreeId, the server
+	//     MUST fail the current operation and all subsequent operations with
+	//     STATUS_INVALID_PARAMETER."
+	//   - "if the previous operation fails with an error, the server SHOULD
+	//     fail the current operation with the same error code returned by the
+	//     previous operation."（当前操作需要 FileId 的情形）
+	if (spec.needSession && c.Chain.Session == nil) ||
+		(spec.needTree && c.Chain.Tree == nil) {
+		return status.InvalidParameter
+	}
+	if st := c.Chain.FailStatus; st != 0 {
+		return st
+	}
+	return status.Unsuccessful
 }
 
 // resolve 根据请求头定位会话与树，并处理复合链里的继承语义。

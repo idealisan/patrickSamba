@@ -28,6 +28,27 @@ type Chain struct {
 	Failed bool
 	// FailStatus 是首个失败的状态码，供后续 related 消息复用。
 	FailStatus status.Status
+
+	// Count 是本帧内已经开始处理的消息条数。
+	//
+	// Count == 0 时当前消息是**帧内首条** —— 首条不允许置
+	// SMB2_FLAGS_RELATED_OPERATIONS（MS-SMB2 §3.3.5.2.7.2）。
+	Count int
+}
+
+// reset 把链状态清回"新链开始"。
+//
+// MS-SMB2 Appendix A <117>：Windows 服务端允许同一帧里混合 related 与
+// unrelated 请求，**遇到未置 RELATED 的请求就把它当作一条新链的开始**。
+// 因此每条 unrelated 消息都要清掉前一条链的继承状态，否则
+// [A(失败) , B(unrelated) , C(related)] 里的 C 会被 A 的错误毒死，
+// 而 C 本该继承的是 B。
+func (c *Chain) reset() {
+	c.Session = nil
+	c.Tree = nil
+	c.LastOpen = nil
+	c.Failed = false
+	c.FailStatus = 0
 }
 
 // Context 是处理一条 SMB2 请求的上下文。
