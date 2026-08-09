@@ -1,0 +1,10 @@
+{
+  "subject": "复合请求链正确性 + golden test",
+  "description": "MS-SMB2 §3.3.5.2.7：related operations 的 SessionId/TreeId/FileId 继承、前序失败短路、8 字节对齐、NextCommand 回填、链长度与单帧上限。写固定字节向量 golden test 验证 CREATE+QUERY_INFO+CLOSE 链。",
+  "activeForm": "校验并加固复合请求链",
+  "status": "pending",
+  "owner": "server",
+  "id": "5",
+  "createdAt": 1786235112930,
+  "updatedAt": 1786235112930
+}

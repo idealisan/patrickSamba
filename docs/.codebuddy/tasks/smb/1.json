@@ -1,0 +1,9 @@
+{
+  "subject": "实现 NTLM SIGNKEY/SEALKEY 与 GSS_GetMIC",
+  "description": "MS-NLMP §3.4.5.2/§3.4.5.3/§3.4.4.2：导出双向签名/封装密钥，实现有状态 RC4 handle 与 16 字节 NTLMSSP_MESSAGE_SIGNATURE 生成。",
+  "activeForm": "实现 SIGNKEY/SEALKEY 与 GSS_GetMIC",
+  "status": "completed",
+  "id": "1",
+  "createdAt": 1786235887851,
+  "updatedAt": 1786236740276
+}

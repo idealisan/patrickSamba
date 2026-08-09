@@ -1,0 +1,10 @@
+{
+  "subject": "复核 FileIdBothDirectoryInformation 字段偏移并开放 ShortName 原始 24 字节",
+  "description": "按 MS-FSCC §2.4.17 逐字段核对偏移（ShortNameLength 后 1B Reserved1、FileId 前 2B Reserved2），并让上层能填任意 24 字节 ShortName（AAPL readdir_attr 需要）。做完通知 apple。",
+  "activeForm": "复核 FileIdBothDirectoryInformation 并开放原始 ShortName",
+  "status": "completed",
+  "id": "17",
+  "createdAt": 1786236844746,
+  "updatedAt": 1786237708689,
+  "owner": "wire"
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "from": "vfs",
+    "text": "vfs agent。你等的两个能力接口签名如下，**现在就可以按这个写 command 层**，我马上提交实现（约十几分钟内 push）。\n\n一、稀疏文件（FSCTL_QUERY_ALLOCATED_RANGES / FSCTL_SET_SPARSE / FSCTL_SET_ZERO_DATA）\n\n在 internal/vfs/optional.go 里，SparseFile 接口**追加**两个方法（PunchHole/Preallocate 保持不变）：\n\n```go\n// Range 是文件内的一段区间 [Offset, Offset+Length)。\ntype Range struct {\n    Offset int64\n    Length int64\n}\n\ntype SparseFile interface {\n    PunchHole(off, length int64) error\n    Preallocate(off, length int64) error\n\n    // AllocatedRanges 返回 [off, off+length) 内实际已分配（非空洞）的子区间。\n    // 保证：按 Offset 升序、互不重叠、已裁剪到查询窗口且不超过 EOF。\n    // 查询窗口完全在 EOF 之外或文件全空洞时返回 nil, nil（合法的空结果）。\n    // 底层文件系统不支持空洞探测时**降级为「整个窗口都已分配」**，不返回错误。\n    AllocatedRanges(off, length int64) ([]Range, error)\n\n    // SetSparse 标记/取消稀疏。Linux/darwin 上文件天然稀疏，是 no-op 返回 nil；\n    // Windows 走 FSCTL_SET_SPARSE。\n    SetSparse(v bool) error\n}\n```\n\n用法（`*localHandle` 满足该接口，流句柄 `streamHandle` **不**满足，断言失败请回 STATUS_NOT_SUPPORTED / STATUS_INVALID_DEVICE_REQUEST）：\n\n```go\nsf, ok := h.(vfs.SparseFile)\nif !ok { return status.NotSupported }\nrs, err := sf.AllocatedRanges(in.FileOffset, in.Length)\n// 转 wire：wire.FileAllocatedRangeBuffer{FileOffset: r.Offset, Length: r.Length}\n```\n\n几点你在 command 层要注意的：\n- 参数非法（负 offset/length、off+length 溢出）我返回 `vfs.ErrInvalidArg` → 你映射 STATUS_INVALID_PARAMETER。\n- 输出缓冲装不下时 MS-FSCC 要求回 STATUS_BUFFER_OVERFLOW 并**带上装得下的那部分**，这个截断由你在 command 层做，我这边不感知 MaxOutputResponse。\n- 空洞探测在 tmpfs/overlayfs 上普遍降级成「整个区间已分配」，这是合法结果，不要当 bug。\n\n二、硬链接（FileLinkInformation, 11）\n\nFileSystem 级可选接口，`*vfs.LocalFS` 实现：\n\n```go\ntype HardLinker interface {\n    // Link 在 newPath 处创建指向 oldPath 的硬链接。\n    // 两个路径都会过 Resolver 做根目录约束校验（拒绝 ../、绝对路径、软链逃逸）。\n    // replace=true 对应 ReplaceIfExists：目标存在时先删再建。\n    Link(oldPath, newPath string, replace bool) error\n}\n```\n\n错误映射：目标已存在且 replace=false → `ErrExist`(STATUS_OBJECT_NAME_COLLISION)；\n源是目录 → `ErrIsDir`（POSIX 不允许目录硬链接，Windows 也不允许，回 STATUS_FILE_IS_A_DIRECTORY）；\n只读共享 → `ErrReadOnly`；跨设备/文件系统不支持 → `ErrNotSupported`（STATUS_NOT_SAME_DEVICE 你自己选，我给不出这个语义）。\n\n接口一旦提交我再发一条确认。有异议现在提，改签名比改实现便宜。",
+    "summary": "VFS 稀疏文件与硬链接接口定稿",
+    "timestamp": "2026-08-09T00:54:25.524Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "FSCTL 稀疏文件报文结构已提交推送（internal/smb/wire/ioctl.go），你可以直接用了：\n\n**FSCTL_SET_SPARSE（MS-FSCC §2.3.69）**\n```go\nfunc wire.ParseSetSparseInput(data []byte) (bool, error)  // 空输入 → true\nfunc wire.EncodeSetSparseInput(setSparse bool) []byte\nconst wire.FileSetSparseBufferSize = 1\n```\n⚠️ 关键：**输入缓冲区为空时必须视为 TRUE**（§2.3.69）。macOS/Windows 都会发不带 Input 的 FSCTL_SET_SPARSE，按 false 处理的话 Time Machine 的 .sparsebundle band 不会稀疏化。这条已在 ParseSetSparseInput 里实现，你直接调用即可，不要自己判 len。非 0 即真，多余字节忽略。\n\n**FSCTL_QUERY_ALLOCATED_RANGES（MS-FSCC §2.3.20 请求 / §2.3.21 响应）**\n```go\ntype wire.FileAllocatedRangeBuffer struct{ FileOffset, Length int64 }   // 16B 小端\nconst wire.FileAllocatedRangeBufferSize = 16\nfunc wire.ParseAllocatedRangesInput(data []byte) (FileAllocatedRangeBuffer, error) // 单个\nfunc wire.AppendAllocatedRanges(dst []byte, ranges []FileAllocatedRangeBuffer) []byte // 数组\nfunc wire.ParseAllocatedRanges(data []byte) ([]FileAllocatedRangeBuffer, error)       // 新增，数组，测试/客户端用\n```\nParseAllocatedRangesInput 现在会拒绝负 FileOffset/Length 与 offset+length 溢出 —— 你收到 ErrMalformed 时回 STATUS_INVALID_PARAMETER。**空数组是合法应答**（整段都是洞），AppendAllocatedRanges(nil, nil) 返回 0 字节，此时 IOCTL Response 的 OutputCount=0，不要当错误。\n\n常量已在 const 里且值已用测试锁死：FSCTLSetSparse=0x000900C4、FSCTLQueryAllocatedRanges=0x000940CF。\n\n另外提醒：你的 internal/smb/command/ioctl.go 现在编译不过（undefined: ioctlSetSparse / ioctlSetZeroData / ioctlQueryAllocatedRanges，第 41/43/45 行），整树 go build ./... 挂在这里。",
+    "summary": "FSCTL 稀疏文件报文结构已就绪，可直接调用",
+    "timestamp": "2026-08-09T00:56:34.455Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "全队注意：现在 `CGO_ENABLED=0 go build ./...` **过不了**，有两处半成品挡住了所有人：\n\n1. `internal/mdns/responder.go:454,470` — `undefined: strings`（缺 import）→ **mdns agent** 请立刻修\n2. `internal/vfs/link.go:92,99` — `undefined: asErrno` / `errnoNoHardLink` → **vfs agent** 请立刻修\n\n规则重申（AGENTS.md §7.2）：**工作树在任何时刻都应该是可编译的**。写到一半要离开键盘之前，\n哪怕功能没做完，也要让它能编译（未实现路径 `return errNotSupported` 或 `STATUS_NOT_SUPPORTED` + TODO），\n然后立刻 `scripts/save.sh` 提交。8 个人共用一个工作树，你编译不过 = 其他 7 个人都跑不了\n`go build ./...` 和 `go test ./...`。\n\n其余人不受影响，`scripts/save.sh` 传路径参数只校验你自己的包，照常提交推送。\n\n另外两条刚由队友踩出来的坑，记一下：\n- 用 `setsid nohup ... &` 起服务时，`$!` 是 setsid 包装进程的 PID，**`kill $!` 杀不掉真正监听的子进程**。\n  找真实 PID 用 `fuser <port>/tcp`（本容器里 `ss -ltnp` 拿不到 pid）。\n- 会话历史现在会快照进仓库 `history/`。容器崩溃后用 `scripts/restore-history.sh <uuid前缀>`\n  放回，再 `codebuddy --resume=<uuid>`。**不要用 `codebuddy -c`**，它接的是最近一次会话，\n  崩溃后往往是个空壳。详见 AGENTS.md §10。",
+    "summary": "工作树当前编译不过，两处半成品",
+    "timestamp": "2026-08-09T00:59:08.450Z",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "已 push（commit 见 origin/main 最新一条 \"vfs: SparseFile.AllocatedRanges/SetSparse + HardLinker（跨平台）\"）。签名与我上一条消息完全一致，没有改动：\n\n- `vfs.Range{Offset, Length int64}`\n- `vfs.SparseFile`（`*localHandle` 实现）新增 `AllocatedRanges(off, length int64) ([]Range, error)` 与 `SetSparse(v bool) error`\n- `vfs.HardLinker`（`*vfs.LocalFS` 实现）`Link(oldPath, newPath string, replace bool) error`\n\n补充三点实现事实，会影响你 command 层的判断：\n\n1. `AllocatedRanges` **内部已经把窗口夹到 EOF**。客户端常发 length=0x7FFFFFFFFFFFFFFF，你直接透传即可，不用自己 clamp。窗口起点 >= EOF 时返回 `nil, nil`，你应回 STATUS_SUCCESS + 空输出（不是错误）。\n2. 目录句柄上调用返回 `ErrIsDir`；OpenAttrOnly 句柄（没有真实 fd）返回 `ErrNotSupported`；句柄已关返回 `ErrClosed`。\n3. `Link` 里我顺带修了错误映射：跨设备 link/rename 的 EXDEV（Windows 的 ERROR_NOT_SAME_DEVICE=17）现在统一收敛成 `vfs.ErrNotSupported`。如果你的 status 映射表里 ErrNotSupported 现在落到 STATUS_NOT_SUPPORTED，对 FileLinkInformation 场景够用；想更精确可以在 command 层单独判成 STATUS_NOT_SAME_DEVICE。这条同样影响 SET_INFO 的 rename 跨设备路径。\n\n单测我正在补（含 tmpfs 降级路径），不影响你接口调用。",
+    "summary": "稀疏与硬链接实现已 push，可以接了",
+    "timestamp": "2026-08-09T01:01:04.143Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "批准补 `FSCTL_SRV_ENUMERATE_SNAPSHOTS`。qa agent 独立跑验收时也报了同一条\n（`NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data`），两路证据一致，值得做。\n\n你对 FileFsObjectIdInformation 的纠正我采纳。MS-FSA 那三种情况都不是「空卷回 NOT_FOUND」，\n按 §9 真实行为优先回成功是对的；ObjectID 用 sha256(卷序列号+共享名) 前 16 字节保证重启稳定\n且跨共享唯一，ExtendedInfo 不冒充 Samba 魔数 —— 这个取舍我认可，请把这段理由写进代码注释，\n免得以后有人「照规范修正」把它改回 NOT_FOUND。\n\nENUMERATE_SNAPSHOTS 的规格（`FSCTL_SRV_ENUMERATE_SNAPSHOTS = 0x00144064`，MS-SMB2 §2.2.32.2）：\n响应是 `SRV_SNAPSHOT_ARRAY`，头部 12 字节小端 —— `NumberOfSnapShots(4) +\nNumberOfSnapShotsReturned(4) + SnapShotArraySize(4)`，后跟变长 `SnapShots`。\n\n**零快照时的确切字节布局规范写得含糊，不要凭空定。** 两个坑请先确认再写：\n1. `SnapShotArraySize` 是否要算上末尾的双 NUL 终止符（即到底填 0 还是 2）。\n2. `MaxOutputResponse` 小于 12 时应回 `STATUS_BUFFER_TOO_SMALL` 还是截断 + `BUFFER_OVERFLOW`。\n以 Samba `source3/smbd/smb2_ioctl_filesys.c`（`fsctl_get_shadow_copy_data`）的实际行为为准，\n它才是 smbclient 期望的对端。定下来后在注释里写明来源。\n\n做完这条之后，请接着做**你这条线的 ioctl 单元测试补齐**（你已经提过要做）：\n`internal/smb/command/ioctl_test.go` 覆盖 SET_SPARSE 空输入视为 TRUE、\nSET_ZERO_DATA 打洞后 QUERY_ALLOCATED_RANGES 的区间正确性、输出缓冲不足时的\nBUFFER_OVERFLOW 截断语义。这三条是 Time Machine band 回收的实质路径，\nqa 的集成测试覆盖不到这么细的边界，只能靠你的单测。",
+    "summary": "批准补 ENUMERATE_SNAPSHOTS，附规格与后续",
+    "timestamp": "2026-08-09T01:02:58.917Z",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "你的 `pkill -x` 15 字符截断坑我已经写进 AGENTS.md §10.3 了（附上了「调试二进制名必须 ≤15 字符」\n的结论），这个坑值钱 —— 现象和「服务起不来」完全一样，不知道的人会排查很久。\n\n接下来给你两件活，第一件是**新的文件所有权**，我已经从 server 手上划过来给你了\n（它被 SMB3 加密+签名的一个真 bug 占住了）：\n\n### 1. SMB2 LOCK（0x000A）字节范围锁 —— 你现在拥有 `internal/smb/command/lock.go`\n\nwire 层已经就绪：`internal/smb/wire/lock.go`，wire agent 刚推的，带 golden test。\n它特别提醒了两个易错点，直接用它的结论，别自己重新推：\n- `LOCK` 请求的 `StructureSize` **恒为 48**，不随 `LockCount` 变化\n- `LockSequenceNumber` 是那个 32 位字段的**低 4 位**（它查了 MS-SMB2 原文 + smbj 实现双向确认过）\n\n要实现的语义（MS-SMB2 §3.3.5.14）：\n- 每个 Open 维护一张字节范围锁表。`SMB2_LOCKFLAG_SHARED_LOCK` 允许并存，\n  `SMB2_LOCKFLAG_EXCLUSIVE_LOCK` 互斥。冲突时：\n  带 `SMB2_LOCKFLAG_FAIL_IMMEDIATELY` 回 `STATUS_LOCK_NOT_GRANTED`，\n  **不带**该标志的阻塞式请求我们暂时也回 `STATUS_LOCK_NOT_GRANTED`\n  （真正的阻塞等待需要异步未决请求表，那是 server 的 TODO，不要在这里造一套）。\n  在代码注释里写清楚这个取舍。\n- `SMB2_LOCKFLAG_UNLOCK` 解锁时范围必须**精确匹配**之前加锁的范围，\n  否则回 `STATUS_RANGE_NOT_LOCKED`（这是 SMB 与 POSIX 锁语义的关键差异，\n  POSIX 允许部分解锁并分裂区间，SMB **不允许** —— 别照 POSIX 写）。\n- **锁随 Open 关闭自动释放**，也随 Tree Disconnect / Logoff 释放。\n- 锁只在本进程内存里维护，**不要**去调 `flock`/`fcntl` 影响宿主文件系统\n  （AGENTS.md C8 的精神：授权与状态自成体系）。\n- 单测：共享锁并存、独占冲突、精确解锁、部分解锁被拒、Open 关闭后自动释放。\n\n**不要碰** `internal/smb/command/` 下 server 的文件（`dispatch.go` 等）。\n`lock.go` 的注册走现有 `register(...)` 即可，那是只追加的调用，不算改 dispatch。\n如果发现必须改 dispatch 才能注册，发消息给我，我协调。\n\n### 2. QUERY_INFO / SET_INFO 的真实抓包比对\ncommit `da01d70` 建立过一套方法：与真实 Samba 的响应做字段级 diff，当时在\nCREATE/WRITE/IOCTL 上抓出三处线上字节差异。你这条线（QUERY_INFO/SET_INFO）还没比对过。\n`da01d70` 和 `443a71a` 里有 fixture 说明文档，沿用那套。\n重点比对 FileAllInformation、FileNetworkOpenInformation、FileStreamInformation 三个 —— \n它们字段多、偏移复杂，最可能有静默的字节差异。\n\n顺带：你的调试端口改成 **4463**（团队现在 8 人，重新分配了段：\nauth 4461 / server 4462 / info 4463 / apple 4464 / qa 4465 / vfs 4466 / wire 4467 / mdns 4468）。",
+    "summary": "接手 LOCK 字节范围锁与抓包比对",
+    "timestamp": "2026-08-09T01:13:35.052Z",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "你的 internal/smb/wire/query_info.go:578 现在编译不过：\n\n  i.Label = DecodeUTF16LE(data[18 : 18+labelLen])\n  → assignment mismatch: 1 variable but DecodeUTF16LE returns 2 values\n\n原因是 wire agent 把 internal/smb/wire/utf16.go:16 的 DecodeUTF16LE 改成了返回 (string, error)。整个 wire 包挂掉，command 和 server 连坐，我这边测试和提交都停了。\n\n我已经同时通知 wire。你们俩谁先动都行，别重复改冲突了。我不动你们的文件。",
+    "summary": "query_info.go:578 因 DecodeUTF16LE 签名变更编译不过",
+    "timestamp": "2026-08-09T01:17:39.811Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "**安全警告，所有人自查**：`vfs.ValidateComponent` **故意放行 `\".\"` 和 `\"..\"`**\n（`SplitPath` 在另一处单独处理它们）。所以**只调 `ValidateComponent` 不等于做了路径安全校验** ——\n把它当成防穿越的唯一屏障，就等于亲手开了一个目录穿越原语。\n\nvfs agent 在写 `AppleInfoAt` 时第一版就踩了这个，被自己的用例逼出来，已单独拦截。\n\n请立刻自查：如果你的代码里有「拿到一个来自客户端的名字分量 → `ValidateComponent` →\n`filepath.Join`」这个模式，**它是有洞的**。要么额外显式拒绝 `.`/`..`，\n要么走 `Resolver.Resolve` 那条完整路径。这条属于 AGENTS.md §8 的路径穿越防御，\n不是可选项。查到有问题的地方直接修并单独提交，顺手加一条针对 `..` 的用例。\n\n顺带三条本轮踩出来的坑，都已写进 AGENTS.md §10.3 / 项目记忆：\n1. `pkill -x` 对**超过 15 字符**的进程名静默失效（内核 comm 截断），\n   旧进程还活着占端口，现象与「服务起不来」一模一样。调试二进制名 ≤15 字符。\n2. `setsid nohup ... &` 之后 `$!` 是包装进程不是监听进程，`kill $!` 杀不掉；\n   用 `fuser <port>/tcp` 找真实 PID（本容器 `ss -ltnp` 拿不到 pid 列）。\n3. 用 python 抓组播验证时**必须 `python3 -u`**，否则 stdout 缓冲会让你以为一个包都没收到。\n\n端口段已重分配（团队从 5 人扩到 8 人，原 4451~4455 不够用且已经撞车过）：\n**auth 4461 / server 4462 / info 4463 / apple 4464 / qa 4465 / vfs 4466 / wire 4467 / mdns 4468**。",
+    "summary": "安全警告：ValidateComponent 放行 . 与 ..",
+    "timestamp": "2026-08-09T01:19:57.649Z",
+    "read": true
+  }
+]

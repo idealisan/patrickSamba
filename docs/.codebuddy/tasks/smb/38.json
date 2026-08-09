@@ -1,0 +1,9 @@
+{
+  "subject": "持久句柄 create context 编解码（DHnQ/DHnC/DH2Q/DH2C + 响应）",
+  "description": "MS-SMB2 §2.2.13.2.3/§2.2.13.2.4/§2.2.13.2.11/§2.2.13.2.12 与响应侧 §2.2.14.2.3/§2.2.14.2.12。CreateGuid 是不透明 16 字节，非 RFC4122 混合序。带 golden test。",
+  "activeForm": "实现持久句柄 create context 编解码",
+  "status": "pending",
+  "id": "38",
+  "createdAt": 1786238209544,
+  "updatedAt": 1786238209544
+}

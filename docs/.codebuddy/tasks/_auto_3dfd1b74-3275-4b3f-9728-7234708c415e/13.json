@@ -1,0 +1,10 @@
+{
+  "subject": "扩充验收矩阵 d: ADS 与大目录枚举",
+  "description": "allinfo 看流列表；构造 .sparsebundle 风格 band 目录（数千小文件）测枚举耗时",
+  "activeForm": "测 ADS 与大目录枚举",
+  "status": "pending",
+  "owner": "qa",
+  "id": "13",
+  "createdAt": 1786235153314,
+  "updatedAt": 1786235153314
+}

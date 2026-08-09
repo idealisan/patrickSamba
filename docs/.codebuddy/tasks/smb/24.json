@@ -1,0 +1,10 @@
+{
+  "subject": "核对复合请求语义 MS-SMB2 §3.3.5.2.7",
+  "description": "首条带 RELATED 非法回 STATUS_INVALID_PARAMETER；前序失败时后续 related 的错误码核对规范；FileId 全 F 复用；unrelated 独立。补单测。",
+  "activeForm": "核对复合请求语义",
+  "status": "completed",
+  "id": "24",
+  "createdAt": 1786236947866,
+  "updatedAt": 1786237722395,
+  "owner": "server"
+}

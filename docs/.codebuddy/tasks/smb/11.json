@@ -1,0 +1,10 @@
+{
+  "subject": "SparseFile.AllocatedRanges + SetSparse（跨平台）",
+  "description": "在 internal/vfs 扩展 SparseFile 可选能力：AllocatedRanges(off,length) ([]Range,error) 与 SetSparse(bool) error。Linux 用 SEEK_DATA/SEEK_HOLE，darwin 常量相反，windows 用 FSCTL_QUERY_ALLOCATED_RANGES，其它平台 noop。含降级测试。",
+  "activeForm": "实现 SparseFile.AllocatedRanges",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "11",
+  "createdAt": 1786236837329,
+  "updatedAt": 1786237518553
+}

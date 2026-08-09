@@ -1,0 +1,10 @@
+{
+  "subject": "require_signing 端到端验证",
+  "description": "NEGOTIATE SecurityMode 置位、所有响应签名（含错误响应）、guest/anonymous 零 session key 不签名但 require_signing 下拒绝 guest 登录。实测 smbclient --client-protection=sign。",
+  "activeForm": "验证 require_signing 端到端",
+  "status": "pending",
+  "owner": "server",
+  "id": "7",
+  "createdAt": 1786235112940,
+  "updatedAt": 1786235112940
+}

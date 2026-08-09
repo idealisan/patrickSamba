@@ -1,0 +1,9 @@
+{
+  "subject": "实现 FSCTL_SET_SPARSE 与 FSCTL_QUERY_ALLOCATED_RANGES",
+  "description": "在 internal/smb/command/ioctl.go 实现两个 Time Machine 关键 FSCTL。VFS 不支持时回 STATUS_NOT_SUPPORTED。",
+  "activeForm": "实现稀疏文件 FSCTL",
+  "status": "completed",
+  "id": "6",
+  "createdAt": 1786236714487,
+  "updatedAt": 1786237217923
+}

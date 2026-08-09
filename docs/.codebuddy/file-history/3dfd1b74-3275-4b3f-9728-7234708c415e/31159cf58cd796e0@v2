@@ -1,0 +1,16 @@
+#!/bin/sh
+pkill -f /tmp/stupidsamba 2>/dev/null; sleep 0.5
+/tmp/stupidsamba -config /tmp/smbtest/cfg.yaml > /tmp/smbtest/srv.log 2>&1 &
+SRV=$!
+sleep 1
+{
+echo "=== encrypted session (--client-protection=encrypt) ==="
+timeout 20 smbclient "//127.0.0.1/public" -p 4555 -U testuser%testpass123 -m SMB3 --client-protection=encrypt -c 'ls; get hello.txt /tmp/smbtest/got-enc.txt; put /tmp/smbtest/cfg.yaml up-enc.yaml; mkdir encdir; rmdir encdir' 2>&1
+echo "rc=$?"
+echo "=== got-enc.txt ==="
+cat /tmp/smbtest/got-enc.txt 2>&1
+echo "=== server log tail ==="
+tail -20 /tmp/smbtest/srv.log
+} > /tmp/smbtest/enc_result.txt 2>&1
+kill $SRV 2>/dev/null
+echo DONE > /tmp/smbtest/enc_done.marker

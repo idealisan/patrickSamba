@@ -1,0 +1,9 @@
+{
+  "subject": "FileFsObjectIdInformation 接入 queryFsInfo",
+  "description": "确认 MS-FSA/Samba 语义后接入 query_info.go 的 FS 分支。",
+  "activeForm": "接入 FsObjectId",
+  "status": "completed",
+  "id": "7",
+  "createdAt": 1786236714491,
+  "updatedAt": 1786237217926
+}

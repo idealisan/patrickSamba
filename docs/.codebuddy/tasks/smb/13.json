@@ -1,0 +1,10 @@
+{
+  "subject": "复核 F_FULLFSYNC 语义",
+  "description": "复核 Handle.Sync(full) 在各平台的实现是否真正做到强制落盘；Linux fsync、darwin F_FULLFSYNC、windows FlushFileBuffers。补测试并通知 apple。",
+  "activeForm": "复核 F_FULLFSYNC 语义",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "13",
+  "createdAt": 1786236837334,
+  "updatedAt": 1786237699922
+}

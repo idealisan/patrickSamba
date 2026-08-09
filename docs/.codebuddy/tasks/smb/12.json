@@ -1,0 +1,10 @@
+{
+  "subject": "硬链接能力（FileLinkInformation 用）",
+  "description": "新增 vfs.HardLinker 可选接口 Link(oldPath,newPath string, replace bool) error，LocalFS 实现，路径走 Resolver 约束校验。",
+  "activeForm": "实现 VFS 硬链接能力",
+  "status": "completed",
+  "owner": "vfs",
+  "id": "12",
+  "createdAt": 1786236837332,
+  "updatedAt": 1786237518556
+}

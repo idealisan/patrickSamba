@@ -1,0 +1,10 @@
+{
+  "subject": "建立验收基线",
+  "description": "git pull --rebase origin main 后跑 scripts/acceptance.sh，记录 PASS/FAIL/SKIP，报给 team-lead",
+  "activeForm": "建立验收基线",
+  "status": "completed",
+  "owner": "qa",
+  "id": "9",
+  "createdAt": 1786235153275,
+  "updatedAt": 1786235226405
+}

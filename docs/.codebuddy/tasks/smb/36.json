@@ -1,0 +1,9 @@
+{
+  "subject": "AES-CMAC / AES-CCM 换用 NIST 规范向量",
+  "description": "确认 cmac_test.go 用 RFC 4493 §4 向量、ccm_test.go 用 SP800-38C 附录 C 向量，而不是自造的输入输出对。",
+  "activeForm": "用规范向量验证 CMAC/CCM",
+  "status": "pending",
+  "id": "36",
+  "createdAt": 1786238098533,
+  "updatedAt": 1786238098533
+}
