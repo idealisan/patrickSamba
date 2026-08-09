@@ -26,6 +26,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// seekDataConst / seekHoleConst 只是给上面那段说明一个可被测试钉住的名字。
+// 取值来自 x/sys/unix 的平台常量表，**不要**改成字面量 3/4。
+const (
+	seekDataConst = unix.SEEK_DATA
+	seekHoleConst = unix.SEEK_HOLE
+)
+
 // platformAllocatedRanges 返回 [off, end) 内已分配的子区间。
 // 调用方保证 0 <= off < end <= EOF。
 func platformAllocatedRanges(f *os.File, off, end int64) ([]Range, error) {
@@ -37,7 +44,7 @@ func platformAllocatedRanges(f *os.File, off, end int64) ([]Range, error) {
 	out := make([]Range, 0, 8)
 	cur := off
 	for cur < end {
-		dataOff, err := unix.Seek(fd, cur, unix.SEEK_DATA)
+		dataOff, err := unix.Seek(fd, cur, seekDataConst)
 		if err != nil {
 			if errors.Is(err, syscall.ENXIO) {
 				// cur 之后到 EOF 全是空洞 —— 正常终止条件，不是错误。
@@ -56,7 +63,7 @@ func platformAllocatedRanges(f *os.File, off, end int64) ([]Range, error) {
 			dataOff = cur
 		}
 
-		holeOff, err := unix.Seek(fd, dataOff, unix.SEEK_HOLE)
+		holeOff, err := unix.Seek(fd, dataOff, seekHoleConst)
 		if err != nil {
 			if unsupportedSeek(err) {
 				return wholeRange(off, end), nil
