@@ -124,8 +124,14 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 
 ### 方式一：下载预编译二进制（推荐）
 
-v0.1.0 的发布页（仓库 Release 页面，标记为 **prerelease**）提供四个平台的压缩包，
-每个包内含二进制、本 `README.md`、`CHANGELOG.md` 与 `configs/example.yaml`：
+v0.1.0 发布在 CNB 仓库的 Release 页面（标记为 **prerelease**）：
+
+- Release 页：`https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.1.0`
+- 附件直链（下载后用 `SHA256SUMS` 核对）：
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.1.0/SHA256SUMS`）
+
+每个压缩包内含二进制、本 `README.md`、`CHANGELOG.md` 与 `configs/example.yaml`：
 
 | 平台 | 文件 |
 |---|---|
@@ -134,8 +140,16 @@ v0.1.0 的发布页（仓库 Release 页面，标记为 **prerelease**）提供�
 | macOS Apple Silicon | `stupidsamba_v0.1.0_darwin_arm64.tar.gz` |
 | Windows x86-64 | `stupidsamba_v0.1.0_windows_amd64.zip` |
 
-每个发布文件都附带 `SHA256SUMS` 校验和，下载后请核对。解压后直接运行二进制即可，
-**无需安装、无需任何依赖**。
+下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
+
+```sh
+curl -LO https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/stupidsamba_v0.1.0_linux_amd64.tar.gz
+curl -LO https://cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.1.0/SHA256SUMS
+sha256sum -c SHA256SUMS
+tar -xzf stupidsamba_v0.1.0_linux_amd64.tar.gz
+./stupidsamba_v0.1.0_linux_amd64/stupidsamba -config stupidsamba_v0.1.0_linux_amd64/configs/example.yaml
+# Windows 解压出的是 stupidsamba.exe
+```
 
 ### 方式二：从源码构建
 
@@ -182,7 +196,7 @@ done
 | `min_dialect` / `max_dialect` | 方言协商范围，取值 `2.0.2` / `2.1` / `3.0` / `3.0.2` / `3.1.1` | `2.0.2` / `3.1.1` |
 | `smb1` | 是否响应 SMB1 多协议协商入口（见[支持能力](#capabilities)），默认 `true` | `true` |
 | `signing_required` | 强制 SMB 签名（防中间人篡改） | `false` |
-| `encryption_required` | 强制 SMB3 加密（见[已知限制](#notes)） | `false` |
+| `encryption_required` | 强制 SMB3 加密：3.0/3.0.2 用 AES-128-CCM，3.1.1 用协商出的算法。开启时 `min_dialect` 与 `max_dialect` 都必须 ≥ 3.0（否则启动直接报错）；SMB 2.0.2/2.1 无加密能力，开启后这类客户端会被拒绝连接（协商阶段无共同方言，fail-closed 兜底返回 `STATUS_ACCESS_DENIED`），而非降级为明文 | `false` |
 | `max_connections` | 并发连接数上限。**`0` 或不填 = 默认上限 256，本项不支持「不限」**；超过上限的新连接会被直接关闭 | `256` |
 
 ### `listen`
@@ -282,8 +296,8 @@ done
 - **SMB3 加密**：3.0 / 3.0.2 用 AES-128-CCM（经 `SMB2_GLOBAL_CAP_ENCRYPTION` 能力位
   隐式启用），3.1.1 经 `ENCRYPTION_CAPABILITIES` 协商上下文选择密码套件
   （AES-128/256-CCM 或 GCM）。可由 `encryption_required` 强制——开启后协商到
-  **SMB 2.0.2 / 2.1 的客户端会被拒绝连接**，而非降级为明文（此前版本在低方言下会
-  静默忽略该开关、以明文传输，v0.1.0 已修复，见下）。
+  **SMB 2.0.2 / 2.1（无加密能力）的客户端会在协商阶段被 `STATUS_ACCESS_DENIED` 拒绝**，
+  而非降级为明文。
 - **FSCTL**：实现了 `VALIDATE_NEGOTIATE_INFO`（防降级复核）、`SET_SPARSE`、
   `SET_ZERO_DATA`、`QUERY_ALLOCATED_RANGES`（稀疏文件三件套，Time Machine 关键路径）、
   `ENUMERATE_SNAPSHOTS`（回 0 个快照）、`QUERY_NETWORK_INTERFACE` 等。
@@ -350,15 +364,10 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
    `nt_hash`（口令的 MD4 哈希，仍可被离线爆破但至少不在磁盘上暴露原口令）。用明文会有
    启动 `WARN`。
 
-4. **加密与方言**：`encryption_required: true` 会**拒绝**协商到 SMB 2.0.2 / 2.1 的客户端
-   （而非降级明文）。若你想强制**所有**连接都加密，把 `min_dialect` 设为 `3.0` 或更高即可
-   （只有 SMB3 才具备加密能力）。此前版本在低方言下会静默忽略该开关、以明文传输，
-   v0.1.0 已修复。
-
-5. **目录变更不会自动刷新**：因 `CHANGE_NOTIFY` 未实现（见[支持能力](#capabilities)），
+4. **目录变更不会自动刷新**：因 `CHANGE_NOTIFY` 未实现（见[支持能力](#capabilities)），
    Finder / 资源管理器的目录列表不会自动更新，需手动刷新。
 
-6. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
+5. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
 
 ---
 
@@ -403,4 +412,5 @@ CGO_ENABLED=0 go test ./...
 
 - [`configs/example.yaml`](configs/example.yaml) —— 逐字段注释的完整配置示例
 - [`CHANGELOG.md`](CHANGELOG.md) —— 各版本变更记录
+- [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md) —— v0.1.0 多客户端验收报告（smbclient / impacket / go-smb2 实测矩阵、加密 fail-closed 验证方法）
 - [`docs/protocol-notes.md`](docs/protocol-notes.md) —— 协议研究笔记（实现依据）
