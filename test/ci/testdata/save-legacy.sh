@@ -173,25 +173,15 @@ if [ "$BRANCH" = "HEAD" ]; then
     exit 1
 fi
 
-if [ "$BRANCH" != "main" ]; then
+# rebase 的目标：自己的分支跟 origin/main 对齐；main 本身跟自己对齐。
+if [ "$BRANCH" = "main" ]; then
+    BASE=main
+else
+    BASE=main
     echo ">>> 当前分支: $BRANCH（将推送到 origin/$BRANCH，按 §7.3 走 PR 合入 main）"
 fi
 
-# 锁必须落在**所有 worktree 共享**的公共 git 目录里。原先写的 `$REPO/.git/...`
-# 两处都错：
-#   1. worktree 里 `$REPO/.git` 是一个**文件**（内容 `gitdir: /.../worktrees/<名字>`），
-#      `mkdir "$REPO/.git/xxx"` 必然 ENOTDIR。acquire() 不区分失败原因，
-#      于是空转 120 秒后报「等待推送锁超时」退出 1 —— 提交已落地、推送从未发生。
-#      也就是说在 AGENTS.md §7.3 强制的 worktree 工作流下，save.sh 100% 推不出去。
-#   2. 退一步说，就算 .git 是目录，锁也必须跨 worktree 共享才有意义；
-#      放进各自私有的 worktree 目录等于没上锁，防不住并发 rebase 互相破坏。
-# --git-common-dir 在主工作树和 worktree 里都指向同一个 `<仓库>/.git`，正是所需语义。
-GIT_COMMON=$(git rev-parse --git-common-dir)
-case "$GIT_COMMON" in
-    /*) ;;
-    *) GIT_COMMON="$REPO/$GIT_COMMON" ;;
-esac
-LOCK="$GIT_COMMON/stupidsamba-push.lock"
+LOCK="$REPO/.git/stupidsamba-push.lock"
 
 acquire() {
     i=0
@@ -219,61 +209,28 @@ acquire() {
 acquire || exit 1
 trap 'rm -rf "$LOCK"' EXIT INT TERM
 
-# 失败时把 git 的原话留下来。原先是 `2>/dev/null`，出错时用户只看到
-# 「推送被拒」四个字，既判断不了是落后于远端还是鉴权/网络问题，也无从下手。
-rebase_in_progress() {
-    # 不能用 `$REPO/.git/rebase-merge`：worktree 里 rebase 状态在
-    # `<仓库>/.git/worktrees/<名字>/` 下，那个判断恒为 false，冲突检测形同虚设。
-    [ -d "$(git rev-parse --git-path rebase-merge)" ] ||
-        [ -d "$(git rev-parse --git-path rebase-apply)" ]
-}
-
-if PUSH_ERR=$(git push -q -u origin "$BRANCH" 2>&1); then
+if git push -q -u origin "$BRANCH" 2>/dev/null; then
     echo ">>> 已推送到 origin/$BRANCH"
     exit 0
 fi
 
 i=1
 while [ "$i" -le 6 ]; do
-    echo ">>> 推送失败，第 $i 次重试。git 的原始报错：" >&2
-    printf '%s\n' "$PUSH_ERR" | sed 's/^/    | /' >&2
-
-    # 同步目标必须是 **origin/$BRANCH**，不是 main。
-    #
-    # 原先这里恒为 `git pull --rebase origin main`，在特性分支上是双重错误：
-    #   - 治不了病：push 被拒是因为 origin/$BRANCH 上有本地没有的提交，
-    #     从 main 拉多少次都拿不到那些提交，下一轮 push 照样 non-fast-forward，
-    #     6 次重试全部空转，最后吐一串用户看不懂的报错；
-    #   - 还添新病：rebase 到 main 会**改写本分支历史**（提交全部换 SHA），
-    #     而这个改写既没必要、也让后续与远端的关系更糟。
-    #
-    # 远端还没有这个分支时则**绝不 rebase**：此时失败原因与「落后于远端」无关
-    # （鉴权、网络、服务端 hook 拒绝），rebase 到任何地方都改变不了结果，
-    # 只会平白改写历史。那种情况原样退避重试即可。
-    if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-        echo ">>> 远端已有 $BRANCH，rebase 到 origin/$BRANCH 后重推" >&2
-        # --autostash 保护未提交的工作树改动
-        if ! git pull --rebase --autostash -q origin "$BRANCH"; then
-            # rebase 冲突要人工处理，不要静默重试掩盖问题
-            if rebase_in_progress; then
-                echo ">>> rebase 冲突，已中止。请手工解决后重试。" >&2
-                git rebase --abort 2>/dev/null || true
-                exit 1
-            fi
-            echo ">>> 同步 origin/$BRANCH 失败，退避后重试" >&2
-        fi
-    else
-        echo ">>> 远端尚无分支 $BRANCH，失败与落后无关，不 rebase，直接退避重试" >&2
-    fi
-
-    if PUSH_ERR=$(git push -q -u origin "$BRANCH" 2>&1); then
+    echo ">>> 推送被拒，第 $i 次同步远端 ..." >&2
+    # --autostash 保护未提交的工作树改动
+    if git pull --rebase --autostash -q origin "$BASE" && git push -q -u origin "$BRANCH"; then
         echo ">>> 已推送到 origin/$BRANCH (第 $i 次重试)"
         exit 0
+    fi
+    # rebase 冲突要人工处理，不要静默重试掩盖问题
+    if [ -d "$REPO/.git/rebase-merge" ] || [ -d "$REPO/.git/rebase-apply" ]; then
+        echo ">>> rebase 冲突，已中止。请手工解决后重试。" >&2
+        git rebase --abort 2>/dev/null || true
+        exit 1
     fi
     sleep $((i * 2))
     i=$((i + 1))
 done
 
-echo ">>> 推送失败，已重试 6 次，请手动处理。最后一次报错：" >&2
-printf '%s\n' "$PUSH_ERR" | sed 's/^/    | /' >&2
+echo ">>> 推送失败，请手动处理" >&2
 exit 1
