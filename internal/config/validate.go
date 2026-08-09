@@ -375,34 +375,67 @@ func validateSharePath(s *Share, prefix string, errs *ValidationErrors) {
 	}
 }
 
-// validateShareMetadataPath 校验 POSIX 元数据旁路存储路径（仅 Windows 生效）。
+// validateShareMetadataPath 校验元数据旁路存储路径（**所有平台都生效**）。
 //
 // 只校验"路径本身写得对不对"，文件存不存在由 vfs 层在启动时创建。
 //
-// **非 Windows 平台完全不校验。** 该字段在这些平台上会被运行时忽略
-// （AGENTS.md §5 P7：旁路存储只在 Windows 编译进来），Warnings 里已有一条
-// WARN 说明这一点，那是它在非 Windows 上**唯一**的出口。
-// 曾经的做法是无论什么平台都用本平台语义卡绝对路径，后果是：一份给 Windows
-// 写的配置（metadata_path: C:\ProgramData\...）拿到 Linux 上，POSIX 版
-// filepath.IsAbs 判它不是绝对路径 → 硬报错 → 服务根本起不来，而那条
-// "会被忽略" 的 WARN 永远走不到。一个声称被忽略的字段却能拦住启动，
-// 这是自相矛盾的行为，也让配置无法跨平台复用。
+// # 为什么从"仅 Windows 校验"改成"所有平台校验"
+//
+// 旧版本在非 Windows 上**完全不校验**，理由是该字段会被运行时忽略
+// （当时旁路存储只在 Windows 编译进来）。PR #159 把 oscap 的 CapXattr /
+// CapNamedStream 接进数据路径之后，**这个前提没了**：该字段现在还决定
+// `internal/oscap/builtin` 那份旁路 bbolt 库落在哪
+// （`internal/vfs/oscap_xattr.go` 的 oscapMetadataDir），
+// 实测 auto 与 portable 两档在 Linux 上都会真的在该目录里建出
+// `.stupidsamba-oscap-<hash>.db`。
+//
+// 于是不校验的代价反过来了：一个写错的路径不再是"被忽略"，
+// 而是拖到 NewLocalFS 才炸，报的还是底层 bbolt 错误而不是
+// "配置的哪一项写错了"，违反 AGENTS.md §6"启动时一次性给出人话错误"。
+//
+// # 绝对性按"运行平台"判定（AGENTS.md 记忆：路径字段的平台语义）
+//
+// 判定一律走 isAbsPathOn(path, hostOS == "windows")，**不用** filepath.IsAbs ——
+// 后者拿的是编译期平台语义，交叉编译/测试场景下会判错，那正是 PR #18 修过的
+// 同源 bug 的根源。
+//
+// ⚠️ 这带来一处**行为变化**：一份给 Windows 写的配置
+// （metadata_path: C:\ProgramData\...）拿到 Linux 上，以前是 WARN 后照常启动，
+// 现在会**启动报错**。这是刻意的，而且恰恰是 PR #18 那条理由的自然延续：
+// PR #18 反对的是"一个声称被忽略的字段却能拦住启动"这种自相矛盾；
+// 如今该字段**不再被忽略**，那个自相矛盾也就不存在了——
+// 真正会坑人的反倒是放行：Linux 上 filepath.Dir(`C:\...`) 得到 "."，
+// 数据库会被**静默**建在进程当前工作目录里。宁可启动就报错，也不要静默放错地方。
+// 报错文案会点明这是"另一个平台的绝对路径"，而不是笼统说"不是绝对路径"。
 func validateShareMetadataPath(s *Share, prefix string, hostOS string, errs *ValidationErrors) {
 	if s.MetadataPath == "" {
 		return
 	}
-	if hostOS != "windows" {
-		return
-	}
 	field := prefix + ".metadata_path"
-	// 按 Windows 语义判断，不用 isAbsPath —— 后者在交叉编译/测试场景下
-	// 拿到的是宿主平台语义，正是上面那个 bug 的根源。
-	if !isAbsPathOn(s.MetadataPath, true) {
+	onWindows := hostOS == "windows"
+
+	if !isAbsPathOn(s.MetadataPath, onWindows) {
+		// 分开两种写错法：写成了"另一个平台的绝对路径"是跨平台复用配置时的
+		// 高发错误，笼统报"不是绝对路径"会让人一头雾水（它在他眼里明明是绝对的）。
+		if isAbsPathOn(s.MetadataPath, !onWindows) {
+			errs.add(field,
+				"共享 %q 的 metadata_path %q 是另一个平台的绝对路径，当前运行平台是 %s；"+
+					"该字段现在在所有平台都生效（决定旁路元数据库的位置），请改成 %s 平台的绝对路径",
+				s.Name, s.MetadataPath, hostOS, hostOS)
+			return
+		}
 		errs.add(field, "共享 %q 的 metadata_path 必须是绝对路径，当前 %q", s.Name, s.MetadataPath)
 		return
 	}
 
 	// 父目录必须已存在，否则 vfs 启动时创建 KV 数据库会失败。
+	//
+	// 只在"校验平台 == 真实运行平台"时做这一步：拿 Linux 的文件系统去 stat
+	// 一个 Windows 路径没有任何意义，只会产生假错误。跨平台校验（测试里用
+	// hostOS 形参注入）到上面的语法判定为止。
+	if hostOS != runtime.GOOS {
+		return
+	}
 	dir := filepath.Dir(s.MetadataPath)
 	fi, err := os.Stat(dir)
 	switch {
@@ -593,14 +626,18 @@ func warningsOn(c *Config, hostOS string) []string {
 		if s.MetadataPath == "" {
 			continue
 		}
-		// POSIX 元数据旁路存储只在 Windows 编译进来（AGENTS.md §5 P7）。
+		// 这里**刻意不再有**"该字段仅在 Windows 上生效 / 当前平台会忽略它"
+		// 那条 WARN —— PR #159 之后它是假话。
 		//
-		// 这条 WARN 是该字段在非 Windows 平台上的**唯一**出口：
-		// validateShareMetadataPath 在这些平台上完全不校验，配置照常启动。
-		if hostOS != "windows" {
-			w = append(w, fmt.Sprintf("shares[%d] %q 设置了 metadata_path，但该字段仅在 Windows 上生效，当前平台（%s）会忽略它",
-				i, s.Name, hostOS))
-		}
+		// 该字段现在有两个消费方，其中第二个在所有平台都跑：
+		//   ① POSIX 属主/权限位旁路（internal/vfs/metadata_windows.go）—— 仅 Windows；
+		//   ② oscap builtin 的六项能力旁路 bbolt 库（internal/vfs/oscap_xattr.go
+		//      的 oscapMetadataDir）—— **所有平台**，auto 与 portable 两档实测都会
+		//      在该目录里建出 .stupidsamba-oscap-<hash>.db。
+		//
+		// 留这段注释而不是直接删掉那行，是因为"某字段只在某平台生效"这类断言
+		// 一旦过期极难被发现（它读起来很谦虚，抽查会通过）。写明它为什么消失，
+		// 免得日后有人"好心"把它加回来。
 		if isUnderDir(s.MetadataPath, s.Path) {
 			w = append(w, fmt.Sprintf("shares[%d] %q 的 metadata_path 位于共享目录内部，客户端会看到这个数据库文件，建议放到共享之外",
 				i, s.Name))
