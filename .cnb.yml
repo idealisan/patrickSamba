@@ -123,6 +123,15 @@ $:
         - &gate_smoke
           name: 优雅退出冒烟
           script: CGO_ENABLED=0 go test -tags smoke -count=1 -v -timeout 120s ./cmd/stupidsamba/
+        # AGENTS.md §1.2 的硬要求：`filesystem_mode: portable` 必须在 CI 里真跑一遍，
+        # 不能只是配置项里多一个取值 —— builtin 是「将来移植到未知系统」的唯一底座，
+        # 而一条在 CI 里从未被执行过的路径，到需要它的那天一定是坏的。
+        # 「没有 CI 覆盖的 builtin 就是一份薛定谔的实现，写了等于没写。」
+        # 脚本自带空转守卫：-run 'Portable' 一条都没匹配上时会判红（go test 在
+        # 那种情况下照样打印 ok 并退出 0，是本仓库栽过的「成功回显 ≠ 真发生」）。
+        - &gate_portable
+          name: portable 模式实测 (AGENTS.md §1.2 C9)
+          script: sh test/ci/portable-mode.sh
 
   pull_request:
     - runner:
@@ -142,6 +151,7 @@ $:
         - *gate_static
         - *gate_example_config
         - *gate_smoke
+        - *gate_portable
 
   # ---------------------------------------------------------------- 发布
   #
@@ -188,6 +198,7 @@ $:
         - *gate_static
         - *gate_example_config
         - *gate_smoke
+        - *gate_portable
         # build-release.sh 自己会逐产物自检（CGO 关没关、-trimpath 生效没、
         # GOOS/GOARCH 对不对、版本号有没有真注进去、linux 产物是不是静态链接），
         # 任一不过直接非零退出，发布就停在这里。
