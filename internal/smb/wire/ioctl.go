@@ -406,34 +406,115 @@ func ParseValidateNegotiateInfoResponse(data []byte) (*ValidateNegotiateInfoResp
 // ---------------------------------------------------------------------------
 // FSCTL_QUERY_ALLOCATED_RANGES（MS-FSCC §2.3.20 / §2.3.21）
 // 稀疏文件用；Time Machine 的 .sparsebundle 会查询。
+//
+// FILE_ALLOCATED_RANGE_BUFFER（§2.3.20 请求 / §2.3.21 响应元素）固定 16 字节，
+// 全部**小端**：
+//
+//	0 FileOffset(8)  INT64，必须 >= 0
+//	8 Length(8)      INT64，必须 >= 0
+//
+// 请求侧是**单个**结构（描述客户端关心的查询窗口），
+// 响应侧是**数组**（0..n 个区间，按 FileOffset 递增，互不重叠）。
+// 响应为空数组是合法的：表示该窗口内没有任何已分配数据（全是洞）。
 // ---------------------------------------------------------------------------
 
-// FileAllocatedRangeBuffer 是一段已分配区间（MS-FSCC §2.3.21.1）。
+// FileAllocatedRangeBufferSize 是 FILE_ALLOCATED_RANGE_BUFFER 的固定长度
+// （MS-FSCC §2.3.20）。响应缓冲区大小 = 区间数 × 该值。
+const FileAllocatedRangeBufferSize = 16
+
+// FileAllocatedRangeBuffer 是一段已分配区间（MS-FSCC §2.3.20 / §2.3.21）。
 type FileAllocatedRangeBuffer struct {
 	FileOffset int64
 	Length     int64
 }
 
-// AppendAllocatedRanges 把区间列表编码追加到 dst。
+// AppendAllocatedRanges 把区间列表编码追加到 dst
+// （FSCTL_QUERY_ALLOCATED_RANGES 的输出，MS-FSCC §2.3.21）。
+// ranges 为空时不追加任何字节 —— 这是"整段都是洞"的合法应答。
 func AppendAllocatedRanges(dst []byte, ranges []FileAllocatedRangeBuffer) []byte {
-	dst, b := grow(dst, len(ranges)*16)
+	dst, b := grow(dst, len(ranges)*FileAllocatedRangeBufferSize)
 	for i, r := range ranges {
-		le.PutUint64(b[i*16:], uint64(r.FileOffset))
-		le.PutUint64(b[i*16+8:], uint64(r.Length))
+		le.PutUint64(b[i*FileAllocatedRangeBufferSize:], uint64(r.FileOffset))
+		le.PutUint64(b[i*FileAllocatedRangeBufferSize+8:], uint64(r.Length))
 	}
 	return dst
 }
 
 // ParseAllocatedRangesInput 解析 FSCTL_QUERY_ALLOCATED_RANGES 的输入
 // （单个 FILE_ALLOCATED_RANGE_BUFFER，MS-FSCC §2.3.20）。
+//
+// 按 §2.3.20 处理规则，FileOffset 与 Length 都必须是非负 INT64，
+// 且相加不得溢出，否则回 STATUS_INVALID_PARAMETER。
 func ParseAllocatedRangesInput(data []byte) (FileAllocatedRangeBuffer, error) {
 	var r FileAllocatedRangeBuffer
-	if err := need(data, 16); err != nil {
+	if err := need(data, FileAllocatedRangeBufferSize); err != nil {
 		return r, fmt.Errorf("QUERY_ALLOCATED_RANGES Input: %w", err)
 	}
 	r.FileOffset = int64(le.Uint64(data[0:]))
 	r.Length = int64(le.Uint64(data[8:]))
+	if r.FileOffset < 0 || r.Length < 0 || r.FileOffset+r.Length < r.FileOffset {
+		return r, fmt.Errorf("%w: QUERY_ALLOCATED_RANGES 区间非法 offset=%d length=%d",
+			ErrMalformed, r.FileOffset, r.Length)
+	}
 	return r, nil
+}
+
+// ParseAllocatedRanges 解析 FSCTL_QUERY_ALLOCATED_RANGES 的输出数组
+// （MS-FSCC §2.3.21，供测试与 Go 客户端使用）。
+//
+// 长度必须是 16 的整数倍；空输入返回 (nil, nil)。
+func ParseAllocatedRanges(data []byte) ([]FileAllocatedRangeBuffer, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data)%FileAllocatedRangeBufferSize != 0 {
+		return nil, fmt.Errorf("%w: QUERY_ALLOCATED_RANGES 输出 %d 字节不是 %d 的整数倍",
+			ErrMalformed, len(data), FileAllocatedRangeBufferSize)
+	}
+	out := make([]FileAllocatedRangeBuffer, len(data)/FileAllocatedRangeBufferSize)
+	for i := range out {
+		f := data[i*FileAllocatedRangeBufferSize:]
+		out[i] = FileAllocatedRangeBuffer{
+			FileOffset: int64(le.Uint64(f[0:])),
+			Length:     int64(le.Uint64(f[8:])),
+		}
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// FSCTL_SET_SPARSE（MS-FSCC §2.3.69）
+//
+// FILE_SET_SPARSE_BUFFER：
+//
+//	0 SetSparse(1)  BOOLEAN，0 = 清除稀疏标记，非 0 = 置稀疏标记
+//
+// ⚠️ 关键行为（§2.3.69）：**输入缓冲区为空时视为 TRUE**。
+// macOS 与 Windows 都会发不带输入的 FSCTL_SET_SPARSE 来把文件标为稀疏，
+// 若按"缺省 false"处理，Time Machine 的 .sparsebundle band 文件就不会稀疏化。
+// ---------------------------------------------------------------------------
+
+// FileSetSparseBufferSize 是 FILE_SET_SPARSE_BUFFER 的长度（MS-FSCC §2.3.69）。
+const FileSetSparseBufferSize = 1
+
+// ParseSetSparseInput 解析 FSCTL_SET_SPARSE 的输入缓冲区。
+//
+// 空输入返回 true（见上方注释）。多余字节按 §2.3.69 忽略：
+// 只取第 1 字节，非 0 即为 TRUE。
+func ParseSetSparseInput(data []byte) (bool, error) {
+	if len(data) == 0 {
+		return true, nil
+	}
+	return data[0] != 0, nil
+}
+
+// EncodeSetSparseInput 编码 FILE_SET_SPARSE_BUFFER（供测试与 Go 客户端使用）。
+func EncodeSetSparseInput(setSparse bool) []byte {
+	b := make([]byte, FileSetSparseBufferSize)
+	if setSparse {
+		b[0] = 1
+	}
+	return b
 }
 
 // ---------------------------------------------------------------------------
