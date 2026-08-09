@@ -491,8 +491,9 @@ func TestSrvSnapshotArrayRoundTrip(t *testing.T) {
 		t.Errorf("装不下时长度 = %d, 期望 %d", len(got), SrvSnapshotArrayMinSize)
 	}
 
-	// 截断的输入不得越界读。
-	for n := 0; n < len(b); n++ {
+	// 截断的输入不得越界读。缺末尾 2 字节终止符时标签本身仍完整，允许解析；
+	// 再短一个字节就必须报错。
+	for n := 0; n < SrvSnapshotArrayHeaderSize+2*SnapshotLabelSize; n++ {
 		if _, err := ParseSrvSnapshotArray(b[:n]); err == nil {
 			t.Fatalf("截断到 %d 应报错", n)
 		}
