@@ -430,6 +430,46 @@ assert_rc pass "C9 · 移除样本后门禁恢复绿" sh -c "$C9GATE"
 # 那会把开发者自己在 internal/vfs/ 下的正常改动误判成残留。
 assert_rc pass "C9 · 样本文件确已删除，工作树无残留" sh -c "[ ! -e '$C9SCRATCH' ]"
 
+# ============================================================ 6. 洞 6
+say "6. 洞 6：带 //go:build !linux && !darwin && !windows 的兜底文件从未被编译过"
+
+# 故障素材：在 freebsd 专属兜底文件 native_other.go 里塞一个类型错误。
+# 该文件只在「非 linux / 非 darwin / 非 windows」平台被编译（见文件头 build 约束），
+# 所以 C7 的四平台（linux/amd64 linux/arm64 darwin/arm64 windows/amd64）永远不会
+# 编译它 —— 在 check-test-compile.sh 加 freebsd/amd64 一档之前，这类文件里就算有
+# 编译错误也永远发现不了。同型兜底文件共 7 个：
+#   internal/oscap/native/native_other.go
+#   internal/oscap/probe_other.go、probe_helper_other_test.go
+#   internal/vfs/{attr,sparse,sys,xattr}_other.go
+cat > "$SCRATCH/type-broken-native-other.go" <<'EOF'
+//go:build !linux && !darwin && !windows
+
+package native
+
+var deliberateTypeError int = "this is not an int"
+EOF
+
+OV6=$(mkoverlay internal/oscap/native/native_other.go "$SCRATCH/type-broken-native-other.go")
+
+echo "  6a. 正向对照：干净树（含 freebsd/amd64 五平台）上门禁全绿"
+assert_rc pass "干净树 · 新门禁 check-test-compile.sh（含 freebsd/amd64 一档）" sh -c "$GATE"
+
+echo "  6b. 反向对照（核心）：注入类型错误后，新门禁（含 freebsd 一档）必须拦住它，"
+echo "      且报错必须点名这处注入的故障（排除「因别的原因红」的假阳性）。"
+assert_rc fail "新门禁 · internal/oscap/native/native_other.go 类型错误" \
+    with_overlay "$OV6" sh -c "$GATE"
+assert_rc pass "新门禁 · 报错点名注入故障（含 'not an int' 字样，归因到 freebsd 兜底文件而非误伤）" \
+    with_overlay "$OV6" sh -c "$GATE 2>&1 | grep -q 'not an int'"
+
+echo "  6c. 归因对照：只用旧四平台（不含 freebsd/amd64）编译，同一份故障变回绿的 ——"
+echo "      这正是洞存在的证据：freebsd 那一档之前，broken 兜底文件无人编译也无人发现。"
+assert_rc pass "旧四平台 go vet（linux/amd64 linux/arm64 darwin/arm64 windows/amd64）对 native_other.go 类型错误无感" \
+    with_overlay "$OV6" sh -c '
+        set -e
+        for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go vet -tags integration,smoke,metabolt,qadefect ./...
+        done'
+
 # ============================================================ 汇总
 say "汇总"
 printf '  通过 %s 项，失败 %s 项\n' "$PASS" "$FAIL"
