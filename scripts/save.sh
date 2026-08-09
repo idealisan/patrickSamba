@@ -102,6 +102,45 @@ else
     ADD_ARGS="$*"
 fi
 
+# ---------------------------------------------------------- 1b. gofmt 门禁
+#
+# 为什么要有这一关：本仓库曾有不合规代码一路进 main，直到发布前 CI 才红。
+# 根因是 save.sh 只跑 go vet、不跑 gofmt，而 CI 的 gofmt 门禁只在推到 main
+# 之后才跑又没人盯结果，于是"门禁看着存在、实际拦不住东西"——这次发布就栽在这。
+#
+# 范围：只检查本次要提交的文件（传入的路径），**不**扫整仓库。
+#   多 agent 共用工作树，全仓库扫会把别人未提交的中间态一起报出来，
+#   让人养成"忽略这个报错"的习惯，门禁就又废了。传入目录时 gofmt 会递归
+#   到子目录，与 `git add <目录>` 实际暂存的范围一致，是合理的。
+#
+# 行为：发现不合规**直接拦住**，打印 gofmt -l 的结果并提示跑
+#   `gofmt -w <那些文件>`，然后 exit 1。**不**自动改写后静默提交——
+#   自动改写会让提交内容和作者以为的不一致。
+GOFMT_OUT=""
+if [ "$#" -eq 0 ]; then
+    GOFMT_OUT=$(gofmt -l . 2>/dev/null || true)
+else
+    for p in "$@"; do
+        p=${p#./}
+        if [ -e "$REPO/$p" ]; then
+            sub=$(gofmt -l "$REPO/$p" 2>/dev/null || true)
+        else
+            sub=""   # 已删除的路径，无可格式化文件
+        fi
+        [ -n "$sub" ] && GOFMT_OUT=$(printf '%s\n%s\n' "$GOFMT_OUT" "$sub")
+    done
+    GOFMT_OUT=$(printf '%s\n' "$GOFMT_OUT" | grep -v '^$' | sort -u || true)
+fi
+
+if [ -n "$GOFMT_OUT" ]; then
+    echo ">>> gofmt 校验未通过，下列文件不合规范（通常仅空白/对齐差异）：" >&2
+    echo "$GOFMT_OUT" >&2
+    echo ">>> 请先运行： gofmt -w $(echo "$GOFMT_OUT" | tr '\n' ' ')" >&2
+    echo ">>> 提交已中止。" >&2
+    exit 1
+fi
+echo ">>> gofmt 检查通过"
+
 # ---------------------------------------------------------------- 2. 提交
 
 # shellcheck disable=SC2086
