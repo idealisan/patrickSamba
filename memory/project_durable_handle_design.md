@@ -64,9 +64,13 @@ R12（durable handle 6 缺陷）已于 2026-08-09 由 PR #40 合入 main。修�
 `time.AfterFunc` 并在 reconnect/remove 时 `Stop()`（有明确宿主与销毁点的一次性
 定时器，不是常驻 goroutine）。
 
-## 4. 授予前提判的是「请求的」oplock，而我们恒授予 NONE —— 未决
+## 4. 授予前提判的是「请求的」oplock，而我们恒授予 NONE —— 已知，刻意推迟
 
-**状态：2026-08-09 由 qa-proto 查出并上报 team-lead，尚未定夺，别当已修。**
+**状态：2026-08-09 由 qa-proto 查出，同日 team-lead 裁定**：v0.2.0 发布在即，
+该改动动的是 server/srv-durable 的**行为语义**（直接影响 macOS 客户端的 durability），
+贴着 release tag 改风险不划算，因此**刻意推迟到 v0.2.1 或 v0.3.0**，届时单独开 PR + CI。
+**这是「已知且有主的欠账」，不是遗漏，也不是待办认领项** —— 别在 v0.2.0 期间顺手去改，
+也别因为看到问题还在就再报一次。
 
 `durableGrantAllowed`（`durable.go:465`）判的是 `req.RequestedOplockLevel == Batch`，
 即**客户端请求的**级别；而 `create.go:167/246` 恒回 `wire.OplockLevelNone`。
