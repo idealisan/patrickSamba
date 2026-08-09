@@ -5,7 +5,7 @@
 
 ---
 
-## v0.2.0（2026-08-09，release）
+## v0.2.0（2026-08-09，**实际发布渠道仍是 prerelease**，见「发布物形态」末条）
 
 > **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实；本节保留作为历史）：
 >
@@ -19,6 +19,16 @@
 >    oplock 通道记成 #103、per-share quota 记成 #42、VFS 修复记成 #38 ——
 >    这四个号实际上分别是两篇 memory 文档和两个测试 PR，全错。核对方法：
 >    `git log --oneline --merges --ancestry-path <功能提交>..origin/main | tail -1`。
+>    **⚠️ 但这条命令有盲区，别把它的沉默当成「查无此 PR」**：`--merges` 只保留多父提交，
+>    而本仓库有一部分 PR 是以**单父提交**落进 `main` 的（squash / fast-forward），
+>    它们的 subject 照样写着 `Merge pull request #NNN`，却会被 `--merges` 整个滤掉。
+>    实测（2026-08-09 18:12 CST）：`git log --oneline --merges origin/main | grep '#135'`
+>    返回**空**，而 `git merge-base --is-ancestor ff77acb origin/main` 返回 **0（是祖先）**，
+>    `git rev-list --parents -n1 ff77acb` 只有一个父提交 —— PR #135 与 #138 都是这种。
+>    也就是说照上面那条命令核对，会得出「#135 不存在」或误挂到后面某个真 merge 上。
+>    **稳妥查法**（不依赖父提交个数）：
+>    `git log --oneline origin/main | grep -a "#<号> "`，再用
+>    `git merge-base --is-ancestor <sha> origin/main` 确认它确实在主干上。
 >
 > **本节只写 v0.1.0 之后的增量。** v0.1.0 已交付的能力（SMB 2.0.2~3.1.1 协商、
 > NTLMv2、SMB 签名、SMB3 加密与 `encryption_required` 修复、19 个 SMB2 命令、
@@ -41,7 +51,10 @@
   于是裸包那五项自检（CGO 关没关、`-trimpath` 生效没、GOOS/GOARCH 对不对、
   版本号有没有真注入、`ldd` 静态链接）自动覆盖到镜像。若改成在 Dockerfile 里
   `RUN go build`，镜像里的二进制反而会成为整个发布物中唯一没被自检过的东西。
-- 镜像**尚未推送**至远端制品库。目标地址
+- 镜像**在本文写作时尚未推送**至远端制品库；打 `v0.2.0` tag 时由 `tag_push` 流水线
+  自动构建并 `--push`（PR #134，`.cnb.yml:174` 起的 `tag_push:` 段，第 234 行附近
+  `sh scripts/docker-build.sh --tag "$CNB_BRANCH" --push`；该步骤刻意排在
+  `git:release` **之前**，镜像出不来就不建 Release）。目标地址
   `docker.cnb.cool/finalappstore/stupidsamba:<版本>`（**私密仓库，拉取前必须先
   `docker login docker.cnb.cool -u cnb -p <访问令牌>`**，用户名是固定字面量 `cnb`）。
   本地已构建并核验：`docker create --platform` 解析探针确认 manifest 含
@@ -60,6 +73,13 @@
   并做过**变异对照**：把内置配置的共享路径改成 `/nonexistent-share-dir` 重打镜像，
   同一脚本退出码 1 并打出「配置校验失败: shares[0].path: 共享 "public" 的目录不存在」，
   正常镜像退出码 0 —— 证明这 8 个 PASS 有鉴别力，不是恒真。
+- **发布渠道：打 tag 后 Release 页面会被标成「预发布」，不是正式版。**
+  `.cnb.yml:235-240` 的 Release 步骤硬编码 `preRelease: true` / `latest: false`
+  （stage 名字就叫「创建 Release（预发布）」），且 `tag_push` 对**任何** tag 都触发、
+  不按 tag 名区分。所以 v0.2.0 与 v0.1.0 走的是同一条渠道。
+  想发成正式版就改那两行（`preRelease: false` / `latest: true`），
+  **不要靠 tag 名去猜**——那两行的上方注释里已经写明了这个决定必须显式做。
+  本条如实记录当前状态，不代表已经决定要改。
 - `scripts/docker-build.sh` 的多架构自检**不再在本地构建时跳过**：改用
   `docker create --platform` 做解析探针，并以一个未构建的架构（`linux/s390x`）
   做反向对照。此前本地路径直接打印「跳过 manifest 核对」，等于「多架构」在推送前
@@ -88,8 +108,10 @@
   ⚠️ 若你曾在自己的 worktree 用过旧版 `save.sh`，请立即
   `git log --oneline origin/<你的分支>..HEAD` 自查是否有未推送的提交。
 - 修正 `README.md` / `configs/example.yaml` 中**与真二进制实测不符**的描述：启动日志
-  改成真实 slog 输出格式、路径字段按运行平台判定绝对性、metadata_path 的「会被忽略」
-  改为如实说明跨平台校验行为（填错平台的绝对路径会直接启动失败）。
+  改成真实 slog 输出格式、路径字段按运行平台判定绝对性；`metadata_path` 则如实说明
+  **校验只在 Windows 做**、非 Windows 上仅 WARN 不报错（`internal/config/validate.go:394-396`，
+  Linux 二进制 + `C:\...` 配置实测仅 WARN、照常启动）——旧版「会被忽略」的表述
+  没讲清它在非 Windows 上**不进任何校验**，容易读成「随便填」，现已订正。
 
 ### 协议与功能
 
@@ -141,26 +163,81 @@
 ### 配置
 
 - `configs/example.yaml` 澄清**路径字段按运行平台判定绝对性**：`shares[].path`、
-  `shares[].metadata_path`、`log.file` 校验的是**当前运行平台**意义上的绝对路径，
-  `/srv/share/public` 在 Windows 上不算绝对路径、会直接启动失败。
-- `metadata_path` 的校验按平台判定（PR #18）：非 Windows 上跳过运行时使用，
-  但**所有平台都参与启动校验**。因此同一份配置跨平台复用时，这一项要么留空、
-  要么按平台分开写。文档此前写作「会被忽略」，容易被读成「随便填」。
+  `log.file` 校验的是**当前运行平台**意义上的绝对路径，`/srv/share/public`
+  在 Windows 上不算绝对路径、会直接启动失败（复算：`GOOS=windows go run ./cmd/stupidsamba -config <win-path.yaml>`
+  应退出非 0）。
+- `metadata_path` 的校验**仅 Windows 参与**（PR #18，代码 `internal/config/validate.go:390-396`）：
+  非 Windows 上 `hostOS != "windows"` 直接 `return`，**完全不校验**，只打一条 WARN
+  「该字段仅在 Windows 上生效…会忽略它」，服务照常启动。因此「跨平台复用同一份配置
+  在 non-Windows 上会启动失败」是**已修正的旧行为**——旧版曾无论平台都按本平台语义
+  卡绝对路径，导致 Windows 配置拿到 Linux 硬报错。复算：`internal/config/validate.go:394-396`；
+  实测：Linux 二进制 + `metadata_path: C:\ProgramData\stupidsamba\x.db` → 仅 WARN，
+  监听照常拉起（退出 0）。文档此前写作「会被忽略」是被读成「随便填」，
+  现已在「配置」段与 README 共享表写明 non-Windows 上的唯一出口是那条 WARN。
 
-### 内部：OS 能力抽象的地基（**接口与开关已就位，适配器尚未落地**）
+### 内部：OS 能力抽象（**六项能力的两套适配器都已建成，但一处都还没接进数据路径**）
 
-- **`internal/oscap`：OS 能力抽象 port（PR #123）**。按 AGENTS.md §1.2 C9 / §5 P7
-  定义六项可选能力的接口——`xattr` / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 /
-  DOS 属性位——外加逐能力降级矩阵、`auto`/`native`/`portable` 三态模式与平台探测，
-  并配 31 例单元测试。
-- **配置项 `filesystem_mode`（PR #126）**：三态全局开关，默认 `auto`，取值合法性
-  校验委托 `oscap.ParseMode`（单一真源，防止配置层与 oscap 层各写一份取值表而漂移）。
-  `configs/example.yaml` 已列出该字段。
-  它是**全局策略**而非逐共享设置——表达的是「这台机器上我们信不信任宿主能力」；
-  各共享的落点仍逐个探测决定，同一次运行里 ext4 目录可走 native、exFAT 目录落 builtin。
-- ⚠️ **但此刻它还改变不了任何行为**：`native/` 与 `builtin/` 两个适配器**都还不存在**，
-  `internal/vfs` 也尚未改为经由 port 取能力。也就是说这三档现在**选哪个跑起来都一样**。
-  真正生效在 v0.3.0。在那之前不要根据这个开关下任何部署结论。
+> **一句话结论**：port 层 + native 适配器 + builtin 适配器 + portable 模式 CI 门禁
+> 四块**全部已在 `main`**，测试是真跑的、门禁是有牙的；但
+> **`internal/vfs` / `internal/server` / `cmd/` 里没有任何一处调用它们**，
+> 所以本版本二进制在这一块的运行行为与 v0.1.0 **逐字节等同**。
+> 「代码建成」和「行为生效」在这里是两件事，下面分开写，判据附在每条后面。
+
+**已建成（可复算）**：
+
+- **`internal/oscap`：OS 能力抽象 port（PR #123，合并提交 `6413e1d`）**。按 AGENTS.md
+  §1.2 C9 / §5 P7 定义六项可选能力的接口——`xattr` / 稀疏文件 / 命名流 / 稳定 FileID /
+  创建时间 / DOS 属性位——外加**逐能力**降级矩阵（`oscap.SelectMatrix`，不是整体二选一）、
+  `auto`/`native`/`portable` 三态与平台探测。
+  （判据：`ls internal/oscap/*.go | wc -l` = 20；`go test -v ./internal/oscap/` = 31 PASS / 0 SKIP / 0 FAIL）
+- **`internal/oscap/native`：借助宿主能力的适配器（PR #138，提交 `d351683`）**。
+  六项能力各一套实现，走 xattr / `FALLOC_FL_PUNCH_HOLE` / NTFS ADS / 平台 stat 扩展。
+  测试**不用 `t.Skip` 兜底**，而是「探测说支持就断言完整往返，说不支持就断言诚实报错」的
+  双分支写法——所以在任何宿主上都不会出现「整个文件一行没跑还报绿」。
+  （判据：`go test -v ./internal/oscap/native/` = 37 PASS / **0 SKIP** / 0 FAIL，实测 2026-08-09 18:15 CST；
+  `grep -rn 't.Skip' internal/oscap/native/*_test.go` 唯一命中在 `native_posix_test.go` 的**注释**里）
+- **`internal/oscap/builtin`：不依赖宿主可选能力的自带适配器（PR #129，合并提交 `e4f0f80`）**。
+  只用「普通文件 + 一份 bbolt 旁路存储」把同一份语义做出来，六项能力齐全，无一项赊账。
+  （判据：`go test -v ./internal/oscap/builtin/` = 49 PASS / 0 SKIP / 0 FAIL）
+- **`portable` 模式 CI 门禁（PR #135，提交 `ff77acb`）**：`test/ci/portable-mode.sh`，
+  挂在 `.cnb.yml` 的 push 与 pull_request 两条路径上（`&gate_portable`，`.cnb.yml:132-134`、
+  `:154`、`:201`），**每次构建真跑**，满足 AGENTS.md §1.2 那条「没有 CI 覆盖的 builtin
+  就是一份薛定谔的实现」的前置要求。
+  门禁自带**反向对照**，四个变异体逐一验证它有牙：A 让 portable 偷偷调 native factory、
+  B 把 portable 用例改名（门禁空转）、C 子测试全 SKIP 但父测试仍 PASS、D 子测试整体不执行
+  且不留 SKIP 痕迹 —— **4/4 都让门禁变红**，且红在不同的判据上（业务断言 / 用例清单 /
+  SKIP 计数 / 结果行下界）。
+  （判据：`sh test/ci/portable-mode.sh` → rc=0，输出「顶层通过 35 条…含子测试的结果行共 50 条」
+  与四行 `[OK] 变异体 X … 门禁如期变红 (rc=1)`；实测 2026-08-09 18:10 CST）
+- **配置项 `filesystem_mode`（PR #126，合并提交 `212d6f9`）**：三态全局开关，默认 `auto`，
+  取值合法性校验委托 `oscap.ParseMode`（单一真源，防止配置层与 oscap 层各写一份取值表而漂移）。
+  设计上它是**全局策略**而非逐共享设置——表达的是「这台机器上我们信不信任宿主能力」；
+  各共享的落点由探测逐个决定，同一次运行里 ext4 目录可走 native、exFAT 目录落 builtin。
+
+<!-- BEGIN-OSCAP-WIRING-STATUS：oscap-wire 的接线 PR 一合入 main，整段替换本块，不要散改别处 -->
+**尚未接线（本版本的实际行为边界；本块截至 2026-08-09 18:35 CST 为当下事实，接线 PR 合入后整段替换）**：
+
+- ⚠️ **整个 oscap 子系统没有任何产品调用点**，因此
+  **`filesystem_mode` 填 `auto` / `native` / `portable` 跑起来行为完全一样**。
+  上面那段「全局策略 / 逐共享探测」描述的是**设计**，不是 v0.2.0 的运行时事实。
+  四条互相独立的判据：
+  1. `go list -f '{{.ImportPath}} {{.Imports}}' ./... | grep oscap` —— 全仓只有
+     `internal/config` import 了 `internal/oscap`，**没有任何包** import
+     `oscap/native` 或 `oscap/builtin`。
+  2. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **1**（只有 port 包，被 config
+     为了 `ParseMode` 拉进来）—— 也就是说两个适配器**根本没被链进发布二进制**。
+  3. `grep -rn 'oscap\.Open\|oscap\.New\|SelectMatrix\|ProbeNative\|native\.New\|builtin\.New' --include='*.go' . | grep -v '^./internal/oscap/'`
+     —— 包外唯一命中是 `internal/config/config.go:25` 的一句**注释**，零个真实调用。
+  4. `FilesystemMode` 在产品代码里只出现在 `internal/config/defaults.go:48-49`（填默认值）
+     与 `internal/config/validate.go:238-245`（校验取值），**没有运行期消费者**。
+- ⚠️ **真实数据路径仍走 v0.1.0 那套自己的实现**，与 oscap 并存但互不相干：
+  例如 xattr 在数据路径上是 `internal/vfs/xattr_unix.go`，而 `internal/oscap/native/xattr_posix.go`
+  是另一份、当前无人调用。将来把 vfs 改为经由 port 取能力时**必须一并拆掉旧的那份**，
+  否则会重演本版本 `internal/meta` 与 `internal/vfs/metadata_windows.go` 的双实现撞车（见下节 R11）。
+- ⚠️ **`configs/example.yaml:21-35` 对 `filesystem_mode` 的说明是按设计意图写的**
+  （「逐项探测宿主支持情况：支持就用宿主的，不支持就自动换成自带实现」），
+  **没有提示它在 v0.2.0 尚无运行期效果**。以本节为准，不要照那段注释下部署结论。
+<!-- END-OSCAP-WIRING-STATUS -->
 
 ### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
 
@@ -187,9 +264,24 @@
   但定级的依据是 [`docs/timemachine-status.md`](docs/timemachine-status.md)，
   而该文档的 B 档要求包含「真机断线恢复证据」，本版本一条都没有（开发环境无 macOS）。
   **能力就位 ≠ 定级上调**，在真机跑过之前不动这个结论。**请勿用于唯一备份。**
-- **`filesystem_mode` 三档目前等价**：开关和接口都在了，但 `native/` 与 `builtin/`
-  适配器未实现、`internal/vfs` 未改为经由 port 取能力，所以选 `auto` / `native` /
-  `portable` 跑起来行为完全一样。v0.3.0 才真正生效。
+- **`filesystem_mode` 三档目前等价**（接线状态见上节 `BEGIN-OSCAP-WIRING-STATUS` 块，
+  那是单一真相块；本行不再重复判据）：port、`native/`、`builtin/`、portable CI 门禁
+  **四块都已建成并有测试**，但**没有一处产品代码调用它们**，两个适配器根本没被链进发布二进制。
+  选 `auto` / `native` / `portable` 跑起来行为完全一样。**唯一缺的是接线**
+  （把 `internal/vfs` / `internal/server` 改为经由 port 取能力）—— 此事无版本承诺，
+  以真正合入 `main` 的那一版为准。在接线之前不要根据这个开关下任何部署结论，
+  尤其**不要因为「native 适配器已经写好了」就以为设成 `native` 会走原生路径**。
+- **6 个带 `!linux && !darwin && !windows` 约束的文件从未被任何一关编译过**：
+  `internal/oscap/native/native_other.go`、`internal/oscap/probe_other.go`、
+  `internal/vfs/attr_other.go`、`internal/vfs/sparse_other.go`、`internal/vfs/sys_other.go`
+  与 `internal/oscap/probe_helper_other_test.go`。原因是编译门禁
+  `test/ci/check-test-compile.sh:104` 的平台列表是
+  `linux/amd64 linux/arm64 darwin/arm64 windows/amd64`，**四个平台没有一个满足那个约束**。
+  这正是 AGENTS.md §1.2 点名的「薛定谔的实现」同型：写了，但没有任何一关看得见它。
+  本次审计**手工补跑过一次**：`GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet
+  -tags integration,smoke,metabolt,qadefect ./...` → rc=0，即这 6 个文件**当前是能编译的**；
+  但既然 CI 不看，它们随时会在无人察觉的情况下坏掉。
+  修法是在那份平台列表末尾追加一项 `freebsd/amd64`（一行改动）。
 - **非 Windows 平台仍无元数据旁路兜底**：`internal/vfs/metadata_other.go` 直接
   返回 nil。宿主文件系统不支持 xattr 时（FAT32/exFAT 外置盘、`nouser_xattr` 挂载、
   只读根）这些元数据会**静默丢失**且不报错。这是 v0.3.0 builtin 完整化的第一优先级。

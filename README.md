@@ -36,6 +36,13 @@
 - **认证自成体系**：用户名与口令只来自本软件的配置文件，**不读宿主系统的用户
   管理**（不读 `/etc/passwd`、不走 PAM/NSS、不要求宿主上真有这些用户）。详见
   「[已知限制与说明](#notes)」。
+- **操作系统只当「文件系统 + 套接字」用**：不依赖内核 cifs 驱动、不依赖 `mount`、
+  不依赖 namespace，也不假设宿主文件系统支持扩展属性、稀疏文件、稳定 inode 或创建时间。
+  这条由 `scripts/check-constraints.sh` 的 C9 段机器校验。
+  ⚠️ 承诺的**后半句在 v0.2.0 只兑现到「代码已建成」这一步**：
+  不依赖可选文件系统能力所需的自带实现（`internal/oscap/builtin`）已经写完并有 CI 覆盖，
+  但**还没有接进真实数据路径**，所以宿主不支持扩展属性时这些元数据目前仍会静默丢失。
+  详见「[已知限制与说明](#notes)」第 7 条与 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.2.0 段。
 
 ---
 
@@ -269,6 +276,12 @@ done
 
 下面只列出**当前真正实现并会被读取**的字段（死字段不会出现在表里）。
 
+### 顶层
+
+| 字段 | 含义 | 默认值 |
+|---|---|---|
+| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `native` / `portable`，**大小写敏感**。⚠️ **v0.2.0 里这三个取值跑起来行为完全一样**——校验是真的（填错会启动报错），但抽象层还没接进数据路径，见[已知限制](#notes)第 7 条 | `auto` |
+
 ### `server`
 
 | 字段 | 含义 | 默认值 |
@@ -317,7 +330,7 @@ done
 | `valid_users` | 限定可访问用户，留空表示所有已认证用户；名字必须在 `auth.users` 里定义过 | 所有已认证用户 |
 | `time_machine` | 把本共享宣告为 Time Machine 备份目标（阶段二） | `false` |
 | `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)）。⚠️ 上报的**可用空间 = `quota_bytes` − 宿主卷已用空间**（出于性能不递归统计本共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，否则即使共享是空的，客户端也会看到可用空间为 0 而拒绝开始备份 | `0` |
-| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS **留空**即可。⚠️「非 Windows 会忽略它」是**运行时**行为，但**校验在所有平台都做**：填的必须是当前运行平台意义上的绝对路径，否则启动直接失败。所以在 Linux 上填 `C:\...` 会起不来 —— 跨平台复用同一份配置时这项要么留空、要么按平台分开写 | 空（落在 `%AppData%\stupidsamba\` 下，按共享根路径哈希命名） |
+| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS **留空**即可。⚠️ 校验**只在 Windows 做**：非 Windows 上 `internal/config/validate.go:394-396` 在 `hostOS != "windows"` 时直接 `return`，**完全不校验**，只打一条 WARN「该字段仅在 Windows 上生效…会忽略它」，服务照常启动。所以「在 Linux 上填 `C:\...` 会起不来」是**过时说法**——实测 Linux 二进制 + `metadata_path: C:\ProgramData\stupidsamba\x.db` 仅 WARN、监听照起（退出 0）。跨平台复用同一份配置时这项要么留空、要么按平台分开写 | 空（落在 `%AppData%\stupidsamba\` 下，按共享根路径哈希命名） |
 
 ### `mdns`
 
@@ -485,6 +498,16 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
    （约束客户端别申请独占 oplock，语义上不是虚假宣告）。对普通文件共享几乎无影响；
    对 Time Machine 的影响是客户端退化为不缓存，见[上](#timemachine)。
 
+7. **`filesystem_mode` 在 v0.2.0 是个「已建成但未接线」的开关**：配置里可以填
+   `auto` / `native` / `portable`，填错会启动报错（校验是真的），但**三个取值跑起来
+   行为完全一样**。六项 OS 能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 /
+   DOS 属性）的抽象接口与两套适配器都已合入并有 CI 覆盖，只是数据路径还没改为经由它们取能力。
+   自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `1`
+   —— 只有接口包被链进二进制，两个适配器一个都不在里面。
+   **实际含义**：在 FAT32/exFAT 外置盘、`nouser_xattr` 挂载、只读根这类不支持扩展属性的
+   宿主上，设成 `portable` **并不会**让元数据落到自带存储里，它们仍会静默丢失。
+   接线排在 v0.3.0，届时这一条会被删掉。详见 [`CHANGELOG.md`](CHANGELOG.md) v0.2.0 段。
+
 ---
 
 ## 客户端测试矩阵 <a name="matrix"></a>
@@ -498,7 +521,7 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
 | `go-smb2`（纯 Go 客户端） | ✅ 目标支持 | 纯 Go 端到端集成测试，可进 CI |
 | macOS Finder / `mount_smbfs` | 🎯 目标 | Apple 扩展（AAPL / `_adisk` / `readdir_attr`）为其服务；Time Machine 见[上](#timemachine) |
 | Windows 资源管理器 | 🎯 目标 | 签名、`guest` 策略、属性页 |
-| `mount.cifs`（Linux 内核客户端） | ✅ 服务端支持 | 见[上文](#notes)：本项目 CI / 开发容器缺 `CAP_SYS_ADMIN` 跑不通，真实 Linux 主机可正常挂载 |
+| `mount.cifs`（Linux 内核客户端） | ⏭️ 本环境跳过，未实测 | 开发容器跑在**非初始 user namespace** 里（`cat /proc/self/uid_map` = `0 1000 1`），内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统，而 cifs 没有这个标志，于是 `mount error(1): Operation not permitted`。**与 `CAP_SYS_ADMIN` 无关**——`--cap-add SYS_ADMIN` 下重跑仍然失败，同容器 `mount -t tmpfs` 却成功（反向对照）。这是环境限制不是服务端缺陷，但我们**没有**在真实 Linux 主机上验证过，所以这里不写「✅ 支持」。`scripts/acceptance.sh` 把它记为 skip(rc=77) |
 
 > 想核实「你说支持，凭什么」？完整的多客户端验收报告见
 > [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md)（smbclient / impacket / go-smb2
@@ -508,8 +531,9 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
 
 ## 许可证
 
-**许可证待定。** 本项目当前处于内部测试阶段（v0.1.0 prerelease），尚未确定正式开源
-许可证。在许可证明确之前，请勿将代码用于未获授权的分发或再发布。
+**许可证待定。** 本项目当前处于内部测试阶段（v0.2.0 仍按 **prerelease** 发布 ——
+`.cnb.yml:235-240` 的 Release 步骤硬编码 `preRelease: true` / `latest: false`），
+尚未确定正式开源许可证。在许可证明确之前，请勿将代码用于未获授权的分发或再发布。
 
 ---
 
@@ -521,6 +545,11 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
 CGO_ENABLED=0 go build ./...
 CGO_ENABLED=0 go vet ./...
 CGO_ENABLED=0 go test ./...
+
+# 推送前还要跑这一关：go build **不编译 `_test.go`**，只跑上面三条会漏掉
+# 「测试文件写坏了但四平台交叉编译照样绿」的情况（本仓库真出过一次）。
+# 它对全部已注册 build tag × 四个目标平台跑 go vet，约 18 秒。
+sh test/ci/check-test-compile.sh
 ```
 
 四平台发布物用 `scripts/build-release.sh` 一键产出（产物落在 `dist/`，含
