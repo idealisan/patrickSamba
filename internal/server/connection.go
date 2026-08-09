@@ -47,7 +47,9 @@ type Connection struct {
 	// credits 是本连接的 credit 池。
 	credits *Credits
 
-	// writeMu 串行化写出。当前只有读循环会写，但异步响应（M4+）会用到。
+	// writeMu 串行化写出。读循环的响应与主动推送的 oplock/lease break
+	// （见 oplock_send.go）都必须持有它 —— Transport 复用同一份写头缓冲，
+	// 绕过这把锁会造成 data race 与报文交错。
 	writeMu sync.Mutex
 
 	// handshakeDone 表示本连接已经有过认证成功的会话，握手期限已解除。
@@ -73,6 +75,10 @@ func newConnection(s *Server, nc net.Conn) *Connection {
 		state:   command.NewConn(s.opts.Settings, remote, local),
 		credits: NewCredits(DefaultMaxCredits),
 	}
+
+	// 给协议层一条主动向客户端推送 oplock/lease break 的通路。
+	// 必须在读循环启动**之前**注入。
+	c.state.SetBreakSender(breakSender{c: c})
 
 	// 认证完成前施加一个短得多的**绝对**期限：未认证连接同样占着
 	// MaxConnections 槽位，若也享受 15 分钟的空闲超时，几百条一言不发的

@@ -7,7 +7,6 @@ import (
 
 func init() {
 	register(wire.CommandChangeNotify, true, true, handleChangeNotify)
-	register(wire.CommandOplockBreak, true, true, handleOplockBreak)
 }
 
 // handleChangeNotify 处理 SMB2 CHANGE_NOTIFY（MS-SMB2 §3.3.5.19）。
@@ -47,37 +46,4 @@ func handleChangeNotify(ctx *Context) error {
 	}
 
 	return status.NotSupported
-}
-
-// handleOplockBreak 处理 SMB2 OPLOCK_BREAK（MS-SMB2 §3.3.5.22）。
-//
-// 本服务在 CREATE 里一律授予 SMB2_OPLOCK_LEVEL_NONE（见 create.go），
-// 也没有在 NEGOTIATE 里声明 SMB2_GLOBAL_CAP_LEASING，因此客户端**不应该**
-// 发来任何 oplock/lease break acknowledgment —— 它手上没有可以被打破的
-// oplock。收到就说明对端状态与我们不一致。
-//
-// 规范对"找不到匹配 oplock 的确认"要求回 STATUS_INVALID_OPLOCK_PROTOCOL
-// （§3.3.5.22.1）。
-func handleOplockBreak(ctx *Context) error {
-	switch wire.PeekOplockBreakKind(ctx.Msg) {
-	case wire.OplockBreakKindOplock:
-		req, err := wire.ParseOplockBreak(ctx.Msg)
-		if err != nil {
-			// 报文本身就解不开，属于格式错误而非 oplock 协议错误。
-			return status.InvalidParameter
-		}
-		ctx.Log.Warn("收到 oplock break 确认，但本服务从不授予 oplock",
-			"level", req.OplockLevel, "session", ctx.Header.SessionID)
-		return status.InvalidOplockProtocol
-
-	case wire.OplockBreakKindLease:
-		// 没声明 SMB2_GLOBAL_CAP_LEASING 却收到 lease 族属于协议违规。
-		ctx.Log.Warn("收到 lease break 确认，但本服务未声明 LEASING 能力",
-			"session", ctx.Header.SessionID)
-		return status.InvalidOplockProtocol
-
-	default:
-		// StructureSize 既不是 24 也不是 36，连是哪一族都判不出来。
-		return status.InvalidParameter
-	}
 }

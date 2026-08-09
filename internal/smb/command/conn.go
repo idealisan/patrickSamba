@@ -77,6 +77,9 @@ type Conn struct {
 	// closed 表示连接已开始拆除，不再接受新会话。
 	closed bool
 
+	// breakSender 由 internal/server 注入，用于异步推送 oplock/lease break（见 oplock.go）。
+	breakSender BreakSender
+
 	// aapl 是 Apple SMB2 扩展的协商结果（见 aapl.go）。
 	// 由 CREATE 上的 AAPL create context 置位，QUERY_DIRECTORY 读取。
 	aapl aaplState
