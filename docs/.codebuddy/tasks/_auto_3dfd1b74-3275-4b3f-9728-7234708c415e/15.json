@@ -1,0 +1,10 @@
+{
+  "subject": "扩充验收矩阵 f: 异常路径与畸形报文",
+  "description": "路径穿越拒绝、错误凭据 NTSTATUS、畸形帧模糊测试确认不 panic",
+  "activeForm": "测异常路径与畸形报文",
+  "status": "pending",
+  "owner": "qa",
+  "id": "15",
+  "createdAt": 1786235153325,
+  "updatedAt": 1786235153325
+}

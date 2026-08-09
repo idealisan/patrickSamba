@@ -1,0 +1,9 @@
+{
+  "subject": "CI 加示例配置校验与优雅退出冒烟",
+  "description": ".cnb.yml 增加两条：configs/example.yaml 走 -check 校验；起服务→客户端操作→SIGTERM→断言 15s 内退出。",
+  "activeForm": "补 CI 冒烟",
+  "status": "pending",
+  "id": "41",
+  "createdAt": 1786238360874,
+  "updatedAt": 1786238360874
+}

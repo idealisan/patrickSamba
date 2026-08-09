@@ -379,28 +379,104 @@ func TestQueryDirectoryAAPLOtherInfoClass(t *testing.T) {
 	}
 }
 
-// TestAAPLChildPath 覆盖 "." / ".." 与共享根的拼接。
+// TestAAPLChildPath 覆盖相对共享根的路径拼接。
 func TestAAPLChildPath(t *testing.T) {
-	tests := []struct {
-		dir, name, want string
-		ok              bool
-	}{
-		{"", "f", "f", true},
-		{"", ".", "", true},
-		{"", "..", "", false},
-		{"a/b", "f", "a/b/f", true},
-		{"a/b", ".", "a/b", true},
-		{"a/b", "..", "", false},
+	tests := []struct{ dir, name, want string }{
+		{"", "f", "f"},
+		{"a/b", "f", "a/b/f"},
 	}
 	for _, tc := range tests {
 		s := &aaplDirAttrSource{dir: tc.dir}
-		got, ok := s.childPath(tc.name)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("childPath(dir=%q, %q) = (%q, %v), 期望 (%q, %v)",
-				tc.dir, tc.name, got, ok, tc.want, tc.ok)
+		if got := s.childPath(tc.name); got != tc.want {
+			t.Errorf("childPath(dir=%q, %q) = %q, 期望 %q", tc.dir, tc.name, got, tc.want)
 		}
 	}
 }
+
+// TestAAPLAppleInfoDotEntries：".." 一律跳过（可能指到共享根外），
+// "." 走按路径查的慢路径 —— DirAppleMetadata.AppleInfoAt 明确拒收这两个名字。
+func TestAAPLAppleInfoDotEntries(t *testing.T) {
+	h := &recordingDirMeta{}
+	f := &recordingFSMeta{}
+	s := &aaplDirAttrSource{handle: h, fs: f, dir: "a/b"}
+
+	if _, _, ok := s.appleInfo(".."); ok {
+		t.Error("\"..\" 不该取 Apple 元数据")
+	}
+	if h.calls != 0 || f.calls != 0 {
+		t.Errorf("\"..\" 触发了后端调用: handle=%d fs=%d", h.calls, f.calls)
+	}
+
+	if _, _, ok := s.appleInfo("."); !ok {
+		t.Error("\".\" 应当取到元数据")
+	}
+	if h.calls != 0 {
+		t.Errorf("\".\" 不该走目录句柄快路径（AppleInfoAt 会拒收），调用了 %d 次", h.calls)
+	}
+	if f.last != "a/b" {
+		t.Errorf("\".\" 查询的路径 = %q, 期望 %q", f.last, "a/b")
+	}
+
+	// 普通条目走快路径，且传的是**单个分量**而不是完整路径。
+	if _, _, ok := s.appleInfo("band-0"); !ok {
+		t.Error("普通条目应当取到元数据")
+	}
+	if h.calls != 1 || h.last != "band-0" {
+		t.Errorf("快路径调用 %d 次、name=%q, 期望 1 次 %q", h.calls, h.last, "band-0")
+	}
+}
+
+// TestAAPLAppleInfoFallback：目录句柄快路径失败时退回按路径查，
+// 而不是把这条目录项的 Apple 字段丢空。
+func TestAAPLAppleInfoFallback(t *testing.T) {
+	h := &recordingDirMeta{err: vfs.ErrNotSupported}
+	f := &recordingFSMeta{}
+	s := &aaplDirAttrSource{handle: h, fs: f, dir: "bands"}
+
+	if _, _, ok := s.appleInfo("0a"); !ok {
+		t.Fatal("快路径失败后应当退回慢路径")
+	}
+	if f.last != "bands/0a" {
+		t.Errorf("慢路径查询的是 %q, 期望 %q", f.last, "bands/0a")
+	}
+
+	// 两条路径都没有时，退化成「没有元数据」而不是崩掉。
+	s2 := &aaplDirAttrSource{}
+	if _, _, ok := s2.appleInfo("x"); ok {
+		t.Error("没有任何后端时不该报告取到元数据")
+	}
+}
+
+type recordingDirMeta struct {
+	calls int
+	last  string
+	err   error
+}
+
+func (r *recordingDirMeta) AppleInfoAt(name string) ([vfs.FinderInfoSize]byte, int64, error) {
+	r.calls++
+	r.last = name
+	var fi [vfs.FinderInfoSize]byte
+	return fi, 0, r.err
+}
+
+type recordingFSMeta struct {
+	calls int
+	last  string
+	err   error
+}
+
+func (r *recordingFSMeta) AppleInfo(p string) ([vfs.FinderInfoSize]byte, int64, error) {
+	r.calls++
+	r.last = p
+	var fi [vfs.FinderInfoSize]byte
+	return fi, 0, r.err
+}
+
+var (
+	_ vfs.DirAppleMetadata = (*recordingDirMeta)(nil)
+	_ vfs.AppleMetadata    = (*recordingFSMeta)(nil)
+)
 
 // ---------------------------------------------------------------------------
 // 测试脚手架

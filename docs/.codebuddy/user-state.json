@@ -1,0 +1,13 @@
+{
+  "numStartups": 3,
+  "memoryUsageCount": 0,
+  "promptQueueUseCount": 82,
+  "sessionsSinceLastTip": 5,
+  "tipShowHistory": {
+    "new-user-warmup": {
+      "count": 5,
+      "lastShown": 1786237002121
+    }
+  },
+  "lastTipShown": "new-user-warmup"
+}

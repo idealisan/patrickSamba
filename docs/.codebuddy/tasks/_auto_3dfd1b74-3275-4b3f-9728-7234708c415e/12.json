@@ -1,0 +1,10 @@
+{
+  "subject": "扩充验收矩阵 c: 大文件吞吐与 sha256 校验",
+  "description": "put/get 256MB 随机文件，两端 sha256 一致，记录耗时",
+  "activeForm": "跑大文件吞吐测试",
+  "status": "pending",
+  "owner": "qa",
+  "id": "12",
+  "createdAt": 1786235153296,
+  "updatedAt": 1786235153296
+}

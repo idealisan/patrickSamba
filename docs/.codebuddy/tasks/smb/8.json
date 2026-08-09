@@ -1,0 +1,9 @@
+{
+  "subject": "ADS 端到端验证",
+  "description": "用 smbclient 在端口 4453 验证 FileStreamInformation 与流路径读写。",
+  "activeForm": "验证 ADS 端到端",
+  "status": "completed",
+  "id": "8",
+  "createdAt": 1786236714496,
+  "updatedAt": 1786237354320
+}

@@ -1,0 +1,10 @@
+{
+  "subject": "Time Machine 前置条件自查",
+  "description": "逐条确认 F_FULLFSYNC、QuotaBytes 卷容量、.sparsebundle/band 属性、com.apple.* xattr 的 ADS 读写路径。缺的补齐或报 team-lead。",
+  "activeForm": "自查 Time Machine 前置条件",
+  "status": "in_progress",
+  "id": "29",
+  "createdAt": 1786237018237,
+  "updatedAt": 1786237847352,
+  "owner": "apple"
+}

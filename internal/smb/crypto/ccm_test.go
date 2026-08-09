@@ -70,6 +70,73 @@ func TestCCM_RFC3610(t *testing.T) {
 	}
 }
 
+// NIST SP 800-38C Appendix C —— CCM 的规范示例。
+//
+// RFC 3610 的向量全部是 Nlen=13 / Tlen=8，覆盖不到 B0 首字节里
+// **flags 对 t 与 q 的编码**（flags = 64*Adata + 8*((t-2)/2) + (q-1)）。
+// 这三条示例的 Nlen ∈ {7,8,12}、Tlen ∈ {4,6,8}，正好把这段编码钉死。
+func TestCCM_SP80038C(t *testing.T) {
+	key := mustHex(t, "404142434445464748494a4b4c4d4e4f")
+
+	cases := []struct {
+		name              string
+		nonce, aad, pt    string
+		tagLen            int
+		out               string // ciphertext || tag
+	}{
+		{
+			name:   "Example 1 (Nlen=7, Tlen=4)",
+			nonce:  "10111213141516",
+			aad:    "0001020304050607",
+			pt:     "20212223",
+			tagLen: 4,
+			out:    "7162015b" + "4dac255d",
+		},
+		{
+			name:   "Example 2 (Nlen=8, Tlen=6)",
+			nonce:  "1011121314151617",
+			aad:    "000102030405060708090a0b0c0d0e0f",
+			pt:     "202122232425262728292a2b2c2d2e2f",
+			tagLen: 6,
+			out:    "d2a1f0e051ea5f62081a7792073d593d" + "1fc64fbfaccd",
+		},
+		{
+			name:   "Example 3 (Nlen=12, Tlen=8)",
+			nonce:  "101112131415161718191a1b",
+			aad:    "000102030405060708090a0b0c0d0e0f10111213",
+			pt:     "202122232425262728292a2b2c2d2e2f3031323334353637",
+			tagLen: 8,
+			out: "e3b201a9f5b71a7a9b1ceaeccd97e70b6176aad9a4428aa5" +
+				"484392fbc1b09951",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := aes.NewCipher(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonce := mustHex(t, tc.nonce)
+			a, err := NewCCM(b, len(nonce), tc.tagLen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := a.Seal(nil, nonce, mustHex(t, tc.pt), mustHex(t, tc.aad))
+			if want := mustHex(t, tc.out); !bytes.Equal(got, want) {
+				t.Fatalf("Seal = %x\nwant   %x", got, want)
+			}
+			pt, err := a.Open(nil, nonce, got, mustHex(t, tc.aad))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if want := mustHex(t, tc.pt); !bytes.Equal(pt, want) {
+				t.Fatalf("Open = %x, want %x", pt, want)
+			}
+		})
+	}
+}
+
 // SMB3 使用 nonce 11 字节、tag 16 字节（MS-SMB2 §3.1.4.3）。
 func TestCCM_SMB3Params(t *testing.T) {
 	for _, keyLen := range []int{16, 32} {

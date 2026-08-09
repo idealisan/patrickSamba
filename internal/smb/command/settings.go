@@ -149,6 +149,13 @@ type Share struct {
 	ValidUsers []string
 	// TimeMachine 把本共享宣告为 Time Machine 备份目标（阶段二）。
 	TimeMachine bool
+
+	// locks 是本共享的字节范围锁表（SMB2 LOCK，见 lock.go）。
+	//
+	// 锁挂在 Share 而不是 Session/Tree 上：字节范围锁的意义就是跨客户端
+	// 互斥，两个会话连到同一个共享的同一个文件必须能看见彼此的锁。
+	// 零值可用，惰性建表。
+	locks lockTable
 }
 
 // IsIPC 报告本共享是否为 IPC$ 管道共享。

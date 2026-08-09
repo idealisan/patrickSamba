@@ -1,0 +1,9 @@
+{
+  "subject": "调研 NBNS/NBSS 是否值得实现",
+  "description": "调研 Windows 11 是否仍依赖 NBNS(137/UDP) 做网络邻居发现，以及 NBSS(139) 的实际价值。若不值得做，把理由与 transport.go:24 注释补全方案发给 team-lead。",
+  "activeForm": "调研 NetBIOS 必要性",
+  "status": "pending",
+  "id": "40",
+  "createdAt": 1786238352579,
+  "updatedAt": 1786238352579
+}

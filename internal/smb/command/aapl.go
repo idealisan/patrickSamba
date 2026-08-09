@@ -426,11 +426,17 @@ func aaplDateAdded(btime time.Time) uint32 {
 
 // aaplDirAttrSource 在一次 QUERY_DIRECTORY 内为每条目录项取 Apple 元数据。
 //
-// 每条目录项都要向后端多问一次（LocalFS 里是 lstat + getxattr + stat "._name"），
-// 这是 readdir_attr 的固有代价；Samba 同样是逐条 fetch。所以它**只在协商成功后**
-// 才启用，普通 Windows/Linux 客户端不会付这个钱。
+// 每条目录项都要向后端多问一次，这是 readdir_attr 的固有代价
+// （Samba 同样是逐条 fetch，而且比我们贵：它对每个条目完整 CREATE 一个
+// AFP_AfpInfo 流）。所以它**只在协商成功后**才启用，
+// 普通 Windows/Linux 客户端一分钱不付。
 type aaplDirAttrSource struct {
-	meta vfs.AppleMetadata
+	// handle 是目录句柄上的快路径：后端已经持有宿主机路径与目录快照，
+	// 不必为每个条目重新做一次「从共享根逐级 lstat」的路径解析。
+	// 后端不提供时为 nil，回退到 fs。
+	handle vfs.DirAppleMetadata
+	// fs 是文件系统级的慢路径（按相对共享根的完整路径查）。
+	fs vfs.AppleMetadata
 	// dir 是被枚举目录相对共享根的路径（'/' 分隔，空串表示共享根）。
 	dir string
 	// maxAccess 是树级别的最大访问掩码。
@@ -452,15 +458,17 @@ func newAAPLDirAttrSource(ctx *Context, open *Open, class wire.FileInfoClass) *a
 	if !ctx.Conn.AAPLReaddirAttr() {
 		return nil
 	}
-	meta, ok := ctx.Tree.FS().(vfs.AppleMetadata)
-	if !ok {
-		return nil
-	}
-	return &aaplDirAttrSource{
-		meta:      meta,
+
+	s := &aaplDirAttrSource{
 		dir:       open.Path,
 		maxAccess: uint32(maximalAccessFor(ctx.Tree)),
 	}
+	s.handle, _ = open.Handle.(vfs.DirAppleMetadata)
+	s.fs, _ = ctx.Tree.FS().(vfs.AppleMetadata)
+	if s.handle == nil && s.fs == nil {
+		return nil
+	}
+	return s
 }
 
 // entry 取一条目录项的 Apple 扩展数据。后端出错时退化成「没有元数据」，
@@ -469,42 +477,64 @@ func (s *aaplDirAttrSource) entry(e *vfs.DirEntry) aaplDirAttr {
 	a := aaplDirAttr{MaxAccess: s.maxAccess}
 	isDir := e.Attr.FileAttributes&vfs.FileAttributeDirectory != 0
 
-	var full [vfs.FinderInfoSize]byte
+	full, rsrc, ok := s.appleInfo(e.Name)
 	var hasMeta bool
-	if p, ok := s.childPath(e.Name); ok {
-		fi, rsrc, err := s.meta.AppleInfo(p)
-		if err == nil {
-			full = fi
-			// vfs.AppleInfo 对「没有 Apple 元数据」与「有但全零」返回同样的结果，
-			// 只能用全零近似判定。差异仅体现在 date added 是真实时间还是
-			// AD_DATE_START，Finder 不据此做任何功能性决策。
-			//
-			// TODO: 待 vfs 层能区分（AppleInfo 多返回一个 hasMeta，
-			// 或缺元数据时返回 ErrNotFound）后改为精确判定。
-			hasMeta = full != [vfs.FinderInfoSize]byte{}
-			// 目录没有资源派生；Samba 也只对文件取 rfork_size。
-			if !isDir && rsrc > 0 {
-				a.RsrcSize = uint64(rsrc)
-			}
+	if ok {
+		// vfs 对「没有 Apple 元数据」与「有但全零」返回同样的结果，
+		// 只能用全零近似判定。差异仅体现在 date added 是真实时间还是
+		// AD_DATE_START，Finder 不据此做任何功能性决策。
+		//
+		// TODO: 待 vfs 层能区分（多返回一个 hasMeta，或缺元数据时返回
+		// ErrNotFound）后改为精确判定。
+		hasMeta = full != [vfs.FinderInfoSize]byte{}
+		// 目录没有资源派生；Samba 也只对文件取 rfork_size。
+		if !isDir && rsrc > 0 {
+			a.RsrcSize = uint64(rsrc)
 		}
 	}
 	a.FinderInfo = aaplCompressFinderInfo(full, hasMeta, isDir, e.Attr.CreateTime)
 	return a
 }
 
-// childPath 拼出目录项相对共享根的路径。
+// appleInfo 取单个目录项的 Apple 元数据，优先走目录句柄快路径。
 //
-// "." 指向被枚举目录自身；".." 直接跳过 —— 它可能指到共享根之外，
-// 而 Finder 从不看 ".." 的 Apple 元数据（AGENTS.md §8：不给路径穿越留口子）。
-func (s *aaplDirAttrSource) childPath(name string) (string, bool) {
+// ".." 一律跳过 —— 它可能指到共享根之外，而 Finder 从不看 ".." 的
+// Apple 元数据（AGENTS.md §8：不给路径穿越留口子）。
+// "." 指向被枚举目录自身，只能走按路径查的慢路径
+// （DirAppleMetadata.AppleInfoAt 明确拒收 "." 与 ".."）。
+func (s *aaplDirAttrSource) appleInfo(name string) (fi [vfs.FinderInfoSize]byte, rsrc int64, ok bool) {
 	switch name {
-	case ".":
-		return s.dir, true
 	case "..":
-		return "", false
+		return fi, 0, false
+	case ".":
+		return s.appleInfoByPath(s.dir)
 	}
+	if s.handle != nil {
+		f, r, err := s.handle.AppleInfoAt(name)
+		if err == nil {
+			return f, r, true
+		}
+		// 快路径失败（例如后端在这个条目上不支持）就退回慢路径，
+		// 而不是直接把这条目录项的 Apple 字段丢空。
+	}
+	return s.appleInfoByPath(s.childPath(name))
+}
+
+func (s *aaplDirAttrSource) appleInfoByPath(p string) (fi [vfs.FinderInfoSize]byte, rsrc int64, ok bool) {
+	if s.fs == nil {
+		return fi, 0, false
+	}
+	f, r, err := s.fs.AppleInfo(p)
+	if err != nil {
+		return fi, 0, false
+	}
+	return f, r, true
+}
+
+// childPath 拼出目录项相对共享根的路径。
+func (s *aaplDirAttrSource) childPath(name string) string {
 	if s.dir == "" {
-		return name, true
+		return name
 	}
-	return s.dir + "/" + name, true
+	return s.dir + "/" + name
 }

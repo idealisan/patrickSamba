@@ -79,6 +79,11 @@ func handleClose(ctx *Context) error {
 	if ctx.Chain.LastOpen == open {
 		ctx.Chain.LastOpen = nil
 	}
+	// 句柄关闭即释放它持有的全部字节范围锁（MS-SMB2 §3.3.5.10）。
+	// 不放会让锁表泄漏，并且永久挡住其他客户端。
+	if open.Tree != nil && open.Tree.Share != nil {
+		open.Tree.Share.locks.releaseAll(open.Path, open)
+	}
 	// vfsOwnsDelete 时底层句柄已在 open.close() 里删过，命令层不再删。
 	delPath, doDelete := open.Path, open.DeleteOnClose() && open.Handle != nil && !open.vfsOwnsDelete
 	open.close()

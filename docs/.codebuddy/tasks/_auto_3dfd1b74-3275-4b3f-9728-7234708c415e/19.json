@@ -1,0 +1,10 @@
+{
+  "subject": "实现稀疏文件三个 FSCTL",
+  "description": "FSCTL_SET_SPARSE / FSCTL_QUERY_ALLOCATED_RANGES / FSCTL_SET_ZERO_DATA 接线到 vfs.SparseFile，含长度校验与 BUFFER_OVERFLOW 语义。",
+  "activeForm": "实现稀疏 FSCTL",
+  "status": "pending",
+  "owner": "info",
+  "id": "19",
+  "createdAt": 1786235211105,
+  "updatedAt": 1786235211105
+}

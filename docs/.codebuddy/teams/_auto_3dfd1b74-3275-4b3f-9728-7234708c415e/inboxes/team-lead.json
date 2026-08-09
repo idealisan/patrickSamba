@@ -1,0 +1,34 @@
+[
+  {
+    "from": "general-purpose-1",
+    "text": "开工确认一件事，不阻塞我先做其它部分。\n\nreaddir_attr 的字节布局在 `internal/smb/wire/query_directory.go` 的 `AppendDirEntry`（FileIdBothDirectoryInformation 分支）里，`DirEntry.ShortName` 是 string，塞不进 Apple 的 raw 布局；调用点在 `internal/smb/command/query_directory.go`。按 Samba `source3/smbd/trans2.c`，AAPL 协商后 ID_BOTH_DIR_INFO 的改法是：EaSize(+64) 放 max_access，短名区 24 字节改成 rfork_size(8, LE) + FinderInfo 前 16 字节，ShortNameLength/Reserved 置 0。\n\n所以我需要动两处不在你给的清单里的文件（都不在你的禁改名单里）：\n1. `internal/smb/wire/query_directory.go`：给 `DirEntry` 加一个 `AAPL *AAPLDirAttr` 可选字段 + 分支（约 15 行），结构体与常量放新文件 `internal/smb/wire/aapl.go`。\n2. `internal/smb/command/query_directory.go`：协商过就填这个字段（约 10 行）。\n另外需要在 `internal/smb/command/conn.go` 结构体**末尾**加一个 AAPL 协商状态字段（一行，Samba 也是按连接存的）。\n\n如果你或 wire agent 正在改这两个文件，告诉我，我就只交付 AAPL create context + mDNS，readdir_attr 留接口不接线。没回复的话我按上面做，改动都尽量集中在新文件里以降低 rebase 冲突。",
+    "summary": "请求 readdir_attr 需要的 wire/query_directory 改动权限",
+    "timestamp": "2026-08-09T00:14:19.400Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "任务1 dispatch 覆盖面审计报告：\n\n已实现 15 个：NEGOTIATE / SESSION_SETUP / LOGOFF / TREE_CONNECT / TREE_DISCONNECT / CREATE / CLOSE / FLUSH / READ / WRITE / IOCTL / ECHO / QUERY_DIRECTORY / QUERY_INFO / SET_INFO。\n\n缺失 4 个（走 defaultHandler → STATUS_NOT_SUPPORTED）：\n1. **CANCEL (0x0C) — 真 bug，最高优先级**。MS-SMB2 §3.3.5.16 明确规定服务端\n   **不得对 CANCEL 发任何响应**。现在我们回了一条 NOT_SUPPORTED 且 MessageId\n   与被取消的请求相同，客户端会错配。必须改成\"静默吞掉，不产响应\"。\n2. **LOCK (0x0A) — 功能缺口，优先级次高**。smbclient/Finder/Explorer 都会发；\n   sparsebundle（Time Machine）依赖字节范围锁。打算实现进程内锁表。\n3. **CHANGE_NOTIFY (0x0F)** — Finder/Explorer 常发。回 NOT_SUPPORTED 客户端能\n   容忍（Samba 无 notify 后端时也这么回），但会退化成轮询。先保持现状。\n4. **OPLOCK_BREAK (0x12)** — create.go 恒回 OplockLevelNone，客户端不会主动发。\n   低优先级，只需加个静默处理避免误报。\n\n另：FLUSH 已实现且用了 Sync(true) 全同步语义，符合 Time Machine 要求。\n现在按 CANCEL → 任务2 复合链 → LOCK → 任务3 签名 → 任务4 credit 往下做。",
+    "summary": "Dispatch coverage audit: 4 commands missing, CANCEL is a real bug",
+    "timestamp": "2026-08-09T00:24:46.098Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "审计完成（query_info.go / set_info.go / ioctl.go + wire 层）：\n\nQUERY_INFO(FILE)：已支持 Basic/Standard/NetworkOpen/All/Internal/Ea/Access/Position/Mode/Alignment/AttributeTag/Id/Name/NormalizedName/AlternateName/**Stream(22 已接 vfs.Streams)**。缺：Compression、FullEa（可忽略）。\nQUERY_INFO(FS)：Volume/Size/FullSize/Attribute/Device/SectorSize 都有。**缺 FileFsObjectIdInformation(8)**。\n⚠️ 关键 bug：`fsAttributes` 没置 FILE_NAMED_STREAMS(0x40000) 和 FILE_CASE_SENSITIVE_SEARCH——macOS 因此不会走 ADS 路径。\nSET_INFO：Basic/EndOfFile/Allocation/Disposition/Rename 已实现，Link/ShortName/ValidDataLength/FullEa 回 NOT_SUPPORTED。\nIOCTL：只有 VALIDATE_NEGOTIATE_INFO / PIPE_TRANSCEIVE / QUERY_NETWORK_INTERFACE。**三个稀疏 FSCTL(SET_SPARSE/QUERY_ALLOCATED_RANGES/SET_ZERO_DATA) 未接线**，但 wire 层解析函数已齐。\n\nVFS 侧 `vfs.SparseFile{PunchHole,Preallocate}` 可选接口已存在，SET_SPARSE/SET_ZERO_DATA 能直接接。**唯独没有查询实际分配区间的能力**（无 SEEK_HOLE/SEEK_DATA）。我先按非稀疏 FS 的合法做法回「整段已分配」（Samba 无 SEEK_HOLE 时同样处理），若你想要精确结果，需要 vfs 侧加：`AllocatedRanges(off, length int64) ([]struct{Off,Len int64}, error)`。不用回复，我继续做。",
+    "summary": "info 线现状审计结论",
+    "timestamp": "2026-08-09T00:26:38.764Z",
+    "color": "magenta",
+    "read": true
+  },
+  {
+    "from": "qa",
+    "text": "## 任务 1 完成：验收基线已建立，**基线是绿的**\n\n### 环境状态\n- `git fetch origin` 后 HEAD == origin/main == `3f598d8 server/crypto: 接入 SMB3 TRANSFORM 加解密（M5 传输层）`，不落后不领先。\n- 注意：工作树里有 **apple agent 的未提交改动**（`M internal/smb/command/conn.go`、`M internal/smb/command/create.go`、`?? internal/smb/command/aapl.go`），所以我**没有执行 `git pull --rebase`**（会报「有未暂存的变更」）。我没有去 stash/commit 别人的 WIP。好消息是这份 WIP `CGO_ENABLED=0 go build ./...` 是过的，本次基线就是在「HEAD + apple WIP」这个树上跑的。\n- 工具链齐全：go1.25.0 / smbclient 4.22.10-Debian / Python 3.13.5 + impacket / go-smb2 驱动都在。\n\n### `scripts/acceptance.sh` 结果\n```\n  通过: smbclient impacket gosmb2\n  失败:\n  跳过: mountcifs\n  验收通过（3 种客户端）\n```\n达到 AGENTS.md §3 的硬性门槛（≥3 种第三方客户端）。\n\n关键输出行：\n- **smbclient**（`-m SMB3`，明文会话）：ls/get/put/mkdir/cd/rename/rm/rmdir 全通。\n  `getting file \\hello.txt of size 23`、`putting file ... as \\uploaded.yaml`，\n  卷容量上报 `67108864 blocks of size 4096. 66761964 blocks available`（QuotaBytes 那条改动生效了）。\n- **impacket**：`已登录, dialect=0x0300`，listPath / getFile / putFile 往返 2000B / 1MiB 大文件读 / 子目录枚举 / 通配符匹配 / mkdir+rmdir / rename / delete 全 OK。\n- **go-smb2**：ReadDir / ReadFile / 9500B 写回读 / 1MiB 读 / Stat / Mkdir+Rename+Remove / **稀疏偏移读写** / `Statfs total=67108864 free=66761961 blockSize=4096` 全 OK。\n- **mount.cifs**：`rc=2, Unable to apply new capability set.` → 按约定 SKIP（容器缺 CAP_SYS_ADMIN，环境限制，非服务端缺陷）。\n\n### 下一步\n开始任务 2 扩充验收矩阵，顺序：**(a) 加密/签名变体 → (b) 方言矩阵 → (f) 异常路径+畸形帧不 panic → (c) 大文件 sha256 → (d) ADS/大目录 → (e) 并发+race**。\n把 (a) 排最前是因为 auth agent 正在修 mechListMIC，需要 `--client-protection=encrypt` 这条用例做验收闸门；(f) 提前是因为 AGENTS.md §8 明确要求服务端不允许 panic。每加一组就 commit+push 并回报实际输出。\n\n**给 auth agent 的提醒**：我这边基线里 smbclient 走的是默认协商（未强制 encrypt），所以目前的绿灯**不代表 mechListMIC 已修好**。加密用例上线后我会单独告诉你结果。",
+    "summary": "验收基线绿灯：3 客户端 PASS，mount.cifs SKIP",
+    "timestamp": "2026-08-09T00:26:59.040Z",
+    "color": "cyan",
+    "read": true
+  }
+]

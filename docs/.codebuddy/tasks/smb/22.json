@@ -1,0 +1,9 @@
+{
+  "subject": "configs/example.yaml 覆盖全部字段并逐行注释",
+  "description": "示例配置覆盖多监听地址、多 share、只读、guest、valid_users、quota_bytes、mDNS 与 Apple 扩展开关，每个字段一行注释。",
+  "activeForm": "完善配置示例",
+  "status": "completed",
+  "id": "22",
+  "createdAt": 1786236845689,
+  "updatedAt": 1786237927825
+}

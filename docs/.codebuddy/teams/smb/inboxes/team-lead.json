@@ -1,0 +1,256 @@
+[
+  {
+    "from": "qa",
+    "text": "回归结果 @ HEAD 43b621d（含工作树里未提交的 auth/command 改动）：**全绿**。\n\n- `go build ./...` / `go vet` / `go test ./...` 全过\n- acceptance.sh：smbclient PASS、impacket PASS、go-smb2 PASS、mount.cifs SKIP（CAP_SYS_ADMIN，环境限制）\n\n**重点回归 fsAttributes（风险最高的那个改动）—— 无回归**：\n- smbclient `allinfo hello.txt` 正常，且因为现在宣告了 FILE_NAMED_STREAMS，客户端确实**新发起了 streams 查询**，返回正确：`stream: [::$DATA] 23 bytes` + `stream: [:AFP_Resource:$DATA] 19 bytes`\n- ADS 端到端通：`put hello.txt:AFP_Resource` → allinfo 枚举到 → `get` 回读内容一致\n- FILE_CASE_SENSITIVE_SEARCH 是**动态清除**的（query_info.go:205 依据 vfs StatFS.CaseSensitive，local.go:559 返回 false），与实际大小写不敏感的解析行为一致，`get HELLO.TXT` 能取到 hello.txt。没有语义矛盾。\n\n**一个非阻塞的小瑕疵**（低优先级，给 info agent）：smbclient allinfo 会先发 FSCTL_SRV_ENUMERATE_SNAPSHOTS，我们回 STATUS_INVALID_DEVICE_REQUEST，客户端打印一行 `NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data`。功能不受影响（allinfo 继续跑完），但真实 Samba 是回 NOT_SUPPORTED 或空快照列表，输出更干净。\n\n可以放心让大家继续推。我接着补 test/integration/ 与加深 acceptance.sh。",
+    "summary": "Baseline green at 43b621d, fsAttributes change safe",
+    "timestamp": "2026-08-09T00:53:31.412Z",
+    "color": "cyan",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "team-lead，我是 server agent。你的初始任务消息是空的，所以我按 AGENTS.md §7.1 自己认领了我负责的域（internal/server + internal/smb/command），对服务做了端到端验收，发现并修复了 2 个真实 bug，已提交推送。\n\n## 修复 1：SMB 2.0.2 / 2.1 文件共享完全不可用（违反 AGENTS.md §2）\n- 现象：smbclient 连 2.0.2/2.1 报 \"tree connect failed\"，但 3.x 正常。抓包定位到 TREE_CONNECT 实际返回 SUCCESS，随后客户端发 FSCTL_VALIDATE_NEGOTIATE_INFO，服务端对 < 3.0 的方言回 STATUS_FILE_CLOSED，smbclient 收到后直接放弃整条连接（它把这个状态误标成 NT_STATUS_IMAGE_ALREADY_LOADED，实为 0xC000010E/FILE_CLOSED）。\n- 根因：ioctl.go 里 ioctlValidateNegotiate 对 c.Dialect < SMB300 直接回 FILE_CLOSED。但实测 smbclient 4.22 在 2.1 上也发这个 IOCTL。\n- 修复：仅对 3.1.1 回 FILE_CLOSED（preauth hash 已覆盖该威胁，符合规范），其余已协商方言一律正常复核并回显。据 AGENTS.md §9「真实客户端行为优先于规范」。\n\n## 修复 2：delete-on-close 重复删除导致误导日志\n- 现象：rm 文件后服务端日志出现 \"delete-on-close 删除失败 ... vfs: not found\"。\n- 根因：FILE_DELETE_ON_CLOSE 创建选项同时置了命令层与 vfs 层两个删除标志，CLOSE 时两层各删一次。vfs 层删完，命令层再删就 not found。\n- 修复：新增 Open.vfsOwnsDelete 标志（FILE_DELETE_ON_CLOSE 创建选项置位），命令层 CLOSE handler 据此跳过自己的删除，由 vfs 层独占删除。SET_INFO(FileDispositionInformation) 走命令层删除，不受影响。\n\n## 验证（均在专属端口 4459 上跑，避免与别的 agent 抢端口）\n- smbclient：SMB2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1 全部 ls/put/get/mkdir/rename/rm/rmdir 通过（矩阵 #1）\n- impacket：全部断言通过（矩阵 #3）\n- go-smb2：全部断言通过（矩阵 #6）\n- 即 AGENTS.md §3 要求的「至少 3 种第三方客户端」全部满足。\n- 新增回归测试 internal/smb/command/ioctl_validate_test.go（SMB2.1 成功回显 / 3.1.1 拒绝 / 字段不符拒绝），go test ./internal/smb/command/... ./internal/server/... 通过。\n\n## 提交\n- f46a3fb command: 修复 SMB2.0.2/2.1 文件共享(VALIDATE_NEGOTIATE)与 delete-on-close 重复删除，已推送 main。只动了 internal/smb/command 下的文件（我的所有权范围）。\n\n## 需要你/其它 agent 关注\n1. 预存问题（非我引入）：internal/auth/ntlmsign_test.go 引用未定义的 randomSessionKey，go test ./... 在 auth 模块 build failed。这是 auth agent 的域，我没动，提醒一下。\n2. 环境坑（供全队）：用 setsid nohup ... & 起服务时，$! 是 setsid 包装进程 PID，真正监听的是它的子进程；kill $! 杀不掉监听。定位真实 PID 用 fuser <port>/tcp。另外 ss -ltnp 在本容器拿不到 pid，fuser 可靠。\n\n如果你有具体的下一步任务（比如某个命令的边界、加密/签名的进一步验收、或需要我接手别的部分），告诉我即可。",
+    "summary": "server 模块验收：修复 2 个 bug 并提交，3 家客户端全部通过",
+    "timestamp": "2026-08-09T00:54:04.651Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "SPNEGO mechListMIC 四件事全部完成并已推送（3 个 commit）。\n\n做了什么：\n1. 新增 internal/auth/ntlmsign.go：SIGNKEY/SEALKEY 双向派生 + SigningContext（有状态 RC4 句柄 + 独立 seqnum）+ GSS_GetMIC。\n2. ntlmssp.go：校验客户端 mechListMIC（客户端方向 SignKey，subtle.ConstantTimeCompare，不匹配→ErrLogonFailure），并在最终 accept-completed 里回服务端方向的 MIC。原来 314 行的 TODO 已删除。wrap() 增加 mic 参数（仅我自己的文件）。\n3. golden test 取自 MS-NLMP §4.2.4.4 与 §4.2.3.4 的 worked example（含 SEALKEY 128/56 两个分支、KEY_EXCH 的 RC4 checksum、有状态句柄），另加端到端往返 + 3 种篡改 + 缺失用例。\n\n发现的 bug：spnego.go 原来的 MechTypesDER 是**重新编码**出来的（derTLV(tagSequence, ...)），客户端若用非最短长度域就会算错 MIC。已改为保留客户端原始字节，并补了回归测试。\n\n实测（smbclient -m SMB3 + signing_required，端口 4451，TCP 代理抓包）：\n  mechTypeList DER  30 0c 06 0a 2b 06 01 04 01 82 37 02 02 0a\n  客户端 MIC        01000000 d8744bc1892b8df0 00000000\n  服务端 MIC        01000000 1b17e747b37da8e0 00000000\nsmbclient 确实会发 MIC，我们校验通过并正确回了自己方向的 MIC，ls/mkdir 正常。\n\n策略选择：客户端没带 MIC 时不强制、也不主动回（RFC 4178 §5 对称语义，老客户端不发）；guest/匿名路径不做 MIC（session key 全零，对端无法复算）。\n\n不需要其他模块配合，internal/smb/command 与 internal/server 无需改动。\n\n提醒：现在整树 go build 过不了，internal/smb/command/ioctl.go:41-45 引用了未定义的 ioctlSetSparse / ioctlSetZeroData / ioctlQueryAllocatedRanges（server agent 的半成品），我只能单独构建自己的包。",
+    "summary": "mechListMIC 闭环完成，smbclient 实测通过",
+    "timestamp": "2026-08-09T00:58:03.835Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "Teammate \"server\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "server reactivated — processing new messages",
+    "timestamp": "2026-08-09T00:59:09.776Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "Teammate \"auth\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "auth reactivated — processing new messages",
+    "timestamp": "2026-08-09T00:59:09.795Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "编译问题已经不存在了，无需修复，全队可以继续跑 `go test ./...`。\n\n核实结果：\n- `randomSessionKey` 只在 `internal/auth/ntlmssp_test.go:118` 出现，且就是在那里定义的（`ntlmsign_test.go` 里根本没引用它）。server agent 当时撞上的应该是我写 c50c462 那批文件的**瞬时中间态**（文件写了一半）。\n- 现在 HEAD == 工作树（`git diff HEAD -- internal/auth internal/smb/crypto` 为空），且：\n  - `CGO_ENABLED=0 go build ./...` 通过\n  - `CGO_ENABLED=0 go vet ./...` 通过\n  - `CGO_ENABLED=0 go test ./...` **全绿**（包括别人未提交的工作树改动）\n\n所以没有可推送的修复。教训记下：我以后写多文件测试时会先把 helper 定义写完再写引用方，避免别人在中间态撞车。\n\nGSS_GetMIC 主体确实已完成（c50c462）。现在开始做你说的两件：preauth hash 更新时机核对 + SESSION_SETUP 末条响应签名密钥落点核查。有结论就发你。",
+    "summary": "编译错误已不存在，是瞬时中间态",
+    "timestamp": "2026-08-09T01:00:35.611Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "mDNS 加固完成（commit 已推）。\n\n**已有，跳过**：冲突探测/改名（3×250ms probe + §8.2 同时探测仲裁 + §9 限速退避）、§7.1 已知答案抑制、§6 随机延迟 20~120ms、§10.1 goodbye（2 次 TTL=0）、多网卡分别加组播组并按收包网卡应答、IPv6 ff02::fb 已在监听。\n\n**本轮新增 4 项真实缺口**：\n1. §7.2 多包已知答案（TC 位）：原来完全没处理。新增 knownAnswerStash 按查询者 IP:port 暂存续包答案，TC 查询延迟 400~500ms 后再合并抑制。带资源上限（64 源 × 512 条）。\n2. §5.5 定向单播查询：packet.multicast 字段算出来了但没人用，导致单播来的查询被组播回去（对方收不到）。已修。\n3. 宣告阶段装死：原来只在 stateResponding 应答，宣告要跨 3 秒，这期间所有查询被忽略。§8.3 明确探测通过即拥有名字，已改为宣告期也应答。\n4. goodbye 漏发：原来只在 stateResponding 发，\"刚起来就 Ctrl-C\"不撤回，邻居缓存残留几分钟。已覆盖 stateAnnouncing。\n5. 附带：30s 轮询网卡地址，DHCP 续约/切网后自动重新宣告（原来要等 120s TTL）。\n\n新增 knownanswer_test.go：8 个用例覆盖跨包合并、源隔离、过期、资源上限、§5.4/5.5/6/6.7/7.2 应答方式决策矩阵、§7.1 抑制阈值。全部纯函数，不依赖真实组播。\n\n注：`CGO_ENABLED=0 go build ./...` 目前被 internal/vfs/link.go:11 \"syscall imported and not used\" 卡住，不是我的改动。",
+    "summary": "mDNS 健壮性加固完成，四项已有四项新增",
+    "timestamp": "2026-08-09T01:00:46.229Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "已提交推送（commit「info: 稀疏文件三 FSCTL + FsObjectId + 硬链接 SET_INFO」）：\n\n1. ioctl.go 实现 FSCTL_SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES。vfs agent 同步把 AllocatedRanges+SetSparse 加进了 vfs.SparseFile，已直接接上，不再是 NOT_SUPPORTED。SET_ZERO_DATA 走 PunchHole 真打洞（TM band 回收的实质动作）。输出装不下按整条区间截断 + BUFFER_OVERFLOW。\n\n2. **纠正一处任务书里的判断**：FileFsObjectIdInformation 不该回 NOT_FOUND。MS-FSA §2.1.5.13.8 原文是「不实现→INVALID_PARAMETER；卷不支持→VOLUME_NOT_UPGRADED；VolumeId 为空→OBJECT_NAME_NOT_FOUND」，三个都不是 NOT_FOUND 兜底；而真实 Samba 根本不走这条路，它总是回 64 字节（SambaWiki UNIX Extensions 记载 create_volume_objectid + 48 字节扩展信息）。按 §9「真实行为优先」我回成功：ObjectID = sha256(卷序列号+共享名) 前 16 字节（重启稳定、跨共享唯一），ExtendedInfo 全零（不冒充 Samba 版本魔数）。\n\n3. ADS 端到端在 4453 验证通过：写 t.txt:AFP_Resource → 落 ._t.txt 旁路文件，读回字节一致，allinfo 正确列出 [::$DATA] 13B 与 [:AFP_Resource:$DATA] 16B。command 层与 VFS 层都没问题。\n\n4. SET_INFO 补 FileLinkInformation（用新的 vfs.HardLinker，目录回 FILE_IS_A_DIRECTORY，不改 open.Path）；ShortName/ValidDataLength 保持 NOT_SUPPORTED 并写清了为什么不能谎报成功。\n\n发现一个小瑕疵：smbclient 每次 allinfo 都打印 `NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data`，是 FSCTL_SRV_ENUMERATE_SNAPSHOTS 没实现。Samba 回「0 个快照」。下一步我打算补上并加 ioctl 单元测试，如无异议我就做。",
+    "summary": "稀疏 FSCTL/FsObjectId/硬链接完成，ADS 端到端验证通过",
+    "timestamp": "2026-08-09T01:02:23.479Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "编译问题**不需要修复 —— 当前 HEAD 是干净的**，刚在 5281a77 上验证：\n\n  CGO_ENABLED=0 go vet  ./internal/auth/...   通过\n  CGO_ENABLED=0 go test -count=1 ./internal/auth/...   ok  0.030s\n\n我还用 git worktree 把两个提交单独 checkout 出来验过，eeede2d 和 c50c462 各自都能编译。\n\n根因是我的锅：那个 `randomSessionKey` → `specRandomSessionKey` 重命名我分了两步做 ——\n先用 Edit 改了 `var` 声明，再用另一条 sed 改所有引用点。两步之间有大约 1 分钟的窗口，\n工作树里是「声明已改名、引用还是旧名」的状态，正好就是 `undefined: randomSessionKey`。\nserver agent 撞上的就是这个窗口。已提交的任何一个 commit 都没有这个问题。\n\n教训（我以后照做）：重命名必须**一次原子改完再落盘**，不能 Edit 一半再 sed 补。\n8 人共用一个工作树，未提交的中间态同样会砸到别人，不只是 commit 要保证可编译。\n\n顺带确认：GSS_GetMIC + mechListMIC 主体确实已完成（eeede2d / c50c462 / ba27a7f 三个提交），\nsmbclient 实测双向 MIC 都对上了。现在接着做你说的 preauth hash 与 SESSION_SETUP 签名两项核对。",
+    "summary": "编译问题是工作树瞬态，HEAD 已干净，无需修复",
+    "timestamp": "2026-08-09T01:02:24.547Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "CANCEL 完成并推送（internal/smb/command/cancel.go + internal/server/connection.go + cancel_test.go，7 个测试全绿）。\n\n做了：registerNoResponse(CommandCancel)；复合链拼接遇到被抑制消息时回滚对齐填充并把上一条的 NextCommand 复位为 0（不回滚会让客户端顺着 NextCommand 解析到帧尾之外）；processMessage 对 NoResponse 命令跳过 credit 记账；整帧全抑制返回 0 字节。\n\n顺带发现一个**新 bug**（下一步修）：MS-SMB2 Appendix A <117>「遇到未置 RELATED 的请求即视为新链开始」，但 dispatch.go 的 Chain.Failed 一旦置位就永不复位。混合链 [A(失败,unrelated), B(unrelated,ok), C(related)] 里 C 会被 A 的旧错误毒死。另外首条带 RELATED 目前没拒绝（§3.3.5.2.7.2 要求失败）。正在做任务 2。",
+    "summary": "CANCEL 无响应语义已完成并推送",
+    "timestamp": "2026-08-09T01:02:38.537Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "优雅退出已修好并端到端验证（commit 已推）。\n\n**发现的真 bug**：main.go 把信号 ctx 传给了 `srv.Serve(ctx)`，而 `internal/server/connection.go:94` 有 `context.AfterFunc(ctx, func(){ c.nc.Close() })` —— 信号一到，所有连接的 socket 被立刻 Close，\"等待在途请求完成\"完全没生效，客户端看到的就是硬断。改为 `Serve(context.Background())`，停 accept 与排空统一由 `srv.Shutdown` 驱动。\n\n**现在的顺序**：Shutdown 挂 goroutine 先关监听（停 accept）→ mDNS goodbye（2×TTL=0，500ms）→ 等在途请求，10s 超时 → 超时或二次信号则强制断开 → defer closeShares 关句柄。\n\n**二次信号**：改用 signal.Notify（缓冲 2）代替 NotifyContext，第二次 Ctrl-C/SIGTERM 会 cancel 超时 ctx 立即断开，不用干等 10 秒。\n\n**实测（端口 4458）**：\n- 正常场景：smbclient ls 完成 → SIGTERM → 立即干净退出。\n- 挂一条 idle 连接：第一次 SIGTERM 后 2s 仍在等（符合预期），第二次 SIGTERM 后 4s 内退出，日志打出「再次收到退出信号，立即断开所有连接」+「在途请求未能在超时内结束」。\n\n接下来做配置校验语义检查与 example.yaml。",
+    "summary": "优雅退出修正：发现并修复连接被硬断的真 bug",
+    "timestamp": "2026-08-09T01:04:22.096Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "qa",
+    "text": "QA 回归通报（对应「工作树编译不过」告警）：\n\n1. **破树已恢复可编译**。之前报的两处半成品已修复——`internal/mdns/responder.go`（已补 `strings` import，现 455/471 行正常使用）与 `internal/vfs/link.go`（92/99 行原 `asErrno/errnoNoHardLink` 已改写）。当前 `CGO_ENABLED=0 go build ./...` 退出码 0。归属 mdns / vfs agent，无需 qa 插手产品代码。\n\n2. **本轮回归全绿**（含你发告警时那些未提交的工作树改动）：\n   - acceptance.sh（端口 4455）：smbclient PASS、impacket PASS、go-smb2 PASS、mount.cifs SKIP（缺 CAP_SYS_ADMIN，符合 AGENTS.md §3）。\n   - `go vet ./...` 干净；`go test ./...` 全部 ok（含 mdns/auth/vfs/command/crypto 等）。\n   - 我的 `test/integration` harness 在 `integration` tag 下 `go vet` 通过。\n\n3. **顺手清理**：按你提醒的 `kill $!` 坑，用 `fuser 4455/tcp` 找到真实 PID 31799 并 kill，4455 端口已释放（之前有遗留 QA 服务）。\n\n结论：工作树当前健康，无回归。继续推进 Task #10（integration 测试：复合/签名/CANCEL/ADS/SMB3加密/多方言）。",
+    "summary": "回归绿：破树已修复，编译/单测/三客户端全过",
+    "timestamp": "2026-08-09T01:05:21.379Z",
+    "color": "cyan",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "任务 1、2 完成并已推送两个 commit。\n\n**1. SparseFile.AllocatedRanges + SetSparse**\n- `internal/vfs/optional.go`：新增 `Range{Offset,Length}`，`SparseFile` 追加 `AllocatedRanges(off,length)([]Range,error)` 与 `SetSparse(bool)error`。窗口在 VFS 层就夹到 EOF，越界/溢出参数回 `ErrInvalidArg`。\n- `sparse_unix.go`（linux||darwin）：`SEEK_DATA`/`SEEK_HOLE` 循环。**darwin 的两个常量与 Linux 正好相反**（Linux 3/4，darwin 4/3，已核对 x/sys@v0.47.0 的 zerrors 表并写进注释），代码只用 `unix.SEEK_*` 符号、绝不硬编码，并加了一个测试钉住这点。ENXIO=正常终止，EINVAL/ENOTSUP/ENOSYS=降级为「整段已分配」。\n- `sparse_windows.go`：`FSCTL_QUERY_ALLOCATED_RANGES` 走 `windows.DeviceIoControl`（纯 Go），处理 ERROR_MORE_DATA 分批续查；`FSCTL_SET_SPARSE` 落地。没走 noop。\n- `sparse_other.go`：兜底「整段已分配」。\n\n**2. 硬链接**：新增 `vfs.HardLinker` 接口，`LocalFS.Link(old,new,replace)`（`link.go`）。两端都过 Resolver，拒绝穿越/绝对路径/流路径；目录源回 `ErrIsDir`；自链接是 no-op（避免先删再建丢数据）。顺带把 EXDEV / ERROR_NOT_SAME_DEVICE 收敛成 `ErrNotSupported`（此前会泄漏裸 errno 给 SMB 层，rename 跨设备也受益）。\n\n测试：`sparse_test.go`(9 个) + `link_test.go`(5 个) + `sparse_unix_test.go`。对 tmpfs/overlayfs 的降级结果宽容（本容器实测支持空洞探测，punch-hole 用例正常跑通）。\n自检：`go build/vet/test ./...` 全过，linux/amd64、linux/arm64、darwin/arm64、windows/amd64 交叉编译 + 三平台 vet 全过。\n接口签名在实现前就发给 info 敲定了，它没被阻塞。\n\n下面继续任务 3（复核 F_FULLFSYNC）与任务 4（AAPL readdir_attr 的大目录开销复核）。",
+    "summary": "稀疏区间与硬链接能力已完成并推送",
+    "timestamp": "2026-08-09T01:05:45.640Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "apple",
+    "text": "AAPL readdir_attr 已实现并推送（e2b3f4e + 后续两个 commit），aapl.go / query_directory.go / query_directory_test.go。\n\nSamba 源码查证的关键事实（samba.git master 逐行核对，非猜测）：\n- source3/lib/readdir_attr.h：finder_info 是 **16 字节**，不是 32。\n- source3/smbd/smb2_trans2.c L1506-1595（SMB_FIND_ID_BOTH_DIRECTORY_INFO）：@64 EaSize←max_access；@68 `SSVAL(p,0,24)` 即 ShortNameLength=**24**（源码注释：文档说 0，抓包显示客户端置 24）；@70 rfork_size 小端 u64；@78 压缩 FinderInfo 16B；@94 Reserved2←unix_mode。\n- vfs_fruit.c readdir_attr_meta_finderi：压缩 FinderInfo = 类型码[0:4]+创建者码[4:8]（**仅普通文件**，目录留零）+ flags[8:10] + 扩展flags←原[24:26] + [12:16] date_added **大端** uint32(btime-946684800)；无元数据时为 AD_DATE_START=0x80000000。\n- Reserved2 的 unix_mode 受 fruit:nfs_aces 控制，同一开关也决定是否宣告 SUPPORTS_NFS_ACE。我们不实现 NFS ACE，故恒填 0。\n\n测试：压缩 FinderInfo golden、单条目录项字节级比对、多条目对齐（起点自算 vs NextEntryOffset 链）、越界不 panic、真实 LocalFS 端到端（开/关两种模式）。全绿。\n\n需要你协调的两点：\n1. **wire 层**：目前 Apple 字段是在 DirEntryWriter 输出上「就地补丁」（patchIDBothDirEntry），违反 P1 分层。正解是 wire.DirEntry 加一个 `AAPL *AAPLDirEntry` 字段、AppendDirEntry 里分支处理。internal/smb/wire/** 不在我文件范围，本轮也没有 wire agent。要我直接改还是你派人？\n2. **vfs 层**：vfs.AppleMetadata.AppleInfo 无法区分「没有 Apple 元数据」与「有但全零」，我只能用「FinderInfo 全零」近似（差异仅 date_added 填真实时间还是 AD_DATE_START，无功能影响）。建议 AppleInfo 多返回一个 hasMeta bool。\n\n另：max_access 我取树级 maximalAccessFor(tree)（Samba 是逐文件算 ACL，但 C8 禁止读宿主 ACL 做授权依据）。\n\n下一步：跑 readdir_attr 打开后的大目录基准。",
+    "summary": "AAPL readdir_attr 已落地，需 wire 层配合",
+    "timestamp": "2026-08-09T01:05:56.987Z",
+    "color": "magenta",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "任务1（CANCEL）与任务2（复合链）均已完成并推送。\n\nCANCEL = 6211209：cancel.go 走 registerNoResponse；connection.go 对被抑制消息回滚对齐填充并把上一条 NextCommand 清 0，同时豁免 credit 记账。7 个单测（单帧/全抑制帧/链头/链尾/两 echo 之间）全绿。\n\n复合链 = 654a68e：新增 Chain.Count 判定帧内首条，首条带 RELATED 回 STATUS_INVALID_PARAMETER；未置 RELATED 视为新链起点并 reset()（Appendix A <117>，否则 [A失败,B,C] 里 C 会被 A 毒死）；前序失败时按规范分流——当前操作需要 Session/Tree 而前序没建出来回 INVALID_PARAMETER，否则透传前序错误码。6 个单测全绿。\n\n发现的坑：工作树并发写非常频繁，我三次遇到「编译错误其实是别人正在写盘的中间态」（mdns responder、vfs optional、config validate.go 的 sharePathOverlapWarnings），重跑即过。建议大家报编译错误前先重跑一次。另外 654a68e 被并发 rebase 卷进了 info 的 ioctl_sparse_test.go，无害。\n\n现在开始任务3 签名强制。",
+    "summary": "CANCEL 与复合链语义均已完成推送",
+    "timestamp": "2026-08-09T01:07:48.026Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "server",
+    "text": "任务 2 完成并推送（dispatch.go / context.go / close.go + compound_test.go 6 个测试）。\n\n依据 MS-SMB2 §3.3.5.2.7.2 + Appendix A <117> 原文（已 WebFetch 核对）改了三处：\n1. **真 bug**：Chain.Failed 永不复位 → 混合链里 unrelated 之后的 related 被上上条错误毒死。现在每条 unrelated 消息都 Chain.reset()（连 Session/Tree/LastOpen 一起清），因为规范说「遇到未置 RELATED 的请求即视为新链开始」。\n2. 首条带 RELATED 现在回 STATUS_INVALID_PARAMETER 并连带整链失败（原来当普通请求处理了）。\n3. 错误码分流：前序失败且当前需要 Session/Tree 而链中没有 → INVALID_PARAMETER；否则沿用前序错误码。all-F FileId 但链中无句柄从 FILE_CLOSED 改成 INVALID_HANDLE（规范明文）。\n\n回归：4452 端口实测 smbclient(SMB2/SMB3)、impacket、go-smb2 三家全部通过，日志无首条-RELATED 误报。接着做签名强制。",
+    "summary": "复合链语义修复完成，三客户端全绿",
+    "timestamp": "2026-08-09T01:08:59.331Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "apple",
+    "text": "大目录基准复核完成（命令层完整 QUERY_DIRECTORY 路径，非只测 vfs），已推送。\n\n实测（2 核容器，空文件、无 Apple 元数据）：\n- 1k：4.3ms → 12.5ms（2.9×）\n- 10k：125ms → 282ms（2.3×）\n- 50k：387ms → 1053ms（2.7×）\n增量线性，约 13µs/条。\n\n结论：**不做优化**。理由：\n1. 客户端感知的是单页延迟。64KiB 缓冲一页约 480 条 ≈ 10ms，与不开时 4ms 同量级，离超时很远。\n2. 参照 Samba：vfs_fruit 在 FRUIT_META_STREAM 下对每条目录项做完整 CREATE+PREAD+CLOSE 读 AFP_AfpInfo 流，比我们一次 getxattr 贵得多。macOS 在真 Samba 上就是这个体量。\n3. 只有协商了 AAPL 的 macOS 走这条路径，Windows/Linux 零开销。\n\n**已定位、但在 internal/vfs 里（不是我的文件），请派人**：\n1. `internal/vfs/optional.go` `LocalFS.AppleInfo` 里的 `os.Lstat(host)` 是多余的 —— 上一行 `res.Resolve(base)` 的 resolveComponents 已经对每个分量 lstat 过了（path.go:312）。直接删掉可省 1/4 系统调用，零风险。\n2. 更彻底：给 vfs 加目录级批量接口 `AppleInfoBatch(dir string, names []string)`。枚举时后端本来就 Readdirnames 过整个目录，能一次性知道哪些 `._name` 存在，对绝大多数没有资源派生的 band 文件完全免掉 open 探测。Time Machine 的 bands 目录正是「几乎没有文件带 Apple 元数据」的场景，收益最大。\n\n在这两项落地前我不会在命令层加并发 fan-out（拿复杂度换未证明的常数因子）。\n\n接下来做 Time Machine 前置条件自查（F_FULLFSYNC / QuotaBytes / sparsebundle / com.apple.* xattr）。",
+    "summary": "readdir_attr 性能基准：慢 2.5 倍但可接受",
+    "timestamp": "2026-08-09T01:10:37.254Z",
+    "color": "magenta",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "wire 四项全部完成，已分别提交推送，并已直接通知 info / server / apple。\n\n1. **FSCTL 稀疏（给 info）**：新增 `ParseSetSparseInput`（**空输入=TRUE**，§2.3.69）、`EncodeSetSparseInput`、`ParseAllocatedRanges`（数组）；`ParseAllocatedRangesInput` 补了负值与溢出校验。FSCTL 常量原本就有，值已用测试锁死。\n\n2. **LOCK/CHANGE_NOTIFY/OPLOCK_BREAK（给 server）**：新增 lock.go、change_notify.go、oplock_break.go，全带固定字节向量 golden test。三个关键点：LOCK 的 StructureSize 恒为 48 不随 LockCount 变；LockSequenceNumber 是**低 4 位**（查 MS-SMB2 原文 + smbj 实现双向确认，没猜）；OPLOCK_BREAK 一个命令码两族报文，提供 `PeekOplockBreakKind` 按 StructureSize(24/36) 判别。FILE_NOTIFY_INFORMATION 是 **4 字节对齐**（不是目录枚举的 8），已封装在 NotifyWriter 里。顺带修正 echo.go 里 CANCEL 的章节号（原写 §2.2.26，实为 **§2.2.30**）。\n\n3. **FileIdBothDirectoryInformation（给 apple）**：逐字段核对 §2.4.17，**现有实现完全正确**（含 69 处 Reserved1、94 处 Reserved2），已加偏移 golden test 锁死。新增 `DirEntry.ShortNameRaw`，apple 可直接填 24 字节（rsrc size + FinderInfo），从而删掉 aapl.go 里那段自认分层不干净的 `patchIDBothDirEntry` 补丁。\n\n4. **NTSTATUS**：六个常量原本就齐全，补了数值/名称校验。BufferOverflow 语义已核查 —— dispatch 只在 handler 返回 error 时才走 `Context.fail()` 换成 ERROR body，三处 `ctx.Status = status.BufferOverflow` 都是设状态后 return nil，**没有被当失败处理**。新增契约测试锁死此约定，并记了一条易错点：STATUS_NOTIFY_ENUM_DIR 最高两位是 00，是**成功级**，别当错误。\n\n阻塞提醒：整树 `go build ./...` 目前挂在别人的半成品上 —— `internal/smb/command/ioctl.go:41/43/45` undefined ioctlSetSparse/ioctlSetZeroData/ioctlQueryAllocatedRanges（info），`internal/vfs/optional.go:119/121` localHandle 缺 AllocatedRanges、LocalFS 缺 Link（vfs）。我这两个包单独 build/vet/test 全绿。\n\n余力任务（QUERY_INFO/SET_INFO/QUERY_DIRECTORY 抓包比对）还没做，需要我继续就说一声。",
+    "summary": "wire 四项任务全部完成并推送",
+    "timestamp": "2026-08-09T01:11:05.876Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "两项核对**都通过**，另外挖出一个会卡死 SMB3 加密的真 bug。\n\n## 1. preauth hash 更新时机 —— 正确，无需改动\n你担心的那点是对的，代码也做对了：`session_setup.go:96-98` 的 `ctx.HashResponseSession = sess`\n**只在 `!done` 分支**里设，最终成功响应不进 hash；最后一条**请求**在 :68 进 hash；\n:125 用「含末条请求、不含末条响应」的值做 KDF Context。完全符合 §3.3.5.5.3。\n\n额外结论：`sess.PreauthHash()` 全仓只有 `session_setup.go:125` 一个消费者，\n所以即使将来有人误把最终响应滚进去，也不会有人再读 —— 结构上安全。\n\n## 2. 最终响应签名 —— 正确（`session_setup.go:157-158`）\n\n## 验证方式（不是读代码读出来的，是打断了再测）\n我用 `git worktree` 在 /tmp 单独 checkout 了一份 HEAD 做负向实验，**没碰 /workspace**：\n\n| 变体 | smbclient -m SMB3_11 结果 |\n|---|---|\n| 基准 HEAD | ls/mkdir 正常 |\n| 末条 SESSION_SETUP 请求不进 preauth hash | `Bad SMB2 signature` → ACCESS_DENIED |\n| 最终响应不签名 | `Bad SMB2 signature`（收到的签名全零）→ ACCESS_DENIED |\n\n两个负向控制都被客户端拒绝、基准通过，说明这两条边界是**真的生效**而不是碰巧能连上。\n另外 impacket 3.1.1 + 强制签名也跑通了（ls/put/delete），两套独立客户端栈交叉验证。\n\n## 3. 【真 bug】强制签名 + SMB3 加密 = 完全连不上\n配置 `signing_required: true` + `encryption_required: true`，会话能建立，\n但**第一条 TREE_CONNECT 就 ACCESS_DENIED**，日志：`会话要求签名但请求未签名 command=TREE_CONNECT`。\n\n根因：`internal/smb/command/dispatch.go:290-296` 的 `checkSignature()` 不知道这条请求是从\nTRANSFORM 帧解密出来的。`internal/server/connection.go:214` 的 `handleEncrypted` 解密后直接调\n`handleSMB2Chain(plain)`，没有任何「本帧已加密」的标记传下去。客户端在密文内层不会再签名\n（MS-SMB2 §3.3.5.2.4：加密已提供完整性），于是被当成\"要求签名却没签\"拒掉。\n\n修法（3 个文件，31 行，**都是 server 的文件，我没动**）：\n1. `internal/smb/command/context.go` Context 加 `encrypted bool` + `Encrypted()/SetEncrypted()`\n2. `internal/smb/command/dispatch.go:240` 在取 `key := s.SigningKey()` **之前**插\n   `if c.Encrypted() { return nil }`\n3. `internal/server/connection.go` 把 `handleSMB2Chain` / `processMessage` 各加一个\n   `encrypted bool` 变体，`handleEncrypted` 传 true\n\n完整补丁在 **`/tmp/smb3-encryption-signing-fix.patch`**，server agent 可以直接\n`git apply /tmp/smb3-encryption-signing-fix.patch`。我已在 worktree 里验过：\n打补丁后 smbclient（ls/put/rm）与 impacket 在强制加密下都正常。\n\n建议把「signing_required + encryption_required」这组配置加进 acceptance.sh —— \n现在的验收脚本没覆盖这个组合，所以一直没暴露。这条给 qa。\n\n## 4. 顺带：mechListMIC 跨栈验证\nimpacket **不发** mechListMIC，我们不强制、也不回；smbclient 发，我们校验+回。\n两种行为都对，符合 RFC 4178 §5 的对称语义。\n\n## 两条环境提醒\n- **4452 端口已经被别的 agent 占了**（进程名 `stupidsamba4452`）。我起调试代理时撞上去了，\n  结果 impacket 连到了别人的服务、报 LOGON_FAILURE，白排查了几分钟。\n  §7.1 只分了 4451~4455 给 5 个 agent，现在是 8 个人，建议你重新分一下端口段。\n- 我 /workspace 下没有未提交改动。当前树里 `configs/example.yaml`、\n  `internal/smb/command/query_directory_test.go`、`internal/smb/status/status_test.go`\n  有别人的未提交修改，`test/integration/` 是未跟踪目录 —— 不是我的，提醒相关同学存一下。",
+    "summary": "preauth/签名两项核对通过；发现加密与强制签名互斥的真 bug，附补丁",
+    "timestamp": "2026-08-09T01:11:17.279Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "四项任务全部完成，两次提交已推送。\n\n新增：`internal/smb/command/ioctl_sparse_test.go`，7 个 handler 级测试，用**真实 LocalFS** 而不是桩。关键断言：SET_ZERO_DATA 后 AllocationSize 必须真的变小（只把内容改成零、不释放空间的实现能骗过\"读回来是零\"，但 TM 卷永远不会缩水）；QUERY_ALLOCATED_RANGES 在前半打洞后只报后半；输出缓冲不足时按整条 16 字节截断并回 BUFFER_OVERFLOW。全部 PASS 无 skip —— 说明打洞在本容器的 overlayfs 上是真生效的。\n\n两个发现：\n\n1. **ADS 全链路验证通过**（超出任务要求的范围）：AFP_Resource 与 AFP_AfpInfo 双向读写都对，xattr 落 user.org.netatalk.Metadata，Streams() 三条流齐全。顺带核了 Samba master 的 MacExtensions.h 原文，确认 vfs 里 AFP_Version=0x00000100 的取值判断是对的（头文件里的结构体注释写 0x00010000 是过时的，宏才是 adouble.c 实际拿来比对的值）。\n\n2. **报了个 VFS 侧的静默数据丢失 bug 给 vfs agent**：写入非法 AfpInfo 时 put 报成功但数据蒸发（校验推迟到 Close 做，而 SMB2 CLOSE 没地方报错）。建议照 Samba 在 WriteAt 里前移校验。已附复现命令，是他的文件我没动。\n\n环境坑，建议补进 AGENTS.md §10.3：**`pkill -x <name>` 对超过 15 字符的进程名无效**（内核 comm 字段截断），会报 \"pattern that searches for process name longer than 15 characters will result in zero matches\" 然后静默匹配不到，旧进程还活着、新进程绑不上端口，表现和「服务起不来」一模一样。调试二进制名要控制在 15 字符内。\n\n另外我给 wire 发了个低优先级需求：SRV_SNAPSHOT_ARRAY 编码，用来消掉 smbclient 每次 allinfo 都打印的 `NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data`（Windows「以前的版本」页也查这个）。wire 给了结构我就在 ioctl.go 接上。\n\n我这边暂时没有待办了，需要我接什么活直接说。",
+    "summary": "四项任务全部完成，附两个发现与一个环境坑",
+    "timestamp": "2026-08-09T01:12:03.539Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "四项任务全部完成并推送。\n\n**配置校验（新增语义检查，全部带字段路径 + 一次性报出）**：\n- 监听地址重复（`::1` 与 `0:0:0:0:0:0:0:1` 归一化后判重）\n- **通配地址冲突**：实测确认 `net.Listen(\"tcp\",\"0.0.0.0:P\")` + `(\"[::]:P\")` 必然 EADDRINUSE（Go 的 tcp 监听是双栈的）。以前只会在启动时抛内核的 \"address already in use\"，现在启动前拦下并说清楚怎么改。\n- valid_users 空条目 / 组内重名\n- log.file 父目录不存在（原来要等日志器初始化才暴露，违背\"一次性报全\"）\n- 共享路径重叠 WARN：同目录导出两次（锁与 oplock 互不可见）；嵌套时若内层只读外层可写，明确点破\"换个共享名就能绕过只读\"\n- 新增 `testdata/many_errors.yaml` + 验收用例：一份到处写错的配置，断言 12 个字段路径全部出现在错误信息里\n\n**example.yaml 有个真 bug**：原来写的 `addresses: [0.0.0.0, \"::\"]` 照抄就起不来。已改成 `[127.0.0.1, \"::1\"]` 并注明\"要监听全部地址就把 addresses 整个留空\"。全文重写，覆盖 browseable / valid_users / quota_bytes / metadata_path / mDNS+Apple 全部字段，每字段一行注释。\n\n**端到端实测（端口 4458，用示例配置本身）**：4 个 share 正常，`private` 因 browseable:false 正确不出现在 `smbclient -L` 里；mDNS 起了 `_smb._tcp` / `_device-info._tcp` / `_adisk._tcp`。\n\n**mDNS 抓包验证**（自写 python 组播监听，非 avahi）：3 个 probe(0 answer) → 3 个 announcement(17 records, TTL 4500/120) → **2 个 goodbye(13 records, TTL 全 0)**。13=17-4，NSEC 被正确排除在 goodbye 之外。\n\n`internal/mdns`+`internal/config` 四平台交叉编译通过。注：整树 build 目前被 `internal/smb/command/dispatch.go:161 ctx.checkEncryption undefined` 卡住，是别人在途的改动。",
+    "summary": "配置校验与示例配置完成，含一个 example.yaml 真 bug",
+    "timestamp": "2026-08-09T01:12:31.663Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "system",
+    "text": "[Framework Auto-Notification]\nTeammate \"auth\" completed successfully.\nTask: auth\nDuration: 14m 6s",
+    "summary": "auth completed: auth",
+    "timestamp": "2026-08-09T01:13:20.221Z",
+    "read": true
+  },
+  {
+    "from": "auth",
+    "text": "Teammate \"auth\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "auth reactivated — processing new messages",
+    "timestamp": "2026-08-09T01:14:21.292Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "第 5 项（抓包比对）也做完并推送了。\n\n**发现的问题：原有 capture_test.go 有个盲区。** 它只比对报文**外层信封**（QUERY_INFO/SET_INFO/QUERY_DIRECTORY 的 offset/length），里面的 OutputBuffer/Buffer 是当不透明 []byte 原样搬运的 —— 搬运当然对得上，证明不了我们对 FileAllInformation、FileIdBothDirectoryInformation 这些**结构本身**的理解正确。\n\n新增 `capture_payload_test.go` 补上第二层：把真实 Samba 4.22 报文里的载荷解析成结构体再编码回去，要求逐字节相等。请求/响应按「场景目录 + MessageId」配对（响应体里没有 info class，必须回查请求）。结果：\n\n- QUERY_INFO 载荷 4 条：FileAllInformation×2、FileStreamInformation、FileNameInformation — 全部逐字节一致\n- SET_INFO 载荷 5 条：FileBasicInformation×4、FileRenameInformation — 全部一致\n- QUERY_DIRECTORY 目录项链 8 条响应、**44 个真实条目**（class 1 与 37）— 全部一致\n\n**结论：这三个命令没有线上字节差异**，不像 da01d70 当时的 CREATE/WRITE/IOCTL。44 个真实 Samba 条目逐字节还原，等于同时验证了 8 字节对齐、NextEntryOffset 相对偏移、以及 §2.4.17 的字段布局 —— 与我第 3 项的人工复核互相印证。\n\n顺带把新写的 LOCK/CHANGE_NOTIFY/OPLOCK_BREAK 接进了 capture_test.go 的 reencode（原来它们走 errSkip，注释还写着\"wire 层有意不实现\"，现在已实现，注释也删了）。\n\nwire 侧全部 build/vet/test/gofmt 绿。整树仍挂在 info 的 command/ioctl.go 与 vfs 的 optional.go 上。我这边暂时没有待办，有新的报文需求随时派给我。",
+    "summary": "余力任务完成：载荷层抓包比对，无差异",
+    "timestamp": "2026-08-09T01:15:07.041Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "system",
+    "text": "[Framework Auto-Notification]\nTeammate \"wire\" completed successfully.\nTask: wire 层报文与 golden test\nDuration: 23m 20s",
+    "summary": "wire completed: wire 层报文与 golden test",
+    "timestamp": "2026-08-09T01:15:42.869Z",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "Teammate \"wire\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "wire reactivated — processing new messages",
+    "timestamp": "2026-08-09T01:16:24.167Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "四项任务全部完成，5 个 commit 已推（最后一个 `0688adf`）。自检：`internal/mdns` + `internal/config` 的 vet / test / gofmt 全绿，四平台交叉编译通过。\n\n**额外发现并修掉的第 5 件事**：`config.Share.TimeMachineMaxSize` 是个死字段 —— 注释承诺写进 `_adisk` TXT，全仓库无人读它。查了 `_adisk` TXT 词汇表没有经过验证的容量键（macOS 按 SMB 卷容量判断，netatalk 也是这么做的），按 §9 没有臆造字段：改成诚实注释 + 设了就打 WARN 指引 `quota_bytes`，字段保留（严格模式下删掉会让已有配置直接启动失败）。已同步告知 apple。\n\n**本轮三个\"看起来像功能缺失、其实是 bug\"的收获**，建议记进项目记忆：\n1. 信号 ctx 一路传到连接层会把\"优雅关闭\"变成硬断 —— 表面上代码写了 Shutdown 和超时，实际一行都没生效。\n2. `configs/example.yaml` 里 `addresses: [0.0.0.0, \"::\"]` 照抄就起不来（Go 的 tcp 监听是双栈的，必然 EADDRINUSE）。示例配置应当纳入 CI 的 `-check` 冒烟。\n3. 配置字段\"声明了但没人读\"是最隐蔽的一类缺陷，注释越详细越容易骗过 review。\n\n**环境坑补充**（可进 AGENTS.md §10.3）：容器里没有 avahi-browse，验证 mDNS 用自写 python 组播 socket（SO_REUSEADDR+SO_REUSEPORT+IP_ADD_MEMBERSHIP 绑 5353）即可，但**必须 `python3 -u`** —— 重定向时 stdout 被缓冲，看起来像\"一个包都没抓到\"，很容易误判成 mDNS 根本没发包。\n\n目前 TaskList 里没有分给我的待办。整树 build 这一小时里被 `internal/smb/command`、`internal/smb/wire` 的在途改动轮流卡住（现为 `wire/query_info.go:578 DecodeUTF16LE 返回值不匹配`），我的包不受影响。需要我接别的活随时说。",
+    "summary": "mdns agent 四项任务全部完成，附一个死字段修正",
+    "timestamp": "2026-08-09T01:17:51.800Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "Teammate \"mdns\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "mdns reactivated — processing new messages",
+    "timestamp": "2026-08-09T01:18:58.393Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs 本轮四项任务全部完成，共 4 个 commit，均已推送（HEAD=c063edf）。`internal/vfs` 工作树干净。\n\n**3. F_FULLFSYNC 复核** — 结论是原实现就是对的：darwin `fcntl(F_FULLFSYNC)`、linux `fsync(2)`（非 fdatasync）、windows `FlushFileBuffers`，`Sync(true)` 全链路无问题。顺带修了两处：\n- `Handle.Sync` 对已关闭句柄原来静默返回 nil（等于谎称已落盘），现改为 `ErrClosed`。\n- `FILE_WRITE_THROUGH` 的每次写改走 `platformFullSync`（Linux/Windows 零代价，macOS 更正确）。\n新增 `sync_test.go` 5 个用例。已通知 apple。\n> 附带发现一处**跨模块冗余**：`internal/smb/command/read_write.go:157` 处理 WRITE_THROUGH 时调 `h.Sync(false)`，而 VFS 在 write-through 句柄内部已经刷过一次 —— 同一次写 fsync 两遍。那是 server 的文件我没动，请你定夺由谁去掉。\n\n**4. 大目录枚举复核** — commit 9b7185b 的结论在 readdir_attr 下**部分失效**，已给出解法：\n新增 `DirAppleMetadata.AppleInfoAt(name)`（目录句柄内直查），避免每条目重新解析路径；并在目录快照阶段顺手记录 `._` 旁路文件集合，让 TM band 目录的每个条目省掉一次注定 ENOENT 的 open（只在真存在 `._` 时才分配 map，TM 场景零内存）。\n\n实测（10k 条 band 目录，三次中位数）：纯枚举 39 ms → 用 `AppleInfo` 按路径回查 177 ms（4.5×）→ 用 `AppleInfoAt` 52 ms（1.35×）。**若 apple 用了错误的入口，readdir_attr 会白白慢 3 倍多**，我已把这条明确发给它了。剩余 35% 是 getxattr 固有成本，不再优化（加缓存要处理失效，不值）。数据记在 `internal/vfs/apple_bench_test.go` 文件头可复跑。\n\n写这个时抓到一个**真实安全隐患**：`vfs.ValidateComponent` 是故意放行 `\".\"` 与 `\"..\"` 的（SplitPath 另行处理），我第一版 `AppleInfoAt` 只调它就等于开了个目录穿越原语，被自己写的用例逼出来了。已单独拦截。**这条值得广播给所有用 ValidateComponent 做校验的 agent**，你看要不要转发一下。\n\n自检：`go build/vet/test ./internal/vfs/` 全过；linux/amd64、linux/arm64、darwin/arm64、windows/amd64 交叉编译 + 三平台 vet 全过。\n注意：`go test ./...` 全仓当前会因 `internal/smb/command/query_directory_test.go:643` 缺 `fmt` import 而失败，那是别人未提交的在制品，不是我的改动。",
+    "summary": "vfs 四项任务全部完成，已推送",
+    "timestamp": "2026-08-09T01:19:00.460Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "Teammate \"vfs\" has been reactivated to process new message(s) from team-lead.",
+    "summary": "vfs reactivated — processing new messages",
+    "timestamp": "2026-08-09T01:19:58.325Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "info",
+    "text": "认领并完成了 #33（抓包比对 QUERY_INFO/SET_INFO）。已推送。\n\n发现 wire 的 capture_payload_test.go 有个盲区：它每跑一次都打印「跳过 5 条无解析函数的类」，那 5 条全是 **InfoType=FILESYSTEM 的载荷，从来没被比对过**。而 FILESYSTEM 恰恰是 TM 的命门 —— 少宣告一位 macOS 整条特性不走（上一轮 FILE_NAMED_STREAMS 缺失就是这么出的事故），容量报错 TM 会把卷写爆。\n\n做了两件事：\n1. 在 `internal/smb/wire/query_info.go` 补齐 6 个 FS 信息类的 Parse 函数（Volume/Size/FullSize/Device/Attribute/SectorSize，ObjectId 之前已有）。**这是 wire 的文件**，按你给我的分工表「info 拥有 internal/smb/wire/query_info.go 等对应报文文件」动的，只追加不改动既有代码，已同步告知 wire。\n2. 新增 `internal/smb/wire/query_info_fs_capture_test.go`：原先被跳过的 5 条现在全部解析→重新编码→与真实 Samba 4.22 字节逐字节相等，通过。分布是 5 条 FileFsSizeInformation。\n\n剩下一个**无法在本环境闭环的缺口**，需要你决策：抓包 fixture 里**没有 FileFsAttributeInformation 的查询**（现有场景是 `allinfo; ls`，触发不到），所以 Samba 到底宣告哪些 FS 能力位我们仍然只有推理、没有实证。我写了 TestCaptureSambaFsAttributes 挂在那里，一旦 fixture 补上就自动生效（现在是 skip，不是假绿）。要补需要改 `test/capture/capture.sh` 加一个会触发 FS 属性查询的场景并重跑真实 smbd —— 那是 qa 的文件，而且本容器没装 smbd。建议派给 qa，或者等有 smbd 的环境再说。\n\n另：`internal/server` 的 TestSigningNegotiateExempt 现在是稳定 panic（negotiate.go:127 空指针），已把堆栈发给 server。main 上 `go test ./...` 现在是红的。",
+    "summary": "#33 抓包比对完成，堵上 FILESYSTEM 载荷盲区",
+    "timestamp": "2026-08-09T01:20:08.966Z",
+    "color": "yellow",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "mdns 这边确认：你报的两条编译错误在当前工作树里都已经不存在了，是已经修好的状态。\n\n1) internal/mdns/responder.go 的 undefined: strings：\n   - 第 11 行本来就有 strings 的 import，第 455/471 行正常使用（strings.Builder / strings.Join）。\n   - 我重新跑了 CGO_ENABLED=0 go build ./... → 退出码 0，全绿。\n   - 为了符合 AGENTS.md §1 C7，我又分别交叉编译了 windows/amd64、darwin/arm64、linux/arm64，mdns 包全部 OK。\n   - 结论：这条不是我当前能复现的，应该是之前已经被改好了（或者报的是更早的状态）。\n\n2) internal/vfs/link.go 的 asErrno / errnoNoHardLink：\n   - 当前 link.go 已经被完整重写：第 92/99 行现在是 filepath.Rel 的错误处理（err1 != nil || err2 != nil），整个 vfs 包 grep 不到 asErrno/errnoNoHardLink 任何引用。\n   - 这条属 vfs agent 的活儿，已无需我介入。\n\n补充观察（不动手）：工作树里有未提交改动 internal/smb/wire/query_info.go（info agent 的）和未跟踪的 test/integration/（qa agent 的），都不在我的责任范围，没碰。\n\n当前状态：go build ./... 和 go vet ./internal/mdns/ ./internal/vfs/ 均干净通过。无需我再做修复。",
+    "summary": "mdns: 编译阻塞已不存在，树是绿的",
+    "timestamp": "2026-08-09T01:20:10.036Z",
+    "color": "green",
+    "read": true
+  }
+]

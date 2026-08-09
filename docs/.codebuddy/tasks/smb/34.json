@@ -1,0 +1,9 @@
+{
+  "subject": "核对 SMB3.1.1 negotiate contexts 协商与边界",
+  "description": "PREAUTH_INTEGRITY / ENCRYPTION / SIGNING_CAPABILITIES：算法优先级选择、无交集必须 STATUS_NOT_SUPPORTED 不得静默降级、HashAlgorithmCount/非 SHA-512 拒绝、salt ≥32 且来自 crypto/rand、DataLength 不符不 panic。",
+  "activeForm": "核对 negotiate contexts 协商与边界",
+  "status": "pending",
+  "id": "34",
+  "createdAt": 1786238078317,
+  "updatedAt": 1786238078317
+}

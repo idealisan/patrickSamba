@@ -1,0 +1,10 @@
+{
+  "subject": "实现 AAPL readdir_attr 目录项编码",
+  "description": "按 Samba source3/smbd/smb2_trans2.c 的 SMB_FIND_ID_BOTH_DIRECTORY_INFO 分支实现 readdir_attr：EaSize=max_access、ShortName 区放 rfork_size+压缩 FinderInfo。带 golden test。",
+  "activeForm": "实现 AAPL readdir_attr 目录项编码",
+  "status": "completed",
+  "id": "27",
+  "createdAt": 1786237018224,
+  "updatedAt": 1786237531014,
+  "owner": "apple"
+}

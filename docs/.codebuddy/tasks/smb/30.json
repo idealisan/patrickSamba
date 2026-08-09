@@ -1,0 +1,9 @@
+{
+  "subject": "核对 SMB3.1.1 preauth integrity hash 更新时机",
+  "description": "MS-SMB2 §3.3.5.5.3：SESSION_SETUP 成功那一条响应不应再更新 preauth hash。核对 internal/smb/crypto/preauth.go 与 server 侧调用点。",
+  "activeForm": "核对 preauth hash 更新时机",
+  "status": "completed",
+  "id": "30",
+  "createdAt": 1786237353141,
+  "updatedAt": 1786237832247
+}

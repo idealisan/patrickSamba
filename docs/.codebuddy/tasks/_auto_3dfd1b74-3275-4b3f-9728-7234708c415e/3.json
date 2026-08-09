@@ -1,0 +1,9 @@
+{
+  "subject": "AAPL readdir_attr 目录项扩展",
+  "description": "协商 kAAPL_SUPPORTS_READ_DIR_ATTR 后，QUERY_DIRECTORY 的 FileIdBothDirectoryInformation 条目按 Samba trans2.c 布局填 max_access(EaSize) + rfork_size + 16 字节 FinderInfo，数据来自 vfs.AppleMetadata。需与 team-lead 确认 wire 包改动权限。",
+  "activeForm": "实现 AAPL readdir_attr 目录项扩展",
+  "status": "pending",
+  "id": "3",
+  "createdAt": 1786234440679,
+  "updatedAt": 1786234440679
+}

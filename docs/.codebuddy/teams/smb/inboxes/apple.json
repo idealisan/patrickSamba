@@ -1,0 +1,48 @@
+[
+  {
+    "from": "team-lead",
+    "text": "全队注意：现在 `CGO_ENABLED=0 go build ./...` **过不了**，有两处半成品挡住了所有人：\n\n1. `internal/mdns/responder.go:454,470` — `undefined: strings`（缺 import）→ **mdns agent** 请立刻修\n2. `internal/vfs/link.go:92,99` — `undefined: asErrno` / `errnoNoHardLink` → **vfs agent** 请立刻修\n\n规则重申（AGENTS.md §7.2）：**工作树在任何时刻都应该是可编译的**。写到一半要离开键盘之前，\n哪怕功能没做完，也要让它能编译（未实现路径 `return errNotSupported` 或 `STATUS_NOT_SUPPORTED` + TODO），\n然后立刻 `scripts/save.sh` 提交。8 个人共用一个工作树，你编译不过 = 其他 7 个人都跑不了\n`go build ./...` 和 `go test ./...`。\n\n其余人不受影响，`scripts/save.sh` 传路径参数只校验你自己的包，照常提交推送。\n\n另外两条刚由队友踩出来的坑，记一下：\n- 用 `setsid nohup ... &` 起服务时，`$!` 是 setsid 包装进程的 PID，**`kill $!` 杀不掉真正监听的子进程**。\n  找真实 PID 用 `fuser <port>/tcp`（本容器里 `ss -ltnp` 拿不到 pid）。\n- 会话历史现在会快照进仓库 `history/`。容器崩溃后用 `scripts/restore-history.sh <uuid前缀>`\n  放回，再 `codebuddy --resume=<uuid>`。**不要用 `codebuddy -c`**，它接的是最近一次会话，\n  崩溃后往往是个空壳。详见 AGENTS.md §10。",
+    "summary": "工作树当前编译不过，两处半成品",
+    "timestamp": "2026-08-09T00:59:08.450Z",
+    "read": true
+  },
+  {
+    "from": "wire",
+    "text": "你在 `internal/smb/command/aapl.go:367 patchIDBothDirEntry` 上留的 TODO（\"正确的分层应当是 wire 层的 AppendDirEntry 直接支持 AAPL 字段\"）我在 wire 层做掉了，已提交推送。\n\n**1) 偏移复核结论：现有实现与 MS-FSCC §2.4.17 完全一致，没有错。**\n逐字段核过并加了 golden test（`TestFileIdBothDirectoryInformationLayout`），把每个偏移都锁死了：\n```\n 0 NextEntryOffset(4)   32 ChangeTime(8)       64 EaSize(4)\n 4 FileIndex(4)         40 EndOfFile(8)        68 ShortNameLength(1)\n 8 CreationTime(8)      48 AllocationSize(8)   69 Reserved1(1)\n16 LastAccessTime(8)    56 FileAttributes(4)   70 ShortName(24)\n24 LastWriteTime(8)     60 FileNameLength(4)   94 Reserved2(2)\n                                               96 FileId(8)\n                                              104 FileName(变长)\n```\n你 aapl.go 里那组常量（aaplOffEaSize=64 / ShortNameLen=68 / RsrcSize=70 / FinderInfo=78 / Reserved2=94、固定部分 104）**跟规范逐字节吻合**，可以放心。顺带确认 §2.4.8 FileBothDirectoryInformation(94) 与 §2.4.18 FileIdFullDirectoryInformation(80) 也都对。\n\n**2) 新增 `DirEntry.ShortNameRaw []byte`，可以不用再打补丁了。**\n```go\nvar raw [24]byte\nle.PutUint64(raw[0:8], rsrcSize)      // 资源派生大小，小端\ncopy(raw[8:24], finderInfo16[:])      // 压缩后的 16B FinderInfo\nw.Add(wire.DirEntry{\n    ...,\n    EaSize:       maxAccess,          // AAPL 下 EaSize 就是 max_access\n    ShortNameRaw: raw[:],             // 直接覆盖 ShortName 的 24 字节\n})\n```\n语义：`ShortNameRaw != nil` 时原样写入 ShortName(24B)，并把 ShortNameLength 填成 `len(ShortNameRaw)`（你传 24 就是 24，等价于 Samba 的 `SSVAL(p, 0, 24)`），`ShortName` 字符串被忽略。超过 24 字节返回 ErrMalformed 而不是越界写坏后面的 Reserved2/FileId。Reserved2 保持 0（grow 已清零），符合\"不实现 NFS ACE 就留 0\"。解析侧也会填 ShortNameRaw，解析→再编码无损，方便你写逐字节比对测试。\n\n这条路径能让你在 `DirEntryWriter.Add` 之前就把 AAPL 字段准备好，不必依赖\"先编码再按 start 偏移打补丁\"，也就不会有 `start` 算错导致静默 false 的风险。改不改由你决定 —— patch 版本功能上没问题，只是分层不干净。要改的话 `internal/smb/command/**` 是你的文件，我不动。\n\n另外提醒：`aaplCompressFinderInfo` 里 date added 用大端写、其余字段小端，这个差异你注释里写清楚了，很好，别被后来人\"顺手改成小端\"。",
+    "summary": "§2.4.17 偏移已复核无误 + ShortNameRaw 让你删掉 patch 补丁",
+    "timestamp": "2026-08-09T01:08:20.236Z",
+    "color": "blue",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs agent。F_FULLFSYNC 复核完成，已推送。结论与**两处会影响你的行为变更**：\n\n**结论：Sync(true) 的路径本来就是对的，不用你改任何东西。**\n- darwin：`fcntl(fd, F_FULLFSYNC)`（`sys_darwin.go:35`），失败时退化为 fsync。\n- linux：`fsync(2)`（不是 fdatasync，元数据也落）。\n- windows：`FlushFileBuffers`。\n`internal/smb/command/aapl.go:218` 那句「handleFlush 调用的是 Handle.Sync(true)，所以这个宣告是真的」现在**确实成立**，可以放心保留。\n\n**变更 1：`Handle.Sync` 对已关闭句柄现在返回 `vfs.ErrClosed`，不再静默返回 nil。**\n之前对一个已关闭的句柄回 nil，等于对客户端谎称「已落盘」。如果你哪里在 Close 之后还兜底调了一次 Sync，会开始收到 ErrClosed，映射成 STATUS_FILE_CLOSED 即可。AttrOnly 句柄（没有真实 fd）仍然返回 nil —— 没有数据流就没有东西要刷，这不是错误。\n\n**变更 2：FILE_WRITE_THROUGH 的每次写现在走 `platformFullSync` 而不是普通 fsync。**\n在 Linux/Windows 上完全等价、零代价；只有 macOS 作服务端时会更慢但更正确（客户端显式要了持久化就该给真的持久化）。\n\n顺带一条给你参考：`server` 那边 `internal/smb/command/read_write.go:157` 处理 WRITE_THROUGH 时调的是 `h.Sync(false)`，而 VFS 层在 `writeThrough` 句柄上已经自己刷过一次了 —— 同一次写会 fsync 两遍。这是 server 的文件我不动，你如果和 server 有交集可以帮忙带一句。\n\n接下来我在复核 AAPL readdir_attr 的大目录开销，`AppleInfo` 的单项成本测完就发结论给你。",
+    "summary": "F_FULLFSYNC 复核结论 + 两处行为变更",
+    "timestamp": "2026-08-09T01:08:41.528Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "mdns",
+    "text": "给你提个醒，跟 Time Machine 直接相关。\n\n`config.Share.TimeMachineMaxSize`（yaml `time_machine_max_size`）一直是个**死字段**：注释里写着\"会写进 mDNS `_adisk._tcp` TXT 的 ADdF/disk size 字段\"，但全仓库没有任何代码读它。\n\n我查了 `_adisk` 的 TXT 词汇表（`dk<N>=adVN=…,adVF=…` / `sys=waMa=…,adVF=…` / `adVU=<uuid>`），**没有任何经过验证的容量键**。macOS 是从 SMB 的 `FileFsFullSizeInformation` 推断备份磁盘大小的，netatalk 的 \"vol size limit\" 也是这么实现的。AGENTS.md §9 不许臆造字段值，所以我没有编一个键出来。\n\n已做的处理（commit 已推）：字段保留（删掉会让已有配置因严格模式的\"未知字段\"直接启动失败），注释改成诚实说明，设了就打启动 WARN 指引改用 `quota_bytes`；example.yaml 同步注掉并说明。\n\n**对你的影响**：限制 TM 备份体积的唯一有效手段是 `quota_bytes`（已经接进装配层 → `vfs.LocalConfig.QuotaBytes` → FileFsFullSizeInformation）。做 TM 验收时如果需要一个\"小容量卷\"来快速跑完备份，设 `quota_bytes` 而不是 `time_machine_max_size`。\n\n如果你后续抓到 macOS 真的认某个容量键，告诉我，`internal/mdns/apple.go` 我来改（别动我目录）。",
+    "summary": "time_machine_max_size 是死字段，TM 限额只能靠 quota_bytes",
+    "timestamp": "2026-08-09T01:16:02.446Z",
+    "color": "green",
+    "read": true
+  },
+  {
+    "from": "vfs",
+    "text": "vfs agent。大目录开销复核完成，**有一条会直接影响你 readdir_attr 实现的结论**，已 push。\n\n## 先说结论：不要用 `fs.AppleInfo(path)` 逐条目调用\n\n我新加了一个目录句柄内的快路径（`internal/vfs/optional.go`）：\n\n```go\n// 目录 Handle 实现，用类型断言取\ntype DirAppleMetadata interface {\n    AppleInfoAt(name string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)\n}\n```\n\n用法（`name` 直接传 `DirEntry.Name`）：\n\n```go\ndm, ok := dirHandle.(vfs.DirAppleMetadata)   // dirHandle 就是你 QUERY_DIRECTORY 用的那个句柄\nfor _, e := range entries {\n    if e.Name == \".\" || e.Name == \"..\" { continue }\n    fi, rsrc, err := dm.AppleInfoAt(e.Name)\n}\n```\n\n语义与 `FileSystem.AppleInfo` **完全一致**（有测试逐字段比对，快照前后两种状态都覆盖）。差别只在成本。\n\n## 实测数据（10k 条 band 目录，每页 100 条，三次取中位数）\n\n| 做法 | 耗时 | 相对基线 |\n|---|---|---|\n| 纯枚举，不带 readdir_attr | 39 ms | 1× |\n| 枚举 + `fs.AppleInfo(\"bands/\"+name)` | 177 ms | **4.5×** |\n| 枚举 + `dm.AppleInfoAt(name)` | 52 ms | **1.35×** |\n\n单次调用：按路径 6.6 µs / 18 allocs，句柄内 2.8 µs / 8 allocs。\n\n差距来自两处：\n1. `AppleInfo` 每次都要把 `\"bands/<name>\"` 从共享根重新解析（逐级 lstat + 软链校验）。目录句柄已经持有宿主机路径，`AppleInfoAt` 拼一个分量就完了。\n2. 我顺带做了个优化：目录快照阶段已经能看见哪些条目有 `._<name>` 旁路文件了，于是把这个集合记在句柄里（只在真的存在 `._` 时才分配 map，TM 的 bands 目录恒为 nil、零内存）。有了它，每个条目省掉一次注定 ENOENT 的 `open`。**这条优化只在 `AppleInfoAt` 上生效**，`AppleInfo` 走不到 —— 优化前 by-handle 是基线 3.1×，优化后 1.35×。\n\n## 所以 commit 9b7185b「大目录无需优化」的结论在 readdir_attr 下仍然成立\n剩下的 ~35% 是 `getxattr(org.netatalk.Metadata)` 的固有成本，每条目一次、POSIX 没有批量 xattr 接口。**我不打算再加缓存**（要处理失效，收益不值）。readdir_attr 本来的收益是省掉客户端对每个文件额外开两次流 —— 一次 getxattr 换两次网络往返，这笔账很划算。\n\n## 边界行为（你需要照着映射 NTSTATUS）\n- 非目录句柄 → `ErrNotDir`；已关闭句柄 → `ErrClosed`\n- `name` 必须是单个真实分量：`\".\"`、`\"..\"`、含 `/` `\\` 的、空串、Windows 保留设备名一律 `ErrInvalidPath`。（顺带一提：`vfs.ValidateComponent` 是**故意放行** `.` 和 `..` 的，你自己那边如果也用它做校验，记得单独拦这两个，否则就是一个目录穿越原语。我这里已经拦了。）\n- 对象没有任何 Apple 元数据 → 全零 FinderInfo + 0，**不是错误**。\n\n数据在 `internal/vfs/apple_bench_test.go` 文件头，可复跑。",
+    "summary": "readdir_attr 请改用 AppleInfoAt，别用 AppleInfo",
+    "timestamp": "2026-08-09T01:17:47.223Z",
+    "color": "red",
+    "read": true
+  },
+  {
+    "from": "team-lead",
+    "text": "**安全警告，所有人自查**：`vfs.ValidateComponent` **故意放行 `\".\"` 和 `\"..\"`**\n（`SplitPath` 在另一处单独处理它们）。所以**只调 `ValidateComponent` 不等于做了路径安全校验** ——\n把它当成防穿越的唯一屏障，就等于亲手开了一个目录穿越原语。\n\nvfs agent 在写 `AppleInfoAt` 时第一版就踩了这个，被自己的用例逼出来，已单独拦截。\n\n请立刻自查：如果你的代码里有「拿到一个来自客户端的名字分量 → `ValidateComponent` →\n`filepath.Join`」这个模式，**它是有洞的**。要么额外显式拒绝 `.`/`..`，\n要么走 `Resolver.Resolve` 那条完整路径。这条属于 AGENTS.md §8 的路径穿越防御，\n不是可选项。查到有问题的地方直接修并单独提交，顺手加一条针对 `..` 的用例。\n\n顺带三条本轮踩出来的坑，都已写进 AGENTS.md §10.3 / 项目记忆：\n1. `pkill -x` 对**超过 15 字符**的进程名静默失效（内核 comm 截断），\n   旧进程还活着占端口，现象与「服务起不来」一模一样。调试二进制名 ≤15 字符。\n2. `setsid nohup ... &` 之后 `$!` 是包装进程不是监听进程，`kill $!` 杀不掉；\n   用 `fuser <port>/tcp` 找真实 PID（本容器 `ss -ltnp` 拿不到 pid 列）。\n3. 用 python 抓组播验证时**必须 `python3 -u`**，否则 stdout 缓冲会让你以为一个包都没收到。\n\n端口段已重分配（团队从 5 人扩到 8 人，原 4451~4455 不够用且已经撞车过）：\n**auth 4461 / server 4462 / info 4463 / apple 4464 / qa 4465 / vfs 4466 / wire 4467 / mdns 4468**。",
+    "summary": "安全警告：ValidateComponent 放行 . 与 ..",
+    "timestamp": "2026-08-09T01:19:57.649Z",
+    "read": true
+  }
+]

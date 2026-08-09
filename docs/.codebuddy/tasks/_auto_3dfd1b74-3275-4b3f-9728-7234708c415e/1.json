@@ -1,0 +1,9 @@
+{
+  "subject": "mDNS Time Machine 广播单元测试",
+  "description": "为 internal/mdns 的 _adisk._tcp / _device-info._tcp TXT 构造写单元测试，验证键名与取值（dk0=adVN=..,adVF=0x82；sys=waMa=0,adVF=0x100；model=..），并覆盖开关组合。",
+  "activeForm": "编写 mDNS Time Machine 广播单元测试",
+  "status": "completed",
+  "id": "1",
+  "createdAt": 1786234440661,
+  "updatedAt": 1786234567222
+}

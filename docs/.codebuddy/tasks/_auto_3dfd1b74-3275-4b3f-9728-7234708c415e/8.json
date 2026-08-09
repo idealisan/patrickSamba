@@ -1,0 +1,10 @@
+{
+  "subject": "credit 管理按 MS-SMB2 §3.3.1.2 校验",
+  "description": "CreditCharge 按 (max(SendPayloadSize, ExpectedResponsePayloadSize)-1)/65536+1 计算并校验；credit 不足返回 STATUS_INSUFFICIENT_RESOURCES；避免给太少 credit 拖慢大文件传输。",
+  "activeForm": "加固 credit 管理",
+  "status": "pending",
+  "owner": "server",
+  "id": "8",
+  "createdAt": 1786235112944,
+  "updatedAt": 1786235112944
+}

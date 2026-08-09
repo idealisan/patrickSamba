@@ -1,0 +1,9 @@
+{
+  "subject": "优雅退出流程加固",
+  "description": "cmd/stupidsamba 收到 SIGINT/SIGTERM：停 accept → mDNS goodbye → 等待在途请求（带超时）→ 关闭句柄；二次信号立即强制退出。",
+  "activeForm": "加固优雅退出",
+  "status": "completed",
+  "id": "21",
+  "createdAt": 1786236845686,
+  "updatedAt": 1786237462102
+}
