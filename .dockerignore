@@ -1,0 +1,25 @@
+# 构建上下文白名单式裁剪。
+#
+# Dockerfile 只需要两样东西：
+#   dist/docker/linux_<arch>/stupidsamba   （scripts/docker-build.sh 摆好的二进制）
+#   configs/docker.yaml                    （内置试用配置）
+#
+# 其余一律排除。这不只是为了快 —— 仓库里有 history/（会话记录，几 MB）、
+# conversation-*.txt、memory/ 这类跟镜像毫无关系的东西，把它们送进 buildkit
+# 既浪费时间，也让「上下文里到底有什么」变得不可控。
+#
+# 写法：先全部排除，再用 `!` 逐项放行。这样以后往仓库里加任何新目录，
+# 都不会悄无声息地进到构建上下文里。
+
+*
+
+!configs/docker.yaml
+!dist/docker
+
+# dist/ 整体在 .gitignore 里，但构建上下文看的是工作树而不是 git。
+# 上面放行了 dist/docker 之后，把 dist 下其余产物（四平台 tar.gz/zip、
+# 解包用的临时目录）再排掉，免得几十 MB 的压缩包被送进 buildkit。
+dist/*
+!dist/docker
+dist/docker/*/*
+!dist/docker/*/stupidsamba
