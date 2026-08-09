@@ -318,20 +318,6 @@ func buildAAPLResponse(replyBitmap, serverCaps, volumeCaps uint64, model string)
 // 我们不实现 NFS ACE（见 aaplSupportsNFSAce），所以这里**必须**留 0，
 // 否则客户端会按 NFS ACE 语义解读一个我们并不支持的字段。
 const (
-	// aaplDirEntryFixed 是 FileIdBothDirectoryInformation 的固定部分长度，
-	// 与 wire.DirInfoFixedSize 保持一致（MS-FSCC §2.4.17）。
-	aaplDirEntryFixed = 104
-
-	aaplOffEaSize       = 64
-	aaplOffShortNameLen = 68
-	aaplOffRsrcSize     = 70
-	aaplOffFinderInfo   = 78
-	aaplOffReserved2    = 94
-
-	// aaplShortNameLenValue 是 readdir_attr 模式下写入 ShortNameLength 的值。
-	// Samba: `SSVAL(p, 0, 24)`。
-	aaplShortNameLenValue = 24
-
 	// aaplFinderInfoSize 是压缩 FinderInfo 的字节数（struct aapl.finder_info[16]）。
 	aaplFinderInfoSize = 16
 )
@@ -356,28 +342,27 @@ type aaplDirAttr struct {
 	FinderInfo [aaplFinderInfoSize]byte
 }
 
-// patchIDBothDirEntry 把 Apple 扩展字段就地写进已编码好的目录项。
+// augmentDirEntry 把 Apple 扩展字段填进 wire.DirEntry，交给 wire 层在编码时
+// 通过 ShortNameRaw 原样写进 ShortName 的 24 字节（见 wire.putShortName）。
 //
-// buf 是 wire.DirEntryWriter 的输出缓冲，start 是本条目录项的起点。
-// 越界一律静默返回（AGENTS.md §5：先校验长度再切片，绝不 panic）。
+// 取代早期「编码后按 start 偏移打补丁」的做法（本 agent 早期版本在
+// query_directory.go 里自算条目起点再 patchIDBothDirEntry，属 P1 违反：报文层
+// 与状态层没分离，且 start 算错会静默把字段写进上一条目录项的尾巴）。
+// wire 的 DirEntryWriter 现已原生支持 AAPL 字段（ShortNameRaw），这条路径更干净
+// 也更不易错。布局与 Samba vfs_fruit `readdir_attr` 一致（校验见 golden test）：
 //
-// TODO: 这是一层补丁式的写法 —— 正确的分层应当是 wire 层的
-// AppendDirEntry 直接支持 AAPL 字段（P1：报文层与状态层分离）。
-// internal/smb/wire/** 不属于本 agent 的文件范围，已报 team-lead 协调。
-func (a *aaplDirAttr) patchIDBothDirEntry(buf []byte, start int) bool {
-	if start < 0 || start > len(buf)-aaplDirEntryFixed {
-		return false
-	}
-	f := buf[start : start+aaplDirEntryFixed]
+//	ShortName[0:8]   ← rfork_size（**小端** uint64）
+//	ShortName[8:24]  ← 压缩 FinderInfo（16 字节）
+//	ShortNameLength ← len(ShortNameRaw) = 24（Samba: SSVAL(p,0,24)）
+//	EaSize           ← MaxAccess
+func (s *aaplDirAttrSource) augmentDirEntry(de *wire.DirEntry, e *vfs.DirEntry) {
+	a := s.entry(e)
+	de.EaSize = a.MaxAccess
 
-	aaplLE.PutUint32(f[aaplOffEaSize:], a.MaxAccess)
-	f[aaplOffShortNameLen] = aaplShortNameLenValue
-	f[aaplOffShortNameLen+1] = 0
-	aaplLE.PutUint64(f[aaplOffRsrcSize:], a.RsrcSize)
-	copy(f[aaplOffFinderInfo:aaplOffReserved2], a.FinderInfo[:])
-	// Reserved2：见上文，不实现 NFS ACE 就必须留 0。
-	aaplLE.PutUint16(f[aaplOffReserved2:], 0)
-	return true
+	var raw [24]byte
+	aaplLE.PutUint64(raw[0:8], a.RsrcSize)
+	copy(raw[8:24], a.FinderInfo[:])
+	de.ShortNameRaw = raw[:]
 }
 
 // aaplCompressFinderInfo 把 32 字节的完整 FinderInfo 压成 readdir_attr 用的 16 字节。

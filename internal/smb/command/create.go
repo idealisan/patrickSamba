@@ -1,6 +1,7 @@
 package command
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 	"strings"
@@ -54,6 +55,16 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	// check_aapl() 位置一致，且失败时没有句柄要回收。
 	aapl, err := negotiateAAPL(ctx, req)
 	if err != nil {
+		return err
+	}
+
+	// MxAc 的**请求**校验要在打开之前做：畸形长度会让整个 CREATE 失败
+	// （Samba smb2_create.c:1608），此时还没有句柄要回收。
+	// 请求 Data 允许为空（仅查询），也允许是一个 8 字节 Timestamp；
+	// 两种都合法，必须接受。只有长度既非空又非 8 字节才算畸形。
+	mxac, err := parseMxAcRequest(req)
+	if err != nil {
+		ctx.Log.Debug("MxAc create context 长度非法")
 		return err
 	}
 
@@ -151,7 +162,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		EndOfFile:      uint64(attr.Size),
 		FileAttributes: wire.FileAttributes(attr.FileAttributes),
 		FileID:         wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
-		Contexts:       createResponseContexts(req, attr, aapl),
+		Contexts:       createResponseContexts(req, attr, aapl, mxac, mxAcMaximalAccess(ctx.Tree, attr)),
 	}
 
 	out, err := resp.Append(ctx.Out)
@@ -354,6 +365,81 @@ func maximalAccessFor(t *Tree) wire.Access {
 	return wire.Access(wire.MaximalAccessReadOnly)
 }
 
+// mxAcRequest 是解析后的 MxAc **请求**（MS-SMB2 §2.2.13.2.5）。
+type mxAcRequest struct {
+	// Present 表示请求里确实带了 MxAc context。
+	Present bool
+	// Timestamp 是客户端上次取得 MaximalAccess 时该文件的 LastWriteTime
+	// （FILETIME）。context 的 Data 为空时是 0。
+	Timestamp uint64
+}
+
+// parseMxAcRequest 校验并解析 MxAc 请求 context。
+//
+// 请求 Data 只允许两种长度（Samba `source3/smbd/smb2_create.c:1608`
+// 逐字核对）：
+//
+//	0 字节  —— 无条件查询，Timestamp 视为 0
+//	8 字节  —— Timestamp(8) FILETIME，小端
+//
+// 其余长度**让整个 CREATE 失败**回 STATUS_INVALID_PARAMETER，与 Samba 一致。
+// 注意「空 Data」是完全合法的常见形态，绝不能当成畸形输入
+// （Windows 客户端大多就发空的）。
+func parseMxAcRequest(req *wire.CreateRequest) (mxAcRequest, error) {
+	data, ok := wire.FindCreateContext(req.Contexts, wire.CreateContextMxAc)
+	if !ok {
+		return mxAcRequest{}, nil
+	}
+	switch len(data) {
+	case 0:
+		return mxAcRequest{Present: true}, nil
+	case 8:
+		return mxAcRequest{Present: true, Timestamp: mxAcLE.Uint64(data)}, nil
+	default:
+		return mxAcRequest{}, status.InvalidParameter
+	}
+}
+
+// mxAcLE：MxAc 各字段与 SMB2 报文体一致，**小端**。
+var mxAcLE = binary.LittleEndian
+
+// wantResponse 报告是否需要在响应里回 MxAc context。
+//
+// Samba `smb2_create.c:1875` 的条件是 `last_write_time != max_access_time`：
+// 客户端把「我上次查 MaximalAccess 时这个文件的 LastWriteTime」带上来，
+// 若文件自那以后没被改过，客户端手里的缓存仍然有效，服务端就**不回**这个
+// context 以省掉 8 字节与一次计算。这不是可有可无的优化 —— 它是 Windows
+// 的实际线上行为，客户端据此判断"没回 = 沿用缓存"。
+//
+// Data 为空（Timestamp=0）时恒回：0 不可能等于任何真实文件的 FILETIME。
+func (m mxAcRequest) wantResponse(lastWrite uint64) bool {
+	return m.Present && lastWrite != m.Timestamp
+}
+
+// mxAcStripWrite 是只读场景要从 MaximalAccess 里剥掉的写位。
+// FILE_READ_DATA / FILE_EXECUTE / FILE_READ_EA / READ_CONTROL / SYNCHRONIZE
+// 与只读共享兼容，不在其列（MS-DTYP §2.4.3 访问掩码定义）。
+const mxAcStripWrite = uint32(
+	wire.FileWriteData | wire.FileAppendData |
+		wire.FileWriteEA | wire.FileWriteAttributes | wire.Delete)
+
+// mxAcMaximalAccess 计算 MxAc create context 应回报的 MaximalAccess
+// （MS-SMB2 §2.2.14.2.5）。它必须是**真实**授权结果，绝不能无脑回
+// 0x001F01FF（全权限），否则只读共享在 Finder/Explorer 里会显示成「可写」、
+// 用户点了写才报错（AGENTS.md §8：不要为连上而放宽语义）。
+//
+// 授权依据只有配置（§1.1 C8，不读宿主 ACL），因此：
+//   - 只读共享：maximalAccessFor 已回 0x00120089（不含上述写位）；
+//   - 普通文件自身带 DOS 只读位：再剥掉写位（目录的只读位语义不同，不剥）。
+func mxAcMaximalAccess(t *Tree, attr *vfs.Attr) uint32 {
+	mx := uint32(maximalAccessFor(t))
+	if attr.FileAttributes&vfs.FileAttributeReadonly != 0 &&
+		attr.FileAttributes&vfs.FileAttributeDirectory == 0 {
+		mx &^= mxAcStripWrite
+	}
+	return mx
+}
+
 // createStatus 把 VFS 错误映射为 CREATE 语境下的 NTSTATUS。
 //
 // 与通用映射的差别只有一处：CREATE 语境里 ErrExist 的含义取决于
@@ -367,19 +453,33 @@ func createStatus(err error, disp wire.CreateDisposition) status.Status {
 
 // createResponseContexts 生成要回给客户端的 create context 链。
 //
-// 目前支持两个：
+// 目前支持三个：
 //   - "QFid"（请求稳定 FileId）—— macOS 与 Windows 都会带，
 //     回它可以让客户端少发一轮 QUERY_INFO；
+//   - "MxAc"（查询最大访问）—— 客户端带就回，回报真实的 MaximalAccess
+//     （见 mxAcMaximalAccess），让 Finder/Explorer 正确判断只读/可写；
 //   - "AAPL"（Apple 扩展）—— 由 negotiateAAPL 预先算好，见 aapl.go。
 //
 // 其余 context（DHnQ/RqLs 等）属于后续阶段，**不认识的 context 必须静默忽略**
 // 而不是报错（MS-SMB2 §3.3.5.9：服务端忽略不支持的 create context）。
-func createResponseContexts(req *wire.CreateRequest, attr *vfs.Attr, aapl []byte) []wire.CreateContext {
+func createResponseContexts(req *wire.CreateRequest, attr *vfs.Attr, aapl []byte, mxac mxAcRequest, mx uint32) []wire.CreateContext {
 	var out []wire.CreateContext
 	if _, ok := wire.FindCreateContext(req.Contexts, wire.CreateContextQFid); ok {
 		out = append(out, wire.CreateContext{
 			Name: wire.CreateContextQFid,
 			Data: wire.DiskIDContext{DiskFileID: attr.FileID}.Encode(),
+		})
+	}
+	if mxac.wantResponse(vfs.TimeToFiletime(attr.WriteTime)) {
+		out = append(out, wire.CreateContext{
+			Name: wire.CreateContextMxAc,
+			Data: wire.MaximalAccessContext{
+				// 我们的 MaximalAccess 是纯配置推导，不会失败，恒回
+				// STATUS_SUCCESS。规范允许在算不出来时回非零状态 ——
+				// 那时客户端会忽略掩码，好过给它一个错的（AGENTS.md §8）。
+				QueryStatus:   uint32(status.Success),
+				MaximalAccess: mx,
+			}.Encode(),
 		})
 	}
 	if len(aapl) > 0 {

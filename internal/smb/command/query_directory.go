@@ -77,15 +77,14 @@ func handleQueryDirectory(ctx *Context) error {
 	w := wire.NewDirEntryWriter(req.FileInformationClass, maxOut)
 	written := 0
 	for i := range entries {
-		// 记录本条目录项在缓冲里的起点，供随后的 Apple 字段就地改写。
-		// 规则与 wire.DirEntryWriter.Add 一致：第一条紧贴缓冲起点，
-		// 后续条目落在 8 字节对齐处。
-		start := w.Len()
-		if w.Count() > 0 {
-			start = (start + 7) &^ 7
+		de := dirEntry(&entries[i])
+		if src != nil {
+			// AAPL readdir_attr：把 Apple 扩展字段填进 de（经 wire 的
+			// ShortNameRaw 编码），与标准字段一起由 DirEntryWriter 一次编码，
+			// 不必事后打补丁。
+			src.augmentDirEntry(&de, &entries[i])
 		}
-
-		ok, werr := w.Add(dirEntry(&entries[i]))
+		ok, werr := w.Add(de)
 		if werr != nil {
 			// 不认识的 information class。
 			return status.InvalidInfoClass
@@ -94,10 +93,6 @@ func handleQueryDirectory(ctx *Context) error {
 			// 缓冲放不下了：把没写进去的条目退回句柄，下一轮再来。
 			open.UnreadDir(entries[i:])
 			break
-		}
-		if src != nil {
-			attr := src.entry(&entries[i])
-			attr.patchIDBothDirEntry(w.Bytes(), start)
 		}
 		written++
 	}

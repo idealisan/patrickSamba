@@ -17,19 +17,36 @@ import (
 	"sync"
 )
 
+// streamKind 区分三种存储形态。
+//
+// 用显式枚举而不是「f == nil 就是缓冲模式」那种隐式判定：加进通用流
+// 之后有**两种**缓冲模式（定长的 AfpInfo 与变长的 xattr 流），
+// 靠 f 是否为 nil 已经分不开了。
+type streamKind uint8
+
+const (
+	// streamKindAfpInfo：定长 60 字节，落 netatalk metadata xattr。
+	streamKindAfpInfo streamKind = iota
+	// streamKindResource：变长，落 ._ 旁路文件。
+	streamKindResource
+	// streamKindXattr：变长，落 user.DosStream.<名>:$DATA xattr。
+	streamKindXattr
+)
+
 // streamHandle 实现 Handle。
 type streamHandle struct {
 	fs   *LocalFS
 	host string // 基础对象的宿主机路径
 	name string // 基础对象名（用于 Attr.Name）
 	slot string // 规范化后的流名
+	kind streamKind
 
 	mu     sync.Mutex
 	closed bool
 
 	writable bool
 
-	// AFP_AfpInfo：内存缓冲 + 脏标记。
+	// 缓冲模式（AfpInfo / 通用 xattr 流）：内存缓冲 + 脏标记。
 	buf   []byte
 	dirty bool
 
@@ -46,19 +63,44 @@ var _ Handle = (*streamHandle)(nil)
 // 客户端总是先 CREATE 文件本体再 CREATE 它的流。
 func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handle, Action, error) {
 	slot := canonicalStreamName(stream)
-	if !IsAFPStream(slot) {
-		// 通用 ADS 不支持。明确拒绝，不要假装成功（见 stream_store.go 说明）。
-		return nil, 0, ErrNotSupported
-	}
 
 	fi, err := os.Lstat(host)
 	if err != nil {
 		return nil, 0, mapError(err)
 	}
-	if fi.IsDir() {
-		// 目录上的 AFP 流：Samba 也只在文件上支持，目录的 FinderInfo
-		// 走 ._ 同名文件那套，不在本阶段范围内。
-		return nil, 0, ErrNotSupported
+	isDir := fi.IsDir()
+
+	// 决定这个流用哪种后端。目录的可用范围比文件窄，见下面各分支。
+	var kind streamKind
+	switch {
+	case slot == StreamAFPInfo:
+		// AFP_AfpInfo 落 netatalk xattr，**目录上同样可用**。
+		// 依据：Samba fruit_open_meta_netatalk()（vfs_fruit.c:1455）
+		// 与 fruit_streaminfo_meta_netatalk()（同文件 :3859）都没有
+		// 目录判断 —— xattr 本来就能挂在目录上。
+		// 这条对 Time Machine 是必需的：.sparsebundle 是**目录**，
+		// macOS 会往它上面设 com.apple.FinderInfo。
+		kind = streamKindAfpInfo
+	case slot == StreamAFPResource:
+		if isDir {
+			// 目录没有资源派生。依据：Samba fruit_open_rsrc_adouble()
+			// （vfs_fruit.c:1561）对目录直接 errno=ENOENT，注释原话
+			// "sorry, but directories don't have a resource fork"；
+			// fruit_streaminfo_rsrc()（:4047）也对目录一条都不列。
+			//
+			// 回 ErrNotFound 而不是 ErrNotSupported：客户端探测一个
+			// 不存在的流时期待的就是 OBJECT_NAME_NOT_FOUND，
+			// NOT_SUPPORTED 会让它以为整个共享不支持 ADS。
+			return nil, 0, ErrNotFound
+		}
+		kind = streamKindResource
+	default:
+		// 通用 named stream → xattr。目录同样可用（Samba 的
+		// vfs_streams_xattr 也没有目录判断）。
+		if err := validateDosStreamName(slot); err != nil {
+			return nil, 0, err
+		}
+		kind = streamKindXattr
 	}
 
 	writes := dispositionWrites(req.Disposition, req.Flags)
@@ -68,13 +110,50 @@ func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handl
 	writable := writes || req.Flags&OpenWrite != 0
 
 	h := &streamHandle{
-		fs: l, host: host, name: name, slot: slot, writable: writable,
+		fs: l, host: host, name: name, slot: slot, kind: kind, writable: writable,
 	}
 
-	if slot == StreamAFPInfo {
+	switch kind {
+	case streamKindAfpInfo:
 		return h.openAfpInfo(req)
+	case streamKindXattr:
+		return h.openXattrStream(req)
+	default:
+		return h.openResource(req)
 	}
-	return h.openResource(req)
+}
+
+// openXattrStream 准备通用 named stream 的内存缓冲。
+//
+// 与 AFP_Resource 不同，这里整条流一次性读进内存：xattr 本来就只能
+// 整体读写，没有「在偏移 N 处读 M 字节」的语义，而通用流受
+// maxDosStreamSize 约束，最大 64 KiB，全读进来是可以接受的。
+func (h *streamHandle) openXattrStream(req *OpenRequest) (Handle, Action, error) {
+	data, err := h.fs.readDosStream(h.host, h.slot)
+	exists := err == nil
+	if err != nil && err != ErrNotFound {
+		// ErrNotSupported（宿主机没开 user_xattr）如实上报：
+		// 这不是客户端的错，但也确实支持不了。
+		return nil, 0, err
+	}
+
+	action, err := streamAction(req.Disposition, exists)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !exists || action == ActionSuperseded || action == ActionOverwritten {
+		data = nil
+	}
+
+	h.buf = data
+	if action == ActionCreated || action == ActionSuperseded || action == ActionOverwritten {
+		// 立刻落一个空流，这样后续的 Streams() 能看到它 ——
+		// 客户端 CREATE 完一个流之后就认为它存在了，哪怕还没写内容。
+		if err := h.fs.writeDosStream(h.host, h.slot, h.buf); err != nil {
+			return nil, 0, err
+		}
+	}
+	return h, action, nil
 }
 
 // openAfpInfo 准备 AFP_AfpInfo 流的内存缓冲。
@@ -182,8 +261,8 @@ func (h *streamHandle) ReadAt(p []byte, off int64) (int, error) {
 		return 0, ErrClosed
 	}
 
-	if h.f == nil {
-		// AFP_AfpInfo：从内存缓冲读。
+	if h.kind != streamKindResource {
+		// 缓冲模式（AfpInfo / 通用 xattr 流）：从内存缓冲读。
 		if off >= int64(len(h.buf)) {
 			return 0, io.EOF
 		}

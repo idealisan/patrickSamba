@@ -109,10 +109,18 @@ func TestAAPLCompressFinderInfo(t *testing.T) {
 // 目录项就地改写
 // ---------------------------------------------------------------------------
 
-// TestPatchIDBothDirEntryLayout 对单条目录项做字节级 golden 比对。
-func TestPatchIDBothDirEntryLayout(t *testing.T) {
+// TestAAPLEntryShortNameRawLayout 对单条目录项做字节级 golden 比对，
+// 走的是生产路径（wire.DirEntry.ShortNameRaw → wire.AppendDirEntry），
+// 而不是早期「编码后打补丁」的旁路。
+func TestAAPLEntryShortNameRawLayout(t *testing.T) {
 	const name = "band-00001"
-	base := wire.DirEntry{
+	fi := aaplCompressFinderInfo(sampleFinderInfo, true, false, time.Unix(aaplDateDelta+1, 0).UTC())
+
+	var raw [24]byte // ShortNameRaw：前 8 字节 rfork_size（小端），后 16 字节 FinderInfo。
+	binary.LittleEndian.PutUint64(raw[0:8], 0x0000_0000_0001_2345)
+	copy(raw[8:24], fi[:])
+
+	de := wire.DirEntry{
 		CreationTime:   0x01d0000000000001,
 		LastAccessTime: 0x01d0000000000002,
 		LastWriteTime:  0x01d0000000000003,
@@ -122,24 +130,20 @@ func TestPatchIDBothDirEntryLayout(t *testing.T) {
 		FileAttributes: wire.FileAttributeNormal,
 		FileID:         0x1122334455667788,
 		Name:           name,
+		EaSize:         wire.MaximalAccessReadWrite, // AAPL 下 EaSize = max_access
+		ShortNameRaw:   raw[:],
 	}
 
-	buf, err := wire.AppendDirEntry(nil, wire.FileIdBothDirectoryInformation, base)
+	buf, err := wire.AppendDirEntry(nil, wire.FileIdBothDirectoryInformation, de)
 	if err != nil {
 		t.Fatalf("AppendDirEntry: %v", err)
 	}
-	// 未改写前：EaSize/ShortName/Reserved2 全零。
-	if !bytes.Equal(buf[64:96], make([]byte, 32)) {
-		t.Fatalf("基线目录项 [64:96] = %x, 期望全零", buf[64:96])
-	}
-
-	attr := aaplDirAttr{
-		MaxAccess:  wire.MaximalAccessReadWrite,
-		RsrcSize:   0x0000_0000_0001_2345,
-		FinderInfo: aaplCompressFinderInfo(sampleFinderInfo, true, false, time.Unix(aaplDateDelta+1, 0).UTC()),
-	}
-	if !attr.patchIDBothDirEntry(buf, 0) {
-		t.Fatal("patchIDBothDirEntry 返回 false")
+	// 未带 Apple 字段时 EaSize/ShortName/Reserved2 全零（确认语义对照）。
+	var base wire.DirEntry
+	if plain, err := wire.AppendDirEntry(nil, wire.FileIdBothDirectoryInformation, base); err == nil {
+		if !bytes.Equal(plain[64:96], make([]byte, 32)) {
+			t.Fatalf("无 Apple 字段的基线目录项 [64:96] = %x, 期望全零", plain[64:96])
+		}
 	}
 
 	// --- @64 EaSize ← max_access（小端） ---
@@ -154,26 +158,26 @@ func TestPatchIDBothDirEntryLayout(t *testing.T) {
 		t.Errorf("Reserved(@69) = %d, 期望 0", buf[69])
 	}
 	// --- @70 rfork_size（小端 uint64） ---
-	if v := binary.LittleEndian.Uint64(buf[70:78]); v != attr.RsrcSize {
-		t.Errorf("rfork_size(@70) = %#x, 期望 %#x", v, attr.RsrcSize)
+	if v := binary.LittleEndian.Uint64(buf[70:78]); v != 0x0000_0000_0001_2345 {
+		t.Errorf("rfork_size(@70) = %#x, 期望 %#x", v, uint64(0x0000_0000_0001_2345))
 	}
 	// --- @78 压缩 FinderInfo（16 字节） ---
-	if !bytes.Equal(buf[78:94], attr.FinderInfo[:]) {
-		t.Errorf("FinderInfo(@78) = %x, 期望 %x", buf[78:94], attr.FinderInfo[:])
+	if !bytes.Equal(buf[78:94], fi[:]) {
+		t.Errorf("FinderInfo(@78) = %x, 期望 %x", buf[78:94], fi[:])
 	}
 	// --- @94 Reserved2 恒 0（不实现 NFS ACE 就不能填 unix_mode） ---
 	if v := binary.LittleEndian.Uint16(buf[94:96]); v != 0 {
 		t.Errorf("Reserved2(@94) = %#x, 期望 0", v)
 	}
 	// --- 改写不得越界污染 FileId 与文件名 ---
-	if v := binary.LittleEndian.Uint64(buf[96:104]); v != base.FileID {
-		t.Errorf("FileId(@96) = %#x, 期望 %#x", v, base.FileID)
+	if v := binary.LittleEndian.Uint64(buf[96:104]); v != de.FileID {
+		t.Errorf("FileId(@96) = %#x, 期望 %#x", v, de.FileID)
 	}
 	if got, _ := wire.DecodeUTF16LE(buf[104:]); got != name {
 		t.Errorf("FileName = %q, 期望 %q", got, name)
 	}
 	// --- 公共前缀（0..64）必须原封不动 ---
-	if v := binary.LittleEndian.Uint64(buf[8:16]); v != base.CreationTime {
+	if v := binary.LittleEndian.Uint64(buf[8:16]); v != de.CreationTime {
 		t.Errorf("CreationTime 被改写: %#x", v)
 	}
 	if v := binary.LittleEndian.Uint32(buf[60:64]); int(v) != wire.UTF16LELen(name) {
@@ -181,79 +185,48 @@ func TestPatchIDBothDirEntryLayout(t *testing.T) {
 	}
 }
 
-// TestPatchIDBothDirEntryBounds：越界一律拒绝，绝不 panic（AGENTS.md §5）。
-func TestPatchIDBothDirEntryBounds(t *testing.T) {
-	var a aaplDirAttr
-	for _, tc := range []struct {
-		name  string
-		bufSz int
-		start int
-	}{
-		{"空缓冲", 0, 0},
-		{"固定部分差一字节", aaplDirEntryFixed - 1, 0},
-		{"起点为负", 256, -1},
-		{"起点越界", 256, 256},
-		{"尾部放不下", 256, 256 - aaplDirEntryFixed + 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if a.patchIDBothDirEntry(make([]byte, tc.bufSz), tc.start) {
-				t.Error("越界的改写应当被拒绝")
-			}
-		})
+// TestAAPLEntryShortNameRawBounds：wire 层对超长 ShortNameRaw 必须报错、
+// 任意缓冲大小都不 panic（AGENTS.md §5：先校验长度再切片，绝不越界写坏后面的
+// Reserved2 / FileId）。
+func TestAAPLEntryShortNameRawBounds(t *testing.T) {
+	tooLong := make([]byte, 25)
+	if _, err := wire.AppendDirEntry(nil, wire.FileIdBothDirectoryInformation,
+		wire.DirEntry{Name: "x", ShortNameRaw: tooLong}); err == nil {
+		t.Error("ShortNameRaw 超过 24 字节应当报错")
 	}
+	// 合法的 24 字节：不应报错，也不应 panic。
+	ok, err := wire.AppendDirEntry(nil, wire.FileIdBothDirectoryInformation,
+		wire.DirEntry{Name: "x", ShortNameRaw: make([]byte, 24)})
+	if err != nil {
+		t.Errorf("合法 ShortNameRaw 不应报错: %v", err)
+	}
+	_ = ok
 }
 
-// TestAAPLDirEntryStartOffset 验证 query_directory.go 里自算的条目起点
-// 与 wire.DirEntryWriter 的对齐规则一致 —— 算错就会把 Apple 字段
-// 写进上一条目录项的尾巴里，是这块最危险的地方。
-func TestAAPLDirEntryStartOffset(t *testing.T) {
+// TestAAPLEntryAlignment 验证多条带 Apple 字段的目录项在 DirEntryWriter 里
+// 8 字节对齐、NextEntryOffset 链正确，且上一条的 Apple 字段不会冲掉下一条
+// （早期「按 start 偏移打补丁」最容易踩的坑，现已由 wire 原生编码消除）。
+func TestAAPLEntryAlignment(t *testing.T) {
 	// 故意用长度不同的名字，制造各种 8 字节对齐填充。
 	names := []string{".", "..", "a", "ab", "abc", "band-00042", "sparsebundle"}
 
 	w := wire.NewDirEntryWriter(wire.FileIdBothDirectoryInformation, 1<<20)
-	starts := make([]int, 0, len(names))
 	for i, n := range names {
-		start := w.Len()
-		if w.Count() > 0 {
-			start = (start + 7) &^ 7
+		var raw [24]byte
+		binary.LittleEndian.PutUint64(raw[0:8], uint64(i+1)*100)
+		de := wire.DirEntry{
+			Name:         n,
+			FileID:       uint64(i + 1),
+			EaSize:       uint32(i + 1),
+			ShortNameRaw: raw[:],
 		}
-		ok, err := w.Add(wire.DirEntry{Name: n, FileID: uint64(i + 1)})
-		if err != nil || !ok {
+		if ok, err := w.Add(de); err != nil || !ok {
 			t.Fatalf("Add(%q): ok=%v err=%v", n, ok, err)
 		}
-		starts = append(starts, start)
-
-		attr := aaplDirAttr{MaxAccess: uint32(i + 1), RsrcSize: uint64(i+1) * 100}
-		if !attr.patchIDBothDirEntry(w.Bytes(), start) {
-			t.Fatalf("patchIDBothDirEntry(%q, %d) 失败", n, start)
-		}
 	}
 
-	// 用独立的解析器沿 NextEntryOffset 链走一遍，核对起点。
-	buf := w.Bytes()
-	pos := 0
-	for i := range names {
-		if pos != starts[i] {
-			t.Fatalf("条目[%d] 链上的起点 = %d, 自算 = %d", i, pos, starts[i])
-		}
-		if v := binary.LittleEndian.Uint32(buf[pos+64 : pos+68]); v != uint32(i+1) {
-			t.Errorf("条目[%d] max_access = %d, 期望 %d", i, v, i+1)
-		}
-		if v := binary.LittleEndian.Uint64(buf[pos+70 : pos+78]); v != uint64(i+1)*100 {
-			t.Errorf("条目[%d] rfork_size = %d, 期望 %d", i, v, uint64(i+1)*100)
-		}
-		next := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
-		if i == len(names)-1 {
-			if next != 0 {
-				t.Errorf("最后一条的 NextEntryOffset = %d, 期望 0", next)
-			}
-			break
-		}
-		pos += next
-	}
-
-	// 顺带确认解析器也能读回来（FileId 没被 Apple 字段冲掉）。
-	got, err := wire.ParseDirEntries(buf, wire.FileIdBothDirectoryInformation)
+	// 沿 NextEntryOffset 链走一遍，核对数量与逐个字段。
+	got, err := wire.ParseDirEntries(w.Bytes(), wire.FileIdBothDirectoryInformation)
 	if err != nil {
 		t.Fatalf("ParseDirEntries: %v", err)
 	}
@@ -266,6 +239,15 @@ func TestAAPLDirEntryStartOffset(t *testing.T) {
 		}
 		if got[i].FileID != uint64(i+1) {
 			t.Errorf("条目[%d] FileId = %d, 期望 %d", i, got[i].FileID, i+1)
+		}
+		if got[i].EaSize != uint32(i+1) {
+			t.Errorf("条目[%d] max_access = %d, 期望 %d", i, got[i].EaSize, i+1)
+		}
+		if len(got[i].ShortNameRaw) != 24 {
+			t.Fatalf("条目[%d] ShortNameRaw 长 %d, 期望 24", i, len(got[i].ShortNameRaw))
+		}
+		if v := binary.LittleEndian.Uint64(got[i].ShortNameRaw[0:8]); v != uint64(i+1)*100 {
+			t.Errorf("条目[%d] rfork_size = %d, 期望 %d", i, v, uint64(i+1)*100)
 		}
 	}
 }
