@@ -385,6 +385,14 @@ git show origin/main:test/ci/negative-verify.sh | grep -c freebsd
 | C6 | `README.md` 构建与自检 | 只列 build / vet / test 三条 | 漏了 `check-test-compile.sh`——`go build` 不编译 `_test.go`，正是 R15 事故的成因 → 补上并说明理由 |
 | C7 | `CHANGELOG.md` + `README.md` | `metadata_path`「所有平台都参与启动校验」 | 与实测相反，见 §2 Q1。已修正（`b39b2bf`），两处孪生条目同时改 |
 
+> **⚠️ C2 / C3 的处置本身已被 PR #156（`25e92d2`）推翻，上表两格保留作为审计留痕、不再是当前事实。**
+> 那两格写的是「如实承认仍按 prerelease 发布」，前提是 `.cnb.yml` 硬编码 `preRelease: true`。
+> #156 之后发布渠道**按 tag 名的 SemVer 判定**（带连字符→预发布，不带→正式版且标记 latest），
+> 已用 `v0.0.99-probe` / `v0.0.99` 两条真 tag 双向实测并做过跨配置对照。
+> `README.md` 与 `CHANGELOG.md` 的对应表述已随之订正。
+> 记这一行是因为**审计表里「已修正」的条目同样会过期** —— 一份只记录「当时改成了什么」
+> 而不记录「后来又被推翻」的审计，读起来比没有审计更危险。
+
 ### 3.3 新发现的缺口（**已于 18:45 前后由他人在 `main` 修复**，见 §2 Q4）
 
 > **状态**：本节描述的是发现当时（18:1x）的状态。`origin/main` 的 `e664a47` 已修，
