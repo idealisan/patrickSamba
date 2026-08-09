@@ -63,6 +63,10 @@ type rawClient struct {
 	encNonce   *crypto.NonceCounter
 	decNonce   *crypto.NonceCounter
 
+	// negResp 保存最近一次 NEGOTIATE 的解析结果，供测试断言服务端对外
+	// 宣告的能力（例如是否带 CAP_ENCRYPTION / ENCRYPTION_CAPABILITIES）。
+	negResp *wire.NegotiateResponse
+
 	preauth  []byte // 3.1.1 滚动 preauth 哈希（连接级 + 会话级合一，按规范顺序累积）
 	authDone bool
 }
@@ -155,6 +159,7 @@ func (c *rawClient) negotiate(dialects []wire.Dialect, encrypt bool) error {
 	if err != nil {
 		return err
 	}
+	c.negResp = nr2
 	c.dialect = nr2.DialectRevision
 	if c.dialect >= wire.SMB300 {
 		c.cipher = crypto.CipherAES128CCM // 3.0 / 3.0.2 固定 AES-128-CCM
