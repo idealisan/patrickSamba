@@ -35,7 +35,7 @@ func (a *adapter) FileID(ref oscap.Ref) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if ino, ok := inodeOf(fi); ok {
+	if ino, ok := a.inode(fi); ok {
 		return ino, nil
 	}
 
