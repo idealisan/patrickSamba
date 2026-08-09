@@ -1150,3 +1150,163 @@ B 块（Time Machine）durable 前置能力从「完成度 0%（合了但坏）�
 #35 注册令 tagged 文件进 CI 编译（vet rc=0）、main 唯一红用例是 team-lead 刻意设计、bisect 地雷 `0ad6441` 在 main 历史里（build 绿 vet 红）、`-overlay` 5/5 变异全杀。
 R12 闭环；D-新6 实际担忧已消解建议关闭；D-新4 维持现状待你拍板；活二维持暂缓。**
 
+---
+
+# 第 15 轮：**合并就绪矩阵**——7 个 PR 全部 mergeable，阻塞在盘点途中自行解除
+
+> 盘点时间：2026-08-09 15:49–15:56 CST（07:49–07:56Z）
+> 基准：`main` HEAD = `413ebf3`（docs(AGENTS): §7.6 强制每个命令前先 date）
+> CI 列由 `qa-verify` 并行核查中，本轮一律记 **⏳ pending qa-verify**，PM 不代填。
+
+## 15.1 头条：**#26 的冲突已经没了**（盘点进行中被 win-meta 解掉）
+
+本轮开局（15:50:03）取到的 `#26 win-meta/metadata-store` 还是
+`mergeable_state: conflict`，落后 main **23 个提交**，冲突面 1 个文件
+（`test/ci/check-test-compile.sh`）。**5 分钟后复查（15:55:39）已经变成 `mergeable`。**
+
+原因：win-meta 在 15:50–15:55 之间把 main 并了进来 ——
+`4be5865 Merge remote-tracking branch 'origin/main' into win-meta/metadata-store`。
+三项独立证据交叉确认，不是 API 缓存抖动：
+
+| 证据 | 结果 |
+|---|---|
+| `git merge-base --all origin/main origin/win-meta/metadata-store` | `413ebf3` ＝ main HEAD 本身，说明 main 已是该分支祖先 |
+| `git merge-base --is-ancestor origin/main origin/win-meta/metadata-store` | rc=0（YES） |
+| `git rev-list --count origin/win-meta/metadata-store..origin/main` | **0**（此前为 23） |
+| `git merge-tree --write-tree origin/main origin/win-meta/metadata-store` | 干净输出单个 tree oid，**无冲突行**（此前报 `冲突（内容）`） |
+| CNB API `list-pulls` | `#26 mergeable_state: mergeable` |
+
+**结论：v0.2.0 此刻没有任何一个 PR 处于冲突态。原计划里「#26 为唯一阻塞」这一条，
+在写进本轮看板之前就已经作废。** 按看板规矩，把作废过程留档而不是直接抹掉写成
+「一直都好」—— 判定本身也要可复盘。
+
+> **顺带纠正一条我差点写错的因果**：当时看 `#26` 的 `check-test-compile.sh` 冲突，
+> 第一反应是「双方都改了 `TAGS=` 行」。实测**不成立**：
+> `git diff <merge-base> origin/main -- test/ci/check-test-compile.sh` 是**空的**——
+> main 自 merge-base 以来根本没碰过这个文件，只有 #26 单边改（加 `metabolt` 与大段注释）。
+> 真正的冲突来自更早的 merge-base 与分支上 `959265a`（登记 `qadefect`）的交错。
+> 这提醒一件事：**`mergeable_state: conflict` 不等于「两边改了同一行」**，
+> 别照着这个假设去指导别人怎么解冲突。
+
+## 15.2 合并就绪矩阵（7 个 PR，截至 15:56 CST）
+
+| PR | head 分支 | head sha | 标题 | mergeable_state | CI | 建议 |
+|---|---|---|---|---|---|---|
+| **#119** | `qa-proto/bisect-convention` | `d77579e` | docs(AGENTS): §7.2 补 bisect 约定（引用 8199288 洞） | ✅ mergeable | ⏳ pending qa-verify | 可合，第 1 批 |
+| **#103** | `qa-proto/memory-durable` | `d0b427e` | docs(memory): durable handle 设计约束入库 + 补齐 6 份仅存于磁盘的记忆 | ✅ mergeable | ⏳ pending qa-verify | **排最后**，见 15.3 |
+| **#44** | `win-backend/symlink-gap` | `c118277` | vfs: 堵住 Windows junction 逃逸——链接判据平台化（第一层，事前） | ✅ mergeable | ⏳ pending qa-verify | 可合，第 1 批（**安全修复，建议优先**） |
+| **#42** | `qa-verify/rescue-e2e` | `09107e2` | test: 代 qa-e2e 抢救 test/e2e 端到端冒烟套件（孤儿提交） | ✅ mergeable | ⏳ pending qa-verify | 可合，第 1 批（**抢救成果，越早入库越安全**） |
+| **#38** | `qa-verify/e2e-ci` | `bf299bd` | test: 修正集成测试假故障 + 修掉验收脚本里说谎的成功信息 | ✅ mergeable | ⏳ pending qa-verify | 可合，第 1 批 |
+| **#34** | `srv-share/share-access` | `7ec9801` | server: 实现 SMB ShareAccess 共享模式冲突判定（MS-FSA §2.1.5.1.2 双向） | ✅ mergeable | ⏳ pending qa-verify | 可合，第 1 批（唯一产品功能 PR，待 team-lead 评审，Issue #116） |
+| **#26** | `win-meta/metadata-store` | `4be5865` | meta: 新增 internal/meta 旁路元数据存储（bbolt/noop）+ R4 合规核验 | ✅ mergeable **（本轮由 conflict 转绿）** | ⏳ pending qa-verify | 可合，**排 #103 之前** |
+
+> ⚠️ **给 qa-verify 的提醒**：`#119` 与 `#26` 的 head sha 在本轮盘点期间发生过变动
+> （`#119` `0540ab7`→`d77579e`，`#26` 旧 head→`4be5865`）。
+> **CI 结论必须对着上表的 sha 复核**，拿旧 sha 的绿灯来放行等于没验。
+
+## 15.3 冲突面矩阵：**只有一对 PR 需要排序，其余任意顺序**
+
+对 7 个 PR 逐个取 `git diff --name-only origin/main...origin/<分支>`，两两求交集：
+
+| PR | 触及的文件域 |
+|---|---|
+| #119 | `AGENTS.md` |
+| #103 | `memory/MEMORY.md` + 11 个 `memory/*.md` |
+| #44 | `internal/vfs/*`（7 个文件） |
+| #42 | `test/e2e/*`（9 个文件） |
+| #38 | `scripts/acceptance.sh`、`test/integration/{rawclient,signing}_test.go` |
+| #34 | `internal/smb/command/*`（5 个）、`test/integration/share_access_test.go` |
+| #26 | `.cnb.yml`、`CHANGELOG.md`、`THIRD_PARTY.md`、`internal/meta/*`（7 个）、`memory/*`（4 个）、`test/ci/check-test-compile.sh` |
+
+**全集里唯一的交集是 `#26 ∩ #103`**，4 个文件：
+`memory/MEMORY.md`、`memory/feedback_falsifiable_assertions.md`、
+`memory/project_config_path_platform_semantics.md`、`memory/project_silent_success_failures.md`。
+
+实测这一对**确实会冲突**（不是理论担忧）：
+
+```
+git merge-tree --write-tree --name-only \
+    origin/win-meta/metadata-store origin/qa-proto/memory-durable
+→ 冲突（内容）：memory/MEMORY.md
+→ 冲突（添加/添加）：memory/project_silent_success_failures.md
+```
+
+另两个文件能自动合并。**冲突全部是 `.md`，零代码**。
+
+**其余 15 对组合两两不相交 ⇒ 除 #26/#103 外，任意合并顺序都不会互相制造冲突，
+也不会让任何人需要二次 rebase。**
+
+## 15.4 建议的合并顺序
+
+**第 1 批（CI 一绿即合，顺序随意，可并行）**：`#44` → `#42` → `#38` → `#34` → `#119`
+
+理由：五者文件域两两不相交，且与 `#26`、`#103` 也不相交 ——
+合任意多个都**不会**动摇 #26/#103 已经算好的可合并性。
+建议 `#44`（junction 逃逸安全修复）与 `#42`（938 行抢救成果，目前只存在于该分支）排最前，
+按「风险越高越早入库」。
+
+**第 2 批**：`#26`
+
+已自行解冲突，此刻干净。放在 `#103` 之前，让它带着产品代码（`internal/meta`）先落地。
+
+**第 3 批（压轴）**：`#103`
+
+由它承接 `memory/MEMORY.md` + `project_silent_success_failures.md` 的三方合并。
+
+> **为什么让 memory-only 的 PR 吃这个冲突**：这是本项目已有的成例。
+> 看板 §（PR #24）原文：「pm/status 的 PR #24 **故意排最后**，专门解 `MEMORY.md`
+> 的三方冲突，**不占用他人时间**。」#103 是纯 `memory/*.md`，#26 含产品代码，
+> 让纯文档 PR 吃 `.md` 冲突、让代码 PR 保持干净，与成例一致。
+
+**若 `#103` 先于 `#26` 合入**（例如 qa-verify 先放行它），后果可控但要有人认领：
+`#26` 需要解同样那 2 个 `.md` 冲突，工作量不变，只是换人做。**不构成阻塞。**
+
+## 15.5 Issue 盘点：索引已发到 #39
+
+`cnb issues post-issue-comment --repo finalappstore/stupidSamba --number 39 --body-file …`
+→ `status: 201`，评论 id `2086360222186463232`。
+
+> 命令名要点：列表是 `cnb issues **list-issues**`（`cnb issues list` 会打印帮助后退出，
+> 静默给不出数据 —— 又一例「命令没报错但什么也没发生」）；PR 列表是
+> `cnb pulls list-pulls --page-size`（不是 `--per-page`）。
+
+**现状：开放 Issue 75 个，编号区间 `#39–#118`，全部带 `[stupidSamba]` 前缀**
+（原任务描述里写的 `#45–#101` 与实际不符，以本条为准）。索引按 A–H 八组分类，
+每条标注承接它的 PR 与 PM 备注。两个需要 team-lead 拍板的发现：
+
+### 发现一：**21 对完全重复的 Issue，占看板 28%**
+
+`#45–#70` 与 `#71–#102` 是**同一批单子被建了两次**。抽样逐字节比对
+（`#45` vs `#61`、`#50` vs `#71`）：**title 与 body 完全相同**，
+`created_at` 仅差 14–16 秒 —— 建单脚本重复提交。
+
+```
+#45↔#61  #46↔#63  #47↔#65  #48↔#67  #49↔#69  #50↔#71  #51↔#73
+#52↔#75  #53↔#77  #54↔#79  #55↔#81  #56↔#83  #57↔#85  #58↔#87
+#59↔#89  #60↔#91  #62↔#93  #64↔#95  #66↔#98  #68↔#100 #70↔#102
+```
+
+建议关掉先建的 `#45–#70` 一侧（近期 PR 与讨论都引用后建区段）。
+**关闭 21 个 Issue 属共享状态变更，PM 不擅自执行，待拍板。**
+
+另有跨批次同题：junction 逃逸第一层同时挂着 **#50 / #71 / #109** 三张单
+（`#109` 才是 PR #44 实际承接的那张）。
+
+### 发现二：6 张单子的活已经干完，单子还开着
+
+`#61(#45)`、`#63(#46)`、`#79(#54)`、`#83(#56)` 对应的 **PR #24 / #25 / #27 / #31 均已合入 main**
+（`cnb pulls get-pull` 逐个核过 `is_merged: true`）；
+`#115`「合并三个无主 PR（#26/#31/#33）」里 **#31、#33 已合并**，只剩 #26 —— 已部分过期。
+
+**影响**：看板虚高。75 张开放单里，21 张是重复、至少 6 张已完成，
+**真实待办约 48 张**。不核销的话，后续任何「还剩多少活」的判断都是错的。
+
+## 15.6 一句话结论（第 15 轮）
+
+**7 个 PR 现在全部 `mergeable`，v0.2.0 没有合并阻塞了 ——「#26 是唯一阻塞」这个前提
+在盘点途中就被 win-meta 用 `4be5865` 解掉了。全集里唯一的文件交集是 `#26 ∩ #103`
+的 2 个 `.md`，建议 #26 先、#103 压轴吃冲突；其余 5 个任意顺序合、互不干扰。
+唯一的门是 CI，等 qa-verify 的结论，且必须对着变动后的 head sha 核。
+Issue 侧：索引已发 #39，看板有 21 对重复单 + 6 张已完成未关，真实待办约 48 张，
+是否批量关闭待 team-lead 拍板。**
+
