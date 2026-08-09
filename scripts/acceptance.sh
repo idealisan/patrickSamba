@@ -512,6 +512,67 @@ t_signing() {
 # repval <报告文件> <键>  —— 从 smbtap 的 key=value 报告里取值
 repval() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
 
+# tap_begin <目标端口> <报告文件> <探针stdout>  —— 起 smbtap 并等它 bind 成功。
+# 必须等就绪再放客户端进来，否则会撞 connection refused，看起来像服务端拒绝了连接。
+TAP_PID=""
+tap_begin() {
+    _tp=$1; _trep=$2; _tout=$3
+    rm -f "$_trep"
+    "$WORK/smbtap" -listen "127.0.0.1:$PORT_TAP" -target "127.0.0.1:$_tp" \
+        -report "$_trep" -conns 1 -timeout 60s > "$_tout" 2>&1 &
+    TAP_PID=$!
+    _i=0
+    while [ $_i -lt 100 ]; do
+        grep -q "smbtap ready" "$_tout" 2>/dev/null && return 0
+        kill -0 "$TAP_PID" 2>/dev/null || return 1   # 探针已经死了（多半是端口被占）
+        _i=$((_i + 1)); sleep 0.1
+    done
+    return 1
+}
+
+# tap_end <报告文件>  —— 等报告落盘。
+# 报告是连接结束后才写的；`wait` 在 dash 下不保证文件已可见，轮询更稳。
+#
+# 拿不到报告时必须**主动把探针杀掉**：否则它会一直占着 PORT_TAP 直到 60s
+# 超时，后续每个用例的 tap_begin 都会撞 "address already in use"，
+# 一个真故障会级联成一整屏假故障（实测过）。
+tap_end() {
+    _trep=$1
+    _i=0
+    while [ $_i -lt 100 ] && [ ! -f "$_trep" ]; do
+        _i=$((_i + 1)); sleep 0.1
+    done
+    if [ ! -f "$_trep" ]; then
+        [ -n "$TAP_PID" ] && kill "$TAP_PID" 2>/dev/null
+        wait "$TAP_PID" 2>/dev/null || true
+        TAP_PID=""
+        return 1
+    fi
+    TAP_PID=""
+    return 0
+}
+
+# tap_assert_encrypted <方言标签> <报告文件>  —— 线级加密断言（A~D 共用同一套判据）。
+# 两条都要满足：既有 TRANSFORM 帧，且明文帧里不含任何业务命令。
+# 第二条比第一条严格：只加密了一部分流量的实现同样会被抓出来。
+tap_assert_encrypted() {
+    _lbl=$1; _r=$2
+    _atx=$(repval "$_r" c2s_transform)
+    _arx=$(repval "$_r" s2c_transform)
+    _aleak=$(repval "$_r" c2s_plain_postauth_cmds)
+    _aleakrx=$(repval "$_r" s2c_plain_postauth_cmds)
+    if [ "${_atx:-0}" -eq 0 ] || [ "${_arx:-0}" -eq 0 ]; then
+        echo "    $_lbl: 线上没有 TRANSFORM_HEADER（c2s=$_atx s2c=$_arx）—— 根本没加密"
+        return 1
+    fi
+    if [ -n "$_aleak" ] || [ -n "$_aleakrx" ]; then
+        echo "    $_lbl: 有加密帧，但仍有业务命令走明文 c2s=[$_aleak] s2c=[$_aleakrx]"
+        return 1
+    fi
+    TAP_TX=$_atx; TAP_RX=$_arx
+    return 0
+}
+
 # enc_case <服务端口> <共享> <服务端日志> <方言> <期望 reject|encrypt> <期望cipher|-> [额外 smbclient 参数...]
 #
 # 全程经由 smbtap 转发，结束后按线级统计断言。返回 0 表示该档符合预期。
@@ -523,37 +584,24 @@ enc_case() {
     _rep="$WORK/tap-$_tag.txt"
     _tout="$WORK/tap-$_tag.out"
     _cliout="$WORK/cli-$_tag.out"
-    rm -f "$_rep"
     _mark=$(wc -l < "$_slog")
 
-    "$WORK/smbtap" -listen "127.0.0.1:$PORT_TAP" -target "127.0.0.1:$_p" \
-        -report "$_rep" -conns 1 -timeout 60s > "$_tout" 2>&1 &
-
-    # 等探针真的 bind 上再放客户端进来（它就绪时会打印 "smbtap ready"），
-    # 否则会撞 connection refused，看起来像服务端拒绝了连接。
-    _i=0
-    while [ $_i -lt 100 ]; do
-        grep -q "smbtap ready" "$_tout" 2>/dev/null && break
-        _i=$((_i + 1)); sleep 0.1
-    done
+    if ! tap_begin "$_p" "$_rep" "$_tout"; then
+        echo "    $_d: smbtap 起不来（探针本身出问题了）"
+        sed 's/^/      /' "$_tout" | head -5
+        return 1
+    fi
 
     _cli=0
     smbclient "//127.0.0.1/$_sh" -p "$PORT_TAP" -U "$USER%$PASS" -d1 -m "$_d" "$@" \
         -c "ls; get hello.txt $WORK/enc-$_tag.txt" > "$_cliout" 2>&1 || _cli=1
 
-    # 报告是连接结束后才落盘的；`wait` 在 dash 下不保证文件已经可见，轮询更稳。
-    _i=0
-    while [ $_i -lt 100 ] && [ ! -f "$_rep" ]; do
-        _i=$((_i + 1)); sleep 0.1
-    done
-    if [ ! -f "$_rep" ]; then
+    if ! tap_end "$_rep"; then
         echo "    $_d: smbtap 未产出报告（探针本身出问题了）"
         sed 's/^/      /' "$_tout" | head -5
         return 1
     fi
 
-    _tx=$(repval "$_rep" c2s_transform)
-    _rx=$(repval "$_rep" s2c_transform)
     _leak=$(repval "$_rep" c2s_plain_postauth_cmds)
     _leakrx=$(repval "$_rep" s2c_plain_postauth_cmds)
 
@@ -567,7 +615,21 @@ enc_case() {
             echo "    $_d: 虽然报错，但明文里出现了业务命令 c2s=[$_leak] s2c=[$_leakrx]"
             return 1
         fi
-        echo "    $_d: 被拒绝（$(grep -o 'NT_STATUS_[A-Z_]*' "$_cliout" | head -1)），线上无明文业务命令 → OK"
+        # 还不够：得确认「被拒」这件事真的发生在**服务端**。
+        # 客户端因为参数写错、库缺失之类的原因自己死掉时，退出码同样非 0、
+        # 线上同样没有业务命令 —— 不加这一条，那种情况会被当成"拒绝成功"
+        # 打出 OK（脚本开头 §"smbclient 4.22 没有 -e 选项"那段警告的正是这种假故障）。
+        _st=$(grep -o 'NT_STATUS_[A-Z_]*' "$_cliout" | head -1)
+        if [ -z "$_st" ]; then
+            echo "    $_d: 客户端失败了但没给出任何 NT_STATUS —— 它可能根本没连到服务端："
+            tail -3 "$_cliout" | sed 's/^/      /'
+            return 1
+        fi
+        if [ "$(repval "$_rep" conns)" = "0" ]; then
+            echo "    $_d: 线级探针记录到 0 个连接 —— 客户端没走到服务端，这不算拒绝"
+            return 1
+        fi
+        echo "    $_d: 被拒绝（$_st），线上无明文业务命令 → OK"
         return 0
     fi
 
@@ -581,21 +643,14 @@ enc_case() {
         echo "    $_d: 连上了但下载内容不匹配"
         return 1
     fi
-    if [ "${_tx:-0}" -eq 0 ] || [ "${_rx:-0}" -eq 0 ]; then
-        echo "    $_d: 线上没有 TRANSFORM_HEADER（c2s=$_tx s2c=$_rx）—— 根本没加密"
-        return 1
-    fi
-    if [ -n "$_leak" ] || [ -n "$_leakrx" ]; then
-        echo "    $_d: 有加密帧，但仍有业务命令走明文 c2s=[$_leak] s2c=[$_leakrx]"
-        return 1
-    fi
+    tap_assert_encrypted "$_d" "$_rep" || return 1
     if [ "$_wantcipher" != "-" ] &&
        ! tail -n +$((_mark + 1)) "$_slog" | grep -q "cipher=$_wantcipher"; then
         echo "    $_d: 服务端协商出的 cipher 不是 $_wantcipher，实际："
         tail -n +$((_mark + 1)) "$_slog" | grep -o "cipher=[0-9]*" | head -2 | sed 's/^/      /'
         return 1
     fi
-    echo "    $_d: 加密帧 c2s=$_tx s2c=$_rx，明文仅协商/认证，cipher=$_wantcipher → OK"
+    echo "    $_d: 加密帧 c2s=$TAP_TX s2c=$TAP_RX，明文仅协商/认证，cipher=$_wantcipher → OK"
     return 0
 }
 
@@ -672,11 +727,40 @@ t_encryption() {
     enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB3_11 encrypt 2 || rc=1
 
     # ---- D. 换一个协议栈交叉验证，别只对 Samba 客户端调通 ----
-    if ( cd "$ROOT/scripts/clients/gosmb2" && \
-         go run . "127.0.0.1:$PORT_STRICT" "$USER" "$PASS" secure >/dev/null 2>&1 ); then
-        echo "  D. go-smb2 对强制加密服务 → OK"
+    #
+    # 判据必须与 A~C 一致：看网线，不看"客户端有没有报错"。
+    #
+    # 这里原先只判断 `go run .` 的退出码。实测过它是个**摆设**：
+    # 把同一条命令指向完全不加密的主服务（4445），退出码照样是 0，
+    # 而线级报告是 c2s_transform=0 + 10 条明文业务命令
+    # （0x2,0x3,0x4,0x5,0x6,0x8,0x9,0xe,0x10,0x11）。也就是说
+    # "go-smb2 对强制加密服务 → OK" 这行字在纯明文会话下也会照打，
+    # 正好又犯了本节开头 §"判据不是能读到内容" 警告的那个错。
+    echo "  D. go-smb2 对强制加密服务（线级判定）"
+    _drep="$WORK/tap-gosmb2.txt"
+    _dout="$WORK/tap-gosmb2.out"
+    _dcliout="$WORK/cli-gosmb2.out"
+    if ! tap_begin "$PORT_STRICT" "$_drep" "$_dout"; then
+        echo "    go-smb2: smbtap 起不来（探针本身出问题了）"
+        sed 's/^/      /' "$_dout" | head -5
+        rc=1
     else
-        echo "  D. go-smb2 对强制加密服务 → 失败"; rc=1
+        _dcli=0
+        ( cd "$ROOT/scripts/clients/gosmb2" && \
+          go run . "127.0.0.1:$PORT_TAP" "$USER" "$PASS" secure ) > "$_dcliout" 2>&1 || _dcli=1
+        if ! tap_end "$_drep"; then
+            echo "    go-smb2: smbtap 未产出报告（探针本身出问题了）"
+            sed 's/^/      /' "$_dout" | head -5
+            rc=1
+        elif [ "$_dcli" -ne 0 ]; then
+            echo "    go-smb2: 连接强制加密服务失败："
+            tail -3 "$_dcliout" | sed 's/^/      /'
+            rc=1
+        elif tap_assert_encrypted "go-smb2" "$_drep"; then
+            echo "    go-smb2: 加密帧 c2s=$TAP_TX s2c=$TAP_RX，明文仅协商/认证 → OK"
+        else
+            rc=1
+        fi
     fi
 
     # ---- 诚实声明：negotiate 层 "Cipher==0 仍 ACCESS_DENIED" 这一档 ----
