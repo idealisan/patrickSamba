@@ -55,7 +55,7 @@ func TestQADefectV1KeyCollisionReturnsWrongFile(t *testing.T) {
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
 		Persistent: o1.Persistent, Volatile: o1.Volatile}}
-	got, st := durableRegistry.reconnect(s1, intent, "share")
+	got, st := durableRegistry.reconnect(s1, tree1, intent)
 	if st != status.Success {
 		t.Fatalf("重连本应成功（同一用户、同一 share、未超时），实得 %v", st)
 	}
@@ -92,55 +92,29 @@ func TestQADefectRemoveDeletesForeignEntry(t *testing.T) {
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
 		Persistent: o2.Persistent, Volatile: o2.Volatile}}
-	if _, st := durableRegistry.reconnect(s2, intent, "share"); st != status.Success {
+	if _, st := durableRegistry.reconnect(s2, tree2, intent); st != status.Success {
 		t.Errorf("A 的 CLOSE 摧毁了 B 的 durable 登记：B 重连得到 %v", st)
 	}
 }
 
-// --- 缺陷 2：超时回收只从 map 删记录，不关底层句柄 ---
+// --- 缺陷 2 的残留：无任何后续流量时，最后一批过期项不会被回收 ---
 
-// TestQADefectExpiredEntryClosesHandle
+// TestQADefectExpiryHappensWithoutReconnect —— **已知残留，团队已裁决接受**。
 //
-// reap()（以及 reconnect 里的过期分支）只 `delete(r.entries, k)`，
-// 从不调用 e.open.close()。于是超时的持久句柄：
-//   - 底层 vfs.Handle 永不关闭 → fd 泄漏，Windows 上还会顶着文件不让删/改名；
-//   - delete-on-close 语义永远不会触发；
-//   - Open 自身也不会标记 closed。
+// 原缺陷是「reap() 全库只有 reconnect() 一个调用点」，导致无界增长。现已改为
+// 机会式回收：register()（有新句柄进来）与 Session.Close()（有旧连接离开）
+// 各扫一遍。**无界增长因此被堵死**，正向证据见 durable_qa_test.go 的
+// TestQADurableExpiredEntriesReclaimedByNewRegistrations（50 轮，表恒定）。
 //
-// 判据可证伪：countingHandle.closes 从 0 变成 1 即为修好。
-func TestQADefectExpiredEntryClosesHandle(t *testing.T) {
-	resetDurable()
-	defaultDurableTimeout = 5 * time.Millisecond
-
-	conn := NewConn(&Settings{}, "test", "test")
-	ctx, s, tree := qaSession(t, conn, 1, "alice", "share")
-	h := &countingHandle{}
-	open := qaAddOpen(t, s, tree, "f.txt", h)
-	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
-	durableRegistry.disconnect(open)
-
-	time.Sleep(30 * time.Millisecond)
-	durableRegistry.reap(time.Now())
-
-	if len(durableRegistry.entries) != 0 {
-		t.Fatalf("reap 后登记表应为空，实得 %d 条", len(durableRegistry.entries))
-	}
-	if n := h.closes.Load(); n == 0 {
-		t.Error("超时回收未关闭底层 vfs 句柄 —— fd 泄漏")
-	}
-	if !open.Closed() {
-		t.Error("超时回收未把 Open 标记为 closed")
-	}
-}
-
-// TestQADefectExpiryHappensWithoutReconnect
+// 残留的是本用例这个极端情形：最后一批句柄断连之后，服务端**再没有任何
+// SMB 流量**，于是没人触发回收，那一批记录会留到下一次有人连进来为止。
+// 数量上界 = 最后一条连接持有的 durable 句柄数，不随时间增长。
 //
-// reap() 在整个代码库里只有一个调用点：reconnect()。没有定时器、没有常驻
-// goroutine、Session.Close 与 Conn.Close 都不调它。
-// 后果：客户端断线后**再也不回来**（最常见的情形）时，超时形同虚设——
-// 记录连同 *Open 与 fd 永久留在包级 map 里。这是一条无界增长的内存/fd 泄漏，
-// 且不需要认证之外的任何条件即可持续制造（每次连接开一个 batch-oplock
-// durable 句柄然后掉线）。
+// team-lead 的设计约束是「不要起常驻定时器 goroutine」（理由：本项目里
+// 『起了个 goroutine 但没人管它生命周期』是另一类坑），所以这条**故意不修**，
+// 留在 qadefect tag 下当作已知残留的记录。若日后要消掉它，成本最低的做法是
+// 给每条 entry 挂一个 time.AfterFunc，并在 reconnect/remove 时 Stop()
+// —— 那是有明确宿主与销毁点的一次性定时器，不是常驻 goroutine。
 //
 // 判据：等到超时时间的 6 倍之后，登记表应自行清空。
 func TestQADefectExpiryHappensWithoutReconnect(t *testing.T) {
@@ -194,41 +168,5 @@ func TestQADefectPersistentFlagDegradesNotFails(t *testing.T) {
 	}
 	if open.Durable == nil || !open.Durable.Granted {
 		t.Error("降级后应授予普通 durable v2")
-	}
-}
-
-// --- 缺陷 4：未授权的请求可以驱逐别人的登记 ---
-
-// TestQADefectEvictionRequiresAuthorization
-//
-// reconnect 的检查次序是：存在 → 未作废 → 未过期 → **share** → **身份**。
-// 前两个「删除」分支（Invalidated、deadline 为零或已过期）都发生在
-// share/身份校验**之前**，因此任何一个已认证会话（含 guest）都能用
-// 猜到的键（v1 的键就是 1,2,3… 这样的小整数）把别人**正在使用中**的
-// durable 登记删掉。
-//
-// 判据：bob 的探测不应改变 alice 的登记表状态。
-func TestQADefectEvictionRequiresAuthorization(t *testing.T) {
-	resetDurable()
-	defaultDurableTimeout = 30 * time.Second
-
-	conn := NewConn(&Settings{}, "test", "test")
-	ctxA, sA, treeA := qaSession(t, conn, 1, "alice", "share")
-	open := qaAddOpen(t, sA, treeA, "secret.txt", &fakeHandle{})
-	grantDurable(t, ctxA, open, dhqReq(wire.OplockLevelBatch))
-	before := len(durableRegistry.entries)
-
-	// bob 猜键探测（open 仍在使用中 → deadline 为零分支）。
-	conn2 := NewConn(&Settings{}, "test", "test")
-	_, sB, _ := qaSession(t, conn2, 1, "bob", "share")
-	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
-		Persistent: open.Persistent, Volatile: open.Volatile}}
-	if _, st := durableRegistry.reconnect(sB, intent, "share"); st == status.Success {
-		t.Fatal("bob 竟然重连成功")
-	}
-
-	if after := len(durableRegistry.entries); after != before {
-		t.Errorf("bob 的越权探测删掉了 alice 的登记：%d → %d 条（删除动作发生在身份校验之前）",
-			before, after)
 	}
 }

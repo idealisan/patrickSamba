@@ -111,7 +111,7 @@ func TestQADurableRemoveTreeReconnectNoDeadlock(t *testing.T) {
 		for i := 0; i < rounds; i++ {
 			conn := NewConn(&Settings{}, "test", "test")
 			ctxA, sA, treeA := qaSession(t, conn, 1, "alice", "share")
-			_, sB, _ := qaSession(t, conn, 2, "alice", "share")
+			_, sB, treeB := qaSession(t, conn, 2, "alice", "share")
 
 			open := qaAddOpen(t, sA, treeA, "f.txt", &fakeHandle{})
 			grantDurable(t, ctxA, open, dhqReq(wire.OplockLevelBatch))
@@ -121,7 +121,7 @@ func TestQADurableRemoveTreeReconnectNoDeadlock(t *testing.T) {
 			var wg sync.WaitGroup
 			wg.Add(2)
 			go func() { defer wg.Done(); sA.RemoveTree(treeA.ID) }()
-			go func() { defer wg.Done(); durableRegistry.reconnect(sB, intent, "share") }()
+			go func() { defer wg.Done(); durableRegistry.reconnect(sB, treeB, intent) }()
 			wg.Wait()
 		}
 	}()
@@ -147,7 +147,7 @@ func TestQADurableSessionCloseReconnectNoDeadlock(t *testing.T) {
 		for i := 0; i < rounds; i++ {
 			conn := NewConn(&Settings{}, "test", "test")
 			ctxA, sA, treeA := qaSession(t, conn, 1, "alice", "share")
-			_, sB, _ := qaSession(t, conn, 2, "alice", "share")
+			_, sB, treeB := qaSession(t, conn, 2, "alice", "share")
 
 			open := qaAddOpen(t, sA, treeA, "f.txt", &fakeHandle{})
 			grantDurable(t, ctxA, open, dhqReq(wire.OplockLevelBatch))
@@ -157,7 +157,7 @@ func TestQADurableSessionCloseReconnectNoDeadlock(t *testing.T) {
 			var wg sync.WaitGroup
 			wg.Add(3)
 			go func() { defer wg.Done(); sA.Close() }()
-			go func() { defer wg.Done(); durableRegistry.reconnect(sB, intent, "share") }()
+			go func() { defer wg.Done(); durableRegistry.reconnect(sB, treeB, intent) }()
 			go func() { defer wg.Done(); open.close() }()
 			wg.Wait()
 		}
@@ -221,7 +221,7 @@ func TestQADurableClosedHandleNotReconnectable(t *testing.T) {
 	grantDurable(t, ctx, o1, dhqReq(wire.OplockLevelBatch))
 	durableRegistry.disconnect(o1)
 	i1 := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: o1.Persistent, Volatile: o1.Volatile}}
-	if _, st := durableRegistry.reconnect(s, i1, "share"); st != status.Success {
+	if _, st := durableRegistry.reconnect(s, tree, i1); st != status.Success {
 		t.Fatalf("对照组：断连后应可重连，实得 %v", st)
 	}
 
@@ -235,7 +235,7 @@ func TestQADurableClosedHandleNotReconnectable(t *testing.T) {
 	durableRegistry.disconnect(o2)
 	o2.close()
 	i2 := &wire.DurableIntent{ReconnectV1: &wire.FileID{Persistent: o2.Persistent, Volatile: o2.Volatile}}
-	if _, st := durableRegistry.reconnect(s2, i2, "share"); st == status.Success {
+	if _, st := durableRegistry.reconnect(s2, tree2, i2); st == status.Success {
 		t.Error("已 CLOSE 的句柄不应还能被重连认领")
 	}
 }
@@ -266,7 +266,7 @@ func TestQADurableReconnectRebindsTree(t *testing.T) {
 
 	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
 		Persistent: open.Persistent, Volatile: open.Volatile}}
-	got, st := durableRegistry.reconnect(sB, intent, "share")
+	got, st := durableRegistry.reconnect(sB, treeB, intent)
 	if st != status.Success {
 		t.Fatalf("重连失败: %v", st)
 	}
@@ -276,6 +276,133 @@ func TestQADurableReconnectRebindsTree(t *testing.T) {
 	if got.Tree == treeA {
 		t.Errorf("重连后 Open.Tree 仍指向旧会话的树（旧树 Session.closed=%v）；"+
 			"期望改绑到新树 %p", sA.closedForTest(), treeB)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6. 超时回收必须真的关闭底层句柄（原 durable_defect_test.go，已修，转回归）
+// ---------------------------------------------------------------------------
+
+// TestQADurableExpiredEntryClosesHandle
+//
+// 原缺陷：reap()（以及 reconnect 里的过期分支）只 `delete(r.entries, k)`，
+// 从不调用 e.open.close()。于是超时的持久句柄底层 vfs.Handle 永不关闭
+// → fd 泄漏；Windows 上还会顶着文件不让删/改名；FILE_DELETE_ON_CLOSE
+// 创建的句柄也永远不会执行那次删除。
+//
+// 判据可证伪：countingHandle.closes 必须从 0 变成 1。把 reap() 尾部那个
+// `o.close()` 循环删掉，本用例立刻变红。
+func TestQADurableExpiredEntryClosesHandle(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = 5 * time.Millisecond
+
+	conn := NewConn(&Settings{}, "test", "test")
+	ctx, s, tree := qaSession(t, conn, 1, "alice", "share")
+	h := &countingHandle{}
+	open := qaAddOpen(t, s, tree, "f.txt", h)
+	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
+	durableRegistry.disconnect(open)
+
+	if n := h.closes.Load(); n != 0 {
+		t.Fatalf("前提被破坏：进入等待重连态时不该关闭底层句柄，实得 closes=%d", n)
+	}
+
+	time.Sleep(30 * time.Millisecond) // 远超 5ms 超时
+	durableRegistry.reap(time.Now())
+
+	if len(durableRegistry.entries) != 0 {
+		t.Fatalf("reap 后登记表应为空，实得 %d 条", len(durableRegistry.entries))
+	}
+	if n := h.closes.Load(); n == 0 {
+		t.Error("超时回收未关闭底层 vfs 句柄 —— fd 泄漏")
+	}
+	if !open.Closed() {
+		t.Error("超时回收未把 Open 标记为 closed")
+	}
+}
+
+// TestQADurableExpiredEntriesReclaimedByNewRegistrations
+//
+// 原缺陷：reap() 在整个代码库里只有 reconnect() 一个调用点，没有定时器、
+// 没有常驻 goroutine，Session.Close 与 Conn.Close 都不调它。客户端断线后
+// **再也不回来**（最常见的情形）时，记录连同 *Open 与 fd 永久留在包级
+// map 里 —— 一条无界增长的内存/fd 泄漏，攻击者只要反复「连上→开一个
+// batch-oplock durable 句柄→掉线」即可持续制造。
+//
+// 现在改为机会式回收：register()（有新句柄进来）与 Session.Close()
+// （有旧连接离开）各扫一遍。本用例是「无界增长已被堵死」的正向证据：
+// 50 轮「建会话→授予 durable→断连」之后，登记表**不随轮数增长**。
+//
+// 判据可证伪：把 register() 里的 r.reap() 与 Session.Close() 尾部的
+// r.reap() 两处都删掉，entries 会线性涨到 50 附近，本用例变红。
+func TestQADurableExpiredEntriesReclaimedByNewRegistrations(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = time.Millisecond
+
+	const rounds = 50
+	for i := 0; i < rounds; i++ {
+		conn := NewConn(&Settings{}, "test", "test")
+		ctx, s, tree := qaSession(t, conn, uint64(i+1), "alice", "share")
+		open := qaAddOpen(t, s, tree, "f.txt", &countingHandle{})
+		grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
+		s.Close() // 断连，进等待重连态，1ms 后过期
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 上界取 2 而非 0：最后一轮断连之后再没有任何流量触发回收，那一批
+	// 记录会留到下次有人连进来为止（已知残留，见 durable_defect_test.go
+	// 的 TestQADefectExpiryHappensWithoutReconnect）。要证明的是**不随
+	// 轮数增长**，不是恒为零。
+	if n := len(durableRegistry.entries); n > 2 {
+		t.Errorf("跑了 %d 轮后登记表有 %d 条 —— 过期项没被机会式回收，仍在无界增长",
+			rounds, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7. 驱逐必须发生在鉴权之后（原 durable_defect_test.go，已修，转回归）
+// ---------------------------------------------------------------------------
+
+// TestQADurableEvictionRequiresAuthorization
+//
+// 原缺陷：reconnect 的检查次序是「存在 → 未作废 → 未过期 → share → 身份」，
+// 两个「删除登记」的分支都排在 share/身份校验**之前**。于是任何一个已认证
+// 会话（含 guest）只要猜中键，就能把别人**正在使用中**的 durable 登记删掉。
+// v1 的键当年就是 1、2、3… 这样的小整数，猜中成本约等于零（拒绝服务）。
+//
+// 判据可证伪：把 durable.go 的 reconnect 里「先授权后驱逐」两段的次序调回来，
+// bob 的探测会命中 deadline-zero 分支并删掉 alice 的记录，本用例立刻变红。
+func TestQADurableEvictionRequiresAuthorization(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = 30 * time.Second
+
+	conn := NewConn(&Settings{}, "test", "test")
+	ctxA, sA, treeA := qaSession(t, conn, 1, "alice", "share")
+	open := qaAddOpen(t, sA, treeA, "secret.txt", &fakeHandle{})
+	grantDurable(t, ctxA, open, dhqReq(wire.OplockLevelBatch))
+	before := len(durableRegistry.entries)
+	if before == 0 {
+		t.Fatal("前提被破坏：alice 的 durable 没有登记成功")
+	}
+
+	// bob 猜键探测（open 仍在使用中 → deadline 为零分支）。
+	conn2 := NewConn(&Settings{}, "test", "test")
+	_, sB, treeB := qaSession(t, conn2, 1, "bob", "share")
+	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
+		Persistent: open.Persistent, Volatile: open.Volatile}}
+	if _, st := durableRegistry.reconnect(sB, treeB, intent); st != status.AccessDenied {
+		t.Fatalf("bob 越权重连应得 ACCESS_DENIED，实得 %v", st)
+	}
+
+	if after := len(durableRegistry.entries); after != before {
+		t.Errorf("bob 的越权探测删掉了 alice 的登记：%d → %d 条（删除动作发生在身份校验之前）",
+			before, after)
+	}
+
+	// alice 自己随后仍能正常断连重连 —— 证明记录不但还在，而且是可用的。
+	durableRegistry.disconnect(open)
+	if _, st := durableRegistry.reconnect(sA, treeA, intent); st != status.Success {
+		t.Errorf("越权探测之后 alice 的合法重连被破坏：%v", st)
 	}
 }
 
