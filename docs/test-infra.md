@@ -270,3 +270,331 @@ Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要�
 | 能跑 FUSE 客户端吗？ | **不能**（无 `/dev/fuse`，且 `mknod` 被拦） |
 | 能监听 445 吗？ | **能**（有 `CAP_NET_BIND_SERVICE`） |
 | 能抓包吗？ | **不能**（无 `CAP_NET_RAW`），只能用应用层中继探针 `smbtap` |
+
+---
+
+## B. Windows 客户端怎么测
+
+### B.0 先说结论：两张清单
+
+这是本节的产出，也是"要不要买机器"的决策依据。
+
+#### 清单一：**必须真 Windows** 才能测的（买机器的理由）
+
+| # | 事项 | 为什么替代不了 | 严重度 |
+|---|---|---|---|
+| B-W1 | **stupidSamba 自身在 Windows 上运行** | `internal/vfs/*_windows.go`、`internal/mdns/sockopt_windows.go`、win-meta 的 MetadataStore 全是 Windows-only 代码路径。交叉编译只证明"能编译"，不证明"能跑"。见 §B.1 —— **仓库里已经有 8 个 Windows-only 测试函数从未被执行过** | **最高** |
+| B-W2 | Windows 自带 SMB 重定向器（`mrxsmb.sys`）的真实报文行为 | 它是内核驱动，Wine 没有（§B.4 实测），QEMU 无 KVM 跑不动（§A.6）。Samba 的 `libsmbclient` 是**另一套独立实现**，报文模式（compound 组合、create context 顺序、DFS 探测、lease key 复用）与微软实现不同 | 高 |
+| B-W3 | Windows 11 24H2 的**客户端侧默认策略** | 24H2 默认要求 SMB 签名、默认封禁 guest 回退。我们只能在 Linux 侧模拟"客户端要求签名"（§B.3 已实测通过），但**模拟的是 Samba 对该策略的理解，不是微软的实现** | 中 |
+| B-W4 | 资源管理器 UI 层行为 | 属性页、"以前的版本"标签、缩略图（会去读 `desktop.ini` / 生成 `Thumbs.db`）、右键菜单、离线文件。这些是 Explorer 而非协议栈的行为，无第三方等价物 | 中 |
+| B-W5 | `robocopy` / `xcopy` 的服务端卸载路径 | 当服务端宣告支持时 robocopy 会走 `FSCTL_SRV_COPYCHUNK`。我们**目前没实现**（§B.2 smbtorture 实测 21 个用例挂在这上面），修完后需要真 robocopy 验一次 | 中 |
+| B-W6 | 真 SSPI 的 NTLMv2（含 MIC、通道绑定 EPA） | LSA 生成的 NTLM token 与 Samba 客户端生成的不完全一样（尤其 AV_PAIR 集合、MsvAvChannelBindings）。这是**认证被拒**类问题的高发区 | 中 |
+| B-W7 | 驱动器映射持久化 / `net use` / UNC 直接访问 | `\\host\share` 路径解析、凭据管理器交互 | 低 |
+
+**B-W1 是唯一一条"没有它就交付不了"的**。其余 6 条都是"没有它质量有风险"。
+如果只肯为一件事买机器，那就是为 B-W1 —— 因为 win-vfs（#12）和 win-meta（#11）
+两个任务正在写的代码，**现在没有任何手段能证明它跑得起来**。
+
+#### 清单二：**不需要真 Windows** 就能覆盖的（省钱的部分）
+
+| # | 事项 | 用什么替代 | 证据 |
+|---|---|---|---|
+| B-L1 | SMB2/3 协议合规性（331 个用例） | `smbtorture`（Samba 官方一致性套件） | §B.2 **【实测】** |
+| B-L2 | 签名协商与校验 | `smbclient --option="client signing=required"` | §B.3 **【实测】** |
+| B-L3 | SMB3 加密 | `smbclient --client-protection=encrypt` + `smbtap` 线级探针 | §B.3 **【实测】** |
+| B-L4 | guest 策略（Win11 默认拒绝 guest） | `smbclient -N` 断言 `LOGON_FAILURE` | §B.3 **【实测】** |
+| B-L5 | 全部 5 个方言的协商 | `smbclient -m SMB2_02/SMB2_10/SMB3_00/SMB3_02/SMB3_11` | §B.3 **【实测】** |
+| B-L6 | NTLMv2 报文级正确性 | impacket（独立 Python 实现，第三家栈） | 现有 `scripts/acceptance.sh` |
+| B-L7 | Windows 版**编译期**正确性（含 `_test.go`） | `GOOS=windows go vet ./...` | §B.1 **【实测】**，且 **CI 现在没做** |
+| B-L8 | 文件属性 / DOS attribute 往返 | smbtorture `smb2.getinfo` / `smb2.setinfo` | §B.2 |
+| B-L9 | Alternate Data Stream 语义 | smbtorture `smb2.streams` | §B.2 |
+
+> **关键判断：清单二覆盖的东西，买 Windows 机器也买不回来 —— 反过来也一样。**
+> smbtorture 打的是协议一致性（Windows 客户端本身不会去测这些边界），
+> 真 Windows 打的是"微软实现到底怎么发报文"。两者**不重叠、不可互相替代**，
+> 不要用"我们有 smbtorture 了所以不需要 Windows"或反过来的说法。
+
+---
+
+### B.1 **仓库里已经有从未被执行过的 Windows 测试代码**
+
+这是本节最硬的一条事实，也是 B-W1 的直接证据。
+
+**【实测】**
+
+```
+$ ls internal/vfs/*_windows*.go internal/mdns/*_windows*.go
+internal/vfs/attr_windows.go
+internal/vfs/errmap_windows.go
+internal/vfs/metadata_windows.go
+internal/vfs/metadata_windows_test.go     ← 注意这个
+internal/vfs/sparse_windows.go
+internal/vfs/sys_windows.go
+internal/mdns/sockopt_windows.go
+
+$ grep -c '^func Test' internal/vfs/metadata_windows_test.go
+8
+```
+
+这 8 个测试函数是：`TestMetadataPutGet`、`TestMetadataDeleteSubtree`、
+`TestMetadataRenameSubtree`、`TestMetadataRenameOverwrite`、`TestMetadataRenameMissing`、
+`TestMetadataPersistsAcrossReopen`、`TestMetadataCodec`、`TestDefaultMetadataPathOutsideShare`。
+
+**它们从来没有运行过，一次都没有。** 原因：
+
+1. CI 的交叉编译门禁跑的是 `GOOS=windows ... go build ./...`（`.cnb.yml:63`）。
+   **`go build` 根本不编译 `_test.go` 文件**，所以它连"能不能编过"都没检查。
+2. CI 的 `go test ./...` 只在 Linux 上跑，`//go:build windows` 的文件被直接跳过。
+
+我手工补测了一次，好消息是**当前是绿的**：
+
+```
+$ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+build_rc=0
+$ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+vet_rc=0
+```
+
+`go vet` 会连 `_test.go` 一起做类型检查，所以这一跑至少证明了"Windows 测试代码目前能编译"。
+
+> **给 `qa` 的具体建议（我不改 `.cnb.yml`，请 team-lead 转达）**：
+> 在交叉编译门禁里，把每个目标的 `go build ./...` **改成或补上** `go vet ./...`。
+> 成本几乎为零（本机实测两条命令都是秒级），收益是把 Windows/darwin 的
+> 测试代码纳入编译期校验。这不能替代真机运行，但能挡住"win-meta 改了接口、
+> Windows 测试文件编不过、谁都不知道"这类事故。
+>
+> ```yaml
+> # 现在（只查产品代码）
+> - GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./...
+> # 建议（连 _test.go 一起类型检查）
+> - GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go vet ./...
+> ```
+>
+> **【实测】** 这条改动在 `GOOS=windows`、`GOOS=darwin` 下当前都通过，不会把 CI 变红。
+
+---
+
+### B.2 `smbtorture`：本容器里可用的最强武器
+
+**【实测】** 装得上、跑得动、能发现真问题。
+
+```
+$ apt-get install -y -qq samba-testsuite
+$ smbtorture --version
+Version 4.22.4-Debian-4.22.4+dfsg-1
+
+$ smbtorture --list | grep -c '^smb2\.'
+331
+```
+
+#### 跑法（有一个坑）
+
+```sh
+smbtorture "//127.0.0.1/public" -U "testuser%testpass123" \
+  --option="smb ports=4459" smb2.ioctl.sparse_file_flag
+```
+
+> ⚠️ **端口必须写成 `--option="smb ports=4459"`。**
+> 我先试的 `--option="libsmb:client_port=4459"` 会返回 `NT_STATUS_NO_MEMORY` ——
+> 一个**看起来像服务端崩了的假故障**，实际只是选项名不对。
+> 这个坑与 AGENTS.md §10.3 第 8 条（smbclient `-c` 必须用分号）同类，
+> 都是"测试工具的问题伪装成服务端 bug"。
+
+耗时：**331 个用例全扫一遍 62 秒**（2 核容器，每个用例套 `timeout 25`）。
+完全能进 CI。个别用例会挂住，**必须套 timeout**。
+
+#### 基线（打在 `main` 的 `d80d257`，即 v0.1.0 tag）
+
+**【实测】** 331 个用例：**52 PASS / 186 FAIL / 88 SKIP / 5 OTHER**。
+
+186 个 FAIL 里绝大多数是"功能还没做"，不是回归。按根因聚类：
+
+| 数量 | 失败根因 | 归属 |
+|---:|---|---|
+| 21 | `setup copy chunk error` —— `FSCTL_SRV_COPYCHUNK` 未实现 | **此前未登记的缺口**（对应 B-W5） |
+| 19 | `oplock_level was 0, expected 9` | 任务 #4 tm-lease 正在做 |
+| 17 | CHANGE_NOTIFY 返回 `NOT_SUPPORTED` | 未登记 |
+| 12 | `durable_open was 0, expected 1` | 任务 #3 tm-handle 正在做 |
+| 8 | byte-range lock 语义（该 `LOCK_NOT_GRANTED` 却返回 `OK`） | **此前未登记** |
+| 7 | streams `OBJECT_NAME_NOT_FOUND` | 待查 |
+| 6 | credits：`cur_credits was 512, expected 514` | **此前未登记，疑似真 bug** |
+| 6 | 稀疏属性位 `FILE_ATTRIBUTE_SPARSE_FILE`(0x200) 从不上报 | 已 DM `tm-vfs`，见下 |
+| 5 | session `LOGON_FAILURE`（疑似 reauth 路径） | 待查 |
+| 3 | rename 该 `SHARING_VIOLATION` 却返回 `OK` | **此前未登记** |
+| 3 | compound `INVALID_HANDLE` vs `FILE_CLOSED` | 状态码偏差 |
+
+#### 顺带发现的一个文档失准（已 DM tm-vfs）
+
+**【实测】** 同一套里这两个用例结果相反：
+
+```
+$ smbtorture ... smb2.ioctl.sparse_file_attr
+success: sparse_file_attr
+
+$ smbtorture ... smb2.ioctl.sparse_file_flag
+failure: source4/torture/smb2/ioctl.c:3328:
+  Expression `is_sparse' failed: no sparse attr after set
+```
+
+根因在 `internal/vfs/attr.go:103` —— 稀疏位是由 `Alloc < Size` **现算**的，
+不是 `FSCTL_SET_SPARSE` 之后置上的粘性标志。torture 的流程是
+「建空文件 → SET_SPARSE(TRUE) → 立刻 QUERY_INFO」，此时还没打洞，现算逻辑必然算不出 0x200。
+
+这说明 `docs/timemachine-status.md` §5「稀疏文件已实现且实测通过」
+**只覆盖了 FSCTL 行为侧**（真打洞、QAR 正确、空间真回收），属性位侧从未验证。
+**【未查证】** macOS 建 `.sparsebundle` band 时到底读不读 0x200 —— 查不到权威说法，
+已在 §C 的人工清单里做成一个可证伪的步骤。
+
+#### 给 qa 的接法建议
+
+1. **不要一上来做成阻塞门禁**，186 FAIL 会让门禁永远红着，等于没有门禁。
+2. 做成**白名单基线**：把当前 52 个 PASS 固定成列表，CI 只跑这 52 个并要求全绿。
+   新增 PASS 随时往里加；**已有的 PASS 变 FAIL 就是回归、就该红**。
+3. 全量扫描做成 **allow-fail 的信息性任务**，只输出计数，用来看"这次改动顺手修好了几个"。
+
+---
+
+### B.3 Linux 侧能模拟到什么程度（实测）
+
+服务端：本地构建的 `main` 二进制，监听 127.0.0.1:4459，`allow_guest: false`。
+
+**【实测】**
+
+```
+=== 1) 强制签名 required（对标 Win11 24H2 客户端默认） ===
+$ smbclient //127.0.0.1/public -U testuser%testpass123 -p 4459 -m SMB3 \
+    --option="client signing=required" -c 'ls'
+  testsmb2_dir      D    10  ...
+  testsmb2_file.dat A     7  ...
+        67108864 blocks of size 4096. 65875178 blocks available      ← 通过
+
+=== 2) 强制加密 ===
+$ smbclient ... --client-protection=encrypt -c 'ls'
+        67108864 blocks of size 4096. 65875178 blocks available      ← 通过
+
+=== 3) 匿名/guest（Win11 默认拒绝 guest，我们也应拒绝） ===
+$ smbclient //127.0.0.1/public -N -p 4459 -m SMB3 -c 'ls'
+session setup failed: NT_STATUS_LOGON_FAILURE                        ← 符合预期
+
+=== 4) 五个方言逐个协商 ===
+SMB2_02 -> ok    SMB2_10 -> ok    SMB3_00 -> ok    SMB3_02 -> ok    SMB3_11 -> ok
+```
+
+**这四条足以证明"Windows 客户端连不上"的常见原因（签名、加密、guest、方言）
+在我们这边都是通的。** 但它证明不了 B-W2/B-W3/B-W6 —— 因为发报文的是 Samba，不是微软。
+
+---
+
+### B.4 Wine：**实测无效，可以彻底排除**
+
+这条本来是"看起来最省钱"的方案，值得把否定证据摆清楚，免得以后有人再花时间试。
+
+**【实测】** 装了 Debian 13 的 wine 10.0（`--no-install-recommends` 约 344 KB deb，
+装完 1 分钟内完成）：
+
+```
+$ wine --version
+wine-10.0 (Debian 10.0~repack-6)
+
+$ WINEDEBUG=-all wine cmd /c 'dir \\127.0.0.1\public'
+ Directory of Z:\127.0.0.1          ← ★ 关键：UNC 被解析成了本地 Unix 路径
+ 找不到文件
+```
+
+`Z:` 在 Wine 里是 Unix 根 `/`。也就是说 Wine 把 `\\127.0.0.1\public`
+当成了**宿主 Linux 文件系统上的 `/127.0.0.1/public`**，
+**根本没有发出任何 SMB 报文**。服务端日志在这次尝试期间零新增（最后一条还停在
+上一轮 smbclient 测试的时间戳）—— 这是反向对照，不是只看客户端报错。
+
+根因也很清楚：
+
+```
+$ ls /usr/lib/x86_64-linux-gnu/wine/x86_64-windows/*.sys | wc -l
+20        # 有 ndis.sys / netio.sys / tdi.sys / http.sys …
+$ ls /usr/lib/x86_64-linux-gnu/wine/x86_64-windows/ | grep -iE 'mrxsmb|rdbss'
+（无输出）
+```
+
+**Wine 没有 `mrxsmb.sys`，也没有 `rdbss.sys`** —— Windows 的 SMB 重定向器是内核驱动，
+Wine 没有内核，所有文件 IO 一律委托给宿主 Linux。所以哪怕 Wine 里真能访问 UNC，
+底层用的也会是 **Linux 的 `cifs.ko`**，测的还是 Linux 栈，
+**与"微软的 SMB 客户端怎么发报文"无关**。而 `cifs.ko` 在本容器还挂不上（§A.4）。
+
+> **结论：Wine 在任何情况下都不能替代真 Windows 做 SMB 客户端测试。**
+> 这不是"配置一下也许行"，是架构上不存在这个能力。**不要再试了。**
+
+---
+
+### B.5 CI 上跑 Windows 的三条路
+
+#### 路线 1：CNB 自托管 Windows 构建节点
+
+**【查文档】** CNB 文档（`build-node.md`、`grammar.md`）说明：CNB **没有托管的
+Windows/macOS 云主机**，但支持把自己的机器注册成构建节点，在 `.cnb.yml` 里用
+`runner.namespace` + `runner.tags` 选中。自托管节点**不计费**。
+
+**【未查证 / 有矛盾】** `grammar.md` 写 `runner.namespace` "仅企业版有效"，
+而 `build-node.md` 把它当作 SAAS 根组织的功能介绍。两处口径不一致，
+**落地前必须在组织设置页面里人工确认本组织有没有这个入口**，别照着文档就下单买机器。
+
+- 优点：与现有 `.cnb.yml` 同一套流水线，不用把代码镜像到别处。
+- 缺点：需要一台常开的 Windows 机器 + 网络可达 CNB；矛盾未澄清前有落空风险。
+
+#### 路线 2：镜像到 GitHub 用 `windows-latest`
+
+**【查文档】** GitHub Actions 标准托管 runner（[官方规格表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)）：
+
+| 标签 | CPU | 内存 | 磁盘 | 架构 |
+|---|---|---|---|---|
+| `windows-latest` / `windows-2025` / `windows-2022` | 4 | 16 GB | 14 GB | x64 |
+| `windows-11-arm`（公开预览） | 4 | 16 GB | 14 GB | arm64 |
+| `macos-latest` / `macos-14/15/26` | 3 (M1) | 7 GB | 14 GB | arm64 |
+| `macos-15-intel` / `macos-26-intel` | 4 | 14 GB | 14 GB | Intel |
+
+（上表是**公开仓库**的规格；私有仓库的 Linux/Windows 会降到 2 核 8 GB，macOS 规格不变。）
+
+**关键的一句原文**：
+> "Use of the standard GitHub-hosted runners is **free and unlimited on public repositories**."
+
+**这条决定了成本模型，也决定了这条路值不值得走：**
+
+- **【实测】** 本仓库 `https://cnb.cool/finalappstore/stupidSamba.git`
+  匿名 `curl` 返回 **404 → 目前是私有仓库**。
+- 若愿意把代码**以公开仓库形式镜像到 GitHub**，Windows **和 macOS** 的 CI
+  就都是**免费且无限量**的 —— 这是所有方案里成本最低的一条，没有之一。
+- 若坚持私有，则走 GitHub 计费：Windows 是 Linux 的 2 倍费率、macOS 是 10 倍，
+  Free 计划每月 2000 分钟额度换算下来只有约 **200 分钟 macOS**，很快就不够用。
+  **【推断】** 费率倍数来自 GitHub 计费文档的常识性数字，本轮**未逐条核对当前价目表**，
+  真要按私有仓库付费前请自行复核。
+
+> 这是一个**需要项目所有者拍板的产品决策**（开源 or 不开源），不是技术选型，
+> 我不替他做决定。但必须指出：**开源与否直接决定了 Windows/macOS CI 是 0 元还是要买机器。**
+
+#### 路线 3：QEMU 跑 Windows 客机
+
+**【实测 + 外推】** 见 §A.6：本容器无 KVM，TCG 纯软件模拟比 KVM 慢 8~11 倍，
+Windows 10 冷启动外推 **5~15 分钟**，且内存只有 2.8 GiB 可用（Win10 实际需 4 GiB，
+Win11 硬性 4 GiB + TPM 2.0）。**本容器直接排除。**
+
+即便换一台有 KVM 的机器，这条路也只在"不想暴露代码、又不想买 Windows 授权硬件"时才有意义。
+另外注意 GitHub 官方对自家 runner 的表态：
+> "While nested virtualization is technically possible while using runners,
+> **it is not officially supported**."
+
+所以"在 GitHub Linux runner 里套 KVM 跑 Windows"也不是一条稳的路。
+
+#### 三条路对比
+
+| | 路线 1 CNB 自托管 | 路线 2 GitHub 托管 | 路线 3 QEMU |
+|---|---|---|---|
+| 金钱成本 | 一台 Windows 机器 + 电 | **公开仓库 = 0**；私有 = 计费 | 一台有 KVM 的机器 |
+| 前置条件 | 组织有自托管入口（**待确认**） | **愿意开源** | 宿主有 vmx/svm |
+| 与现有流水线 | 同一份 `.cnb.yml` | 需维护第二份 workflow + 镜像同步 | 自己搭 |
+| 稳定性 | 自己维护 | 高 | 低（镜像/快照维护累） |
+| 能否覆盖 B-W1 | ✅ | ✅ | ✅ |
+| 能否覆盖 B-W4（Explorer UI） | ✅（可远程桌面人工看） | ❌（无头，只能跑命令行） | ✅ |
+
+> **我的建议**：先问"愿不愿意开源"。
+> 愿意 → 路线 2，零成本拿下 Windows **和 macOS** 两侧的自动化部分，
+> 真机只留给 B-W4（Explorer UI）和 Time Machine 人工验收。
+> 不愿意 → 路线 1，但先去组织设置页确认自托管入口存在，再买机器。
