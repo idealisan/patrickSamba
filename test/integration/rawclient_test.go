@@ -45,12 +45,12 @@ type rawClient struct {
 	host    string
 	dialect wire.Dialect
 
-	msgID   uint64
-	sessID  uint64
-	treeID  uint32
-	user    string
-	pass    string
-	domain  string
+	msgID  uint64
+	sessID uint64
+	treeID uint32
+	user   string
+	pass   string
+	domain string
 
 	sessionKey []byte // 16 字节 ExportedSessionKey（无 KEY_EXCH 时即 SessionBaseKey）
 	signingKey []byte
@@ -251,12 +251,12 @@ func (c *rawClient) buildAuthenticate(ch *auth.ChallengeMessage) []byte {
 	ntowf := auth.NTOWFv2(ntHash, c.user, c.domain)
 
 	var blob bytes.Buffer
-	blob.WriteByte(0x01)              // RespType
-	blob.WriteByte(0x01)              // HiRespType
-	blob.Write([]byte{0, 0})          // Reserved (2)
-	blob.Write([]byte{0, 0, 0, 0})    // Reserved (4)
-	blob.Write(filetimeNow())        // Timestamp (8)
-	cc := make([]byte, 8)             // ClientChallenge (8)
+	blob.WriteByte(0x01)           // RespType
+	blob.WriteByte(0x01)           // HiRespType
+	blob.Write([]byte{0, 0})       // Reserved (2)
+	blob.Write([]byte{0, 0, 0, 0}) // Reserved (4)
+	blob.Write(filetimeNow())      // Timestamp (8)
+	cc := make([]byte, 8)          // ClientChallenge (8)
 	_, _ = rand.Read(cc)
 	blob.Write(cc)
 	blob.Write([]byte{0, 0, 0, 0}) // Reserved (4)
@@ -330,11 +330,11 @@ func (c *rawClient) request(cmd wire.Command, body []byte) ([]byte, error) {
 	}
 	c.msgID++
 	h := wire.Header{
-		Command:    cmd,
-		Credits:    1,
-		MessageID:  c.msgID,
-		TreeID:     c.treeID,
-		SessionID:  c.sessID,
+		Command:   cmd,
+		Credits:   1,
+		MessageID: c.msgID,
+		TreeID:    c.treeID,
+		SessionID: c.sessID,
 	}
 	msg := h.Append(nil)
 	msg = append(msg, body...)
