@@ -133,6 +133,54 @@ CHANGELOG 不许写成「已支持」。已 DM `win-vfs` 确认是刻意拆两�
 
 ---
 
+## 2.4 CI 状态：**9 个 PR 全绿，但 5 条分支的 push 构建是「假红」**（合并前必读）
+
+用 qa 在 PR #17 里新写的 `scripts/ci-status.sh` 同款端点
+（`GET /-/build/logs?sourceRef=<分支>`）逐分支查，发现**同一个 commit 会有两条构建记录、
+结论相反**：
+
+| 分支 | tip | `pull_request` 事件 | `push` 事件 | 分支内 `.cnb.yml` |
+|---|---|---|---|---|
+| `qa/save-sh-residual` | 37befb4c | ✅ success | ✅ success | 新 |
+| `docs/changelog-unreleased` | fe2165e2 | ✅ success | ✅ success | 新 |
+| `tm-vfs/path-exact-first` | 09c8927b | ✅ success | ✅ success | 新 |
+| `tm-vfs/metadata-mode` | 68dae1ed | ✅ success | ✅ success | 新 |
+| `win-vfs/platform-split` | 9d6b1111 | ✅ success | ❌ **error** | 旧 |
+| `tm-lease/oplock` | a66fc8e2 | ✅ success | ❌ **error** | 旧 |
+| `tm-vfs/quota` | b9b7a2bd | ✅ success | ❌ **error** | 旧 |
+| `tm-vfs/quota-startup-check` | 75330ed9 | ✅ success | ❌ **error** | 旧 |
+| `audit/cred-scan` | ef8e4e49 | ✅ success | ❌ **error** | 旧 |
+
+**相关性 100%，零例外：`.cnb.yml` 是旧版 → push 构建必红；是新版 → 必绿。
+与分支上的代码毫无关系。**
+
+成因链条完整可查：
+
+1. 旧 `.cnb.yml`（blob `28c9a48d`）里 `gate_test` 写的是 `CGO_ENABLED=0 go test -race`；
+2. **race 检测器依赖 cgo**，go 直接拒绝执行，0.1 秒退出、返回码 2；
+3. 它是流水线第一个失败的 stage，后面四关全被 skip —— 这正是 PR #9 修掉的死结；
+4. `push` 事件用**分支自己那份** `.cnb.yml` 跑，旧分支拿到的还是坏的那份 → 必红；
+5. `pull_request` 事件跑的是**与 main 的合并预览**，拿到的是修好的 `.cnb.yml` → 绿。
+
+### 结论与处置
+
+- **没有任何一个 PR 因 CI 被卡住。9 个 PR 的 PR-事件构建全绿，可以合。**
+- **不要看 push 构建的红去拦 PR** —— 那是历史包袱的回声，不是代码的问题。
+- 想让 push 也变绿：分支上 `git pull --rebase origin main` 拿到新 `.cnb.yml` 即可，
+  不必为此改一行代码。
+
+> ⚠️ **这才是真正危险的地方**：`tm-handle/durable`（+1677）、`win-meta/metadata-store`
+> （+1611）、`r-infra/test-infra`（+600）这三条**没有 PR**，因此只有 push 事件的构建记录，
+> 三条全是红的。**任何人扫一眼都会得出「这些代码是坏的」**——
+> 而 `r-infra/test-infra` 改的是**一个纯 Markdown 文件**，不可能编译失败。
+> 这三条红灯 100% 来自旧 `.cnb.yml`，与代码无关。§4.3 / §4.4 代开 PR 时不要被它误导。
+
+**记一笔方法论**：R1 是「假绿」（CI 没真跑却显示通过），这次是**「假红」**——
+同一个坑的镜像。两者的共同教训是：**CI 的颜色本身不是证据，
+「这个颜色是哪条流水线、在哪份配置下、对哪个 commit 得出的」才是证据。**
+
+---
+
 ## 3. 逐人盘点（第 2 轮）
 
 哑火线：**分支已建但 >25 分钟无新 commit，且手上没有开着的 PR。**
@@ -263,6 +311,7 @@ win-meta: bbolt 三项合规核验 ──► internal/meta 能否提 PR ──�
 | **R7** | **无主分支**：作者已退出、代码未提 PR（tm-handle +1677、r-infra +600） | 🔴 新增 | §4.3 / §4.4，指派他人代开 PR |
 | **R8** | **PR 堆积期越长，热点文件 rebase 代价越高** | 🟠 新增 | 按 §2.1 分批合，不要乱序 |
 | **R9** | **「被架空的逻辑」**：PR #7 新增 764 行，三个函数全部零产品调用点 | 🔴 新增，已查实 | §2.2；**今后凡新增函数零调用点，一律在合并前问一句** |
+| **R10** | **CI「假红」**：5 条分支因 `.cnb.yml` 是 PR#9 之前的旧版，push 构建必红，与代码无关 | 🟠 新增，已查实 | §2.4。**别拿 push 的红拦 PR**；尤其 3 条无 PR 分支只有 push 记录、全红，极易被误判为「代码坏了」 |
 
 ---
 
