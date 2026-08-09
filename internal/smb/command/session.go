@@ -266,14 +266,16 @@ func (s *Session) RemoveTree(id uint32) status.Status {
 	}
 	delete(s.trees, id)
 
-	// 摘出属于该树的句柄：持久句柄搬进 waiting 表（不断开底层文件），
-	// 其余锁外关闭（Close 可能阻塞在 IO 上）。
-	var doomed []*Open
+	// 摘出属于该树的句柄：持久句柄要搬进 waiting 表（不断开底层文件），
+	// 其余锁外关闭（Close 可能阻塞在 IO 上）。disconnect 会取 durableRegistry
+	// 的锁，必须在释放 s.mu 之后再调用，避免与 reconnect（r.mu→s.mu）形成
+	// 加锁顺序反转导致死锁。
+	var doomed, durable []*Open
 	for vid, o := range s.opens {
 		if o.Tree == t {
 			delete(s.opens, vid)
 			if o.Durable != nil && o.Durable.Granted && !o.Durable.Invalidated {
-				durableRegistry.disconnect(o)
+				durable = append(durable, o)
 			} else {
 				doomed = append(doomed, o)
 			}
@@ -281,6 +283,9 @@ func (s *Session) RemoveTree(id uint32) status.Status {
 	}
 	s.mu.Unlock()
 
+	for _, o := range durable {
+		durableRegistry.disconnect(o)
+	}
 	for _, o := range doomed {
 		o.close()
 	}
