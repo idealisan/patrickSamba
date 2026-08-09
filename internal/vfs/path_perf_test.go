@@ -94,6 +94,60 @@ func fullScansDuring(fn func()) int64 {
 	return pathFullScans.Load() - before
 }
 
+// scanCounts 是一档目录规模下测到的全扫次数。
+//
+// 单独抽成类型，是为了让判据本身能被**纯函数**表达（scanViolations），
+// 从而可以喂人造数据做反向对照 —— 见 TestScanViolationsCatchesRegression。
+type scanCounts struct {
+	existingScans        int64 // 必须 == 0
+	resolveExistingScans int64 // 必须 == 0
+	missingScans         int64 // 只诊断（这条路径的 O(n) 热点尚未修）
+	variantScans         int64 // 必须 > 0（反向对照）
+}
+
+// scanViolations 是「零全扫」判据的**纯函数**形式：给定一档规模下的全扫次数，
+// 返回它违反了哪几条；返回空切片表示通过。
+//
+// 为什么要把三个 if 抽成函数而不是就地写在用例里：判据本身也需要被验证。
+// 内联版本里，如果有人把某个 if 整块删掉，**没有任何东西会发现** ——
+// 用例照样全绿，而门禁已经空了。抽成纯函数之后，
+// TestScanViolationsCatchesRegression 可以喂它人造的违规数据，
+// 断言它**确实报红**。理由见 memory/feedback_falsifiable_assertions.md：
+// 一个从来没红过的判据，和没有判据是一回事。
+//
+// 注意 missingScans **故意不判**：那条路径（末级名字不存在）目前仍是 O(n)，
+// 是 path.go 里记录在案的未修热点，不是本用例要守的命题。
+func scanViolations(n int, iters int, c scanCounts) []string {
+	var out []string
+
+	// 「已存在且大小写一致」是绝对多数的调用形态（客户端用的是枚举里拿到的
+	// 名字），它必须一次全扫都不做 —— 这正是 09c8927 承诺的事，也是
+	// Time Machine 往 .sparsebundle/bands/ 灌十万个 band 时不退化成 O(n²)
+	// 的前提。判据是**次数**，与机器快慢、runner 负载完全无关。
+	if c.existingScans != 0 {
+		out = append(out, fmt.Sprintf(
+			"目录 %d 条目：ResolveParent 命中已存在且大小写一致的名字，"+
+				"却做了 %d 次全目录扫描（共 %d 次调用），说明「精确匹配优先」失效了",
+			n, c.existingScans, iters))
+	}
+	if c.resolveExistingScans != 0 {
+		out = append(out, fmt.Sprintf(
+			"目录 %d 条目：Resolve 命中已存在且大小写一致的名字，"+
+				"却做了 %d 次全目录扫描（共 1 次调用），resolveComponents 的精确匹配失效了",
+			n, c.resolveExistingScans))
+	}
+	// 反向对照：这一条挂了说明计数器根本没接在全扫那条路上
+	// （或者大小写回退被砍了）—— 一个永远读到 0 的计数器
+	// 会让上面两条断言变成永远通过的摆设。
+	if c.variantScans <= 0 {
+		out = append(out, fmt.Sprintf(
+			"目录 %d 条目：查大小写变体的名字竟然一次全扫都没做，"+
+				"说明计数器没接在全扫路径上，上面两条零全扫断言不可信。"+
+				"（若已改用折叠索引替代全目录扫描，请把计数点挪到新实现里）", n))
+	}
+	return out
+}
+
 // pathScaleSizes 是三档目录规模。50k 已经足够让「一次全扫」在诊断耗时里
 // 显形（毫秒级），也足够让「零全扫」这个判据有说服力。
 var pathScaleSizes = []int{1000, 10000, 50000}
@@ -117,11 +171,8 @@ func TestPathLookupScaling(t *testing.T) {
 		missing  time.Duration
 		resolve  time.Duration
 
-		// 全扫次数。前两个是主判据，后两个是诊断 + 反向对照。
-		existingScans        int64 // 必须 == 0
-		resolveExistingScans int64 // 必须 == 0
-		missingScans         int64 // 只诊断（这条路径的 O(n) 热点尚未修）
-		variantScans         int64 // 必须 > 0（反向对照）
+		// 全扫次数。判据在 scanViolations 里，这里只负责测出来。
+		scanCounts
 	}
 	got := make(map[int]row, len(pathScaleSizes))
 
@@ -216,29 +267,81 @@ func TestPathLookupScaling(t *testing.T) {
 
 	// ---- 判据 ----
 	//
-	// 「已存在且大小写一致」是绝对多数的调用形态（客户端用的是枚举里拿到的
-	// 名字），它必须一次全扫都不做 —— 这正是 09c8927 承诺的事，也是
-	// Time Machine 往 .sparsebundle/bands/ 灌十万个 band 时不退化成 O(n²)
-	// 的前提。判据是**次数**，与机器快慢、runner 负载完全无关。
+	// 判定逻辑在 scanViolations 里（纯函数，便于反向对照）。
 	for _, n := range pathScaleSizes {
-		g := got[n]
-		if g.existingScans != 0 {
-			t.Errorf("目录 %d 条目：ResolveParent 命中已存在且大小写一致的名字，"+
-				"却做了 %d 次全目录扫描（共 %d 次调用），说明「精确匹配优先」失效了",
-				n, g.existingScans, pathScaleIters)
+		for _, msg := range scanViolations(n, pathScaleIters, got[n].scanCounts) {
+			t.Error(msg)
 		}
-		if g.resolveExistingScans != 0 {
-			t.Errorf("目录 %d 条目：Resolve 命中已存在且大小写一致的名字，"+
-				"却做了 %d 次全目录扫描（共 1 次调用），resolveComponents 的精确匹配失效了",
-				n, g.resolveExistingScans)
-		}
-		// 反向对照：这一条挂了说明计数器根本没接在全扫那条路上
-		// （或者大小写回退被砍了）—— 一个永远读到 0 的计数器
-		// 会让上面两条断言变成永远通过的摆设。
-		if g.variantScans <= 0 {
-			t.Errorf("目录 %d 条目：查大小写变体的名字竟然一次全扫都没做，"+
-				"说明计数器没接在全扫路径上，上面两条零全扫断言不可信。"+
-				"（若已改用折叠索引替代全目录扫描，请把计数点挪到新实现里）", n)
-		}
+	}
+}
+
+// TestScanViolationsCatchesRegression 是**判据自身的反向对照**。
+//
+// 上面那个用例断言「全扫次数为 0」。但只要判定逻辑被误删或写反，它就会变成
+// 一个永远通过的空判据 —— 而且从输出上完全看不出来（还是全绿，还是打那张表）。
+// 本项目已经吃过同型的亏：加密曾用「能读到内容」判定，漏掉了明文旁路。
+//
+// 所以这里给 scanViolations 喂**人造的违规数据**，断言它确实报红。
+// 这些用例不碰磁盘、不建文件、毫秒级跑完，也不受 -short 影响。
+func TestScanViolationsCatchesRegression(t *testing.T) {
+	const n, iters = 1000, 20
+
+	// 先钉住「合规输入必须静默」。少了这一条，一个无脑 return 一堆错误的
+	// 实现也能让下面所有用例通过 —— 那同样是个假判据。
+	if v := scanViolations(n, iters, scanCounts{
+		existingScans: 0, resolveExistingScans: 0, variantScans: 1,
+	}); len(v) != 0 {
+		t.Errorf("合规输入不该报错，却报了 %d 条：%v", len(v), v)
+	}
+
+	// missingScans 是纯诊断字段，无论多大都不该影响红绿。
+	// 单独钉一条，防止将来有人顺手把那条未修的 O(n) 热点也加进判据 ——
+	// 那会让用例在一个已知且**故意**未修的问题上长期红着，最后被整体禁用。
+	if v := scanViolations(n, iters, scanCounts{
+		missingScans: 12345, variantScans: 1,
+	}); len(v) != 0 {
+		t.Errorf("missingScans 只做诊断，不该参与判定，却报了：%v", v)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   scanCounts
+		want string // 期望出现在报错文本里的关键词
+	}{
+		{
+			// 这就是要防的那个真回归：20 次调用全部走了全扫，
+			// 也就是「精确匹配优先」被改没了，退回 O(目录条目数)。
+			name: "ResolveParent 每次调用都全扫（精确匹配优先失效）",
+			in:   scanCounts{existingScans: iters, variantScans: 1},
+			want: "精确匹配优先",
+		},
+		{
+			name: "只泄漏一次也要抓到（不是「大部分没全扫就算过」）",
+			in:   scanCounts{existingScans: 1, variantScans: 1},
+			want: "精确匹配优先",
+		},
+		{
+			name: "Resolve 的 resolveComponents 分支退回全扫",
+			in:   scanCounts{resolveExistingScans: 1, variantScans: 1},
+			want: "resolveComponents",
+		},
+		{
+			// 计数器没接线 / 大小写回退被砍：此时上面两条零全扫断言
+			// 会因为恒读到 0 而永远通过，必须由这一条兜住。
+			name: "计数器没接在全扫路径上（variantScans 恒为 0）",
+			in:   scanCounts{variantScans: 0},
+			want: "计数器没接在全扫路径上",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := scanViolations(n, iters, tc.in)
+			if len(v) == 0 {
+				t.Fatalf("判据漏报：输入 %+v 明显违规，scanViolations 却返回空。"+
+					"说明判定逻辑已失效，TestPathLookupScaling 的全绿不可信", tc.in)
+			}
+			if !strings.Contains(strings.Join(v, "\n"), tc.want) {
+				t.Errorf("报错文本里没有 %q，实际为：\n%s", tc.want, strings.Join(v, "\n"))
+			}
+		})
 	}
 }

@@ -101,7 +101,17 @@ go vet -tags "$TAGS" ./...
 # ------------------------------------------------------- 2. 跨平台（含 _test.go）
 #
 # 平台列表与 AGENTS.md C7 一致。本机那一档上面已经跑过，这里不重复。
-for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+#
+# freebsd/amd64 是**故意多出来的一档，不在 C7 的支持矩阵里，别当成手滑删掉**。
+# 它唯一的作用是覆盖 `//go:build !linux && !darwin && !windows` 那批兜底文件：
+# C7 的四个平台没有任何一个满足该约束，于是在加这一档之前，
+# 下列 7 个文件**从来没有被任何一关编译过**（洞 1/洞 2 的同型复发）：
+#   internal/oscap/native/native_other.go
+#   internal/oscap/probe_other.go、probe_helper_other_test.go
+#   internal/vfs/{attr,sparse,sys,xattr}_other.go
+# 选 freebsd 只是因为它是「非三大平台」里最省事的代表，换 openbsd/solaris 等价。
+# 负向对照见 test/ci/negative-verify.sh 的 freebsd 段。
+for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64; do
     _os=${t%/*}
     _arch=${t#*/}
     [ "$_os/$_arch" = "$(go env GOOS)/$(go env GOARCH)" ] && continue
