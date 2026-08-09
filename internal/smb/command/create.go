@@ -49,6 +49,13 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		return err
 	}
 
+	// Apple 扩展协商放在真正打开文件**之前**：与 Samba vfs_fruit 的
+	// check_aapl() 位置一致，且失败时没有句柄要回收。
+	aapl, err := negotiateAAPL(ctx, req)
+	if err != nil {
+		return err
+	}
+
 	// GENERIC_* 要先展开成具体位，后续判定才有意义（MS-DTYP §2.4.3）。
 	access := req.DesiredAccess.Expand()
 	// MAXIMUM_ALLOWED：按本树允许的上限授予。授权依据是配置，不是宿主 ACL。
@@ -137,7 +144,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		EndOfFile:      uint64(attr.Size),
 		FileAttributes: wire.FileAttributes(attr.FileAttributes),
 		FileID:         wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
-		Contexts:       createResponseContexts(req, attr),
+		Contexts:       createResponseContexts(req, attr, aapl),
 	}
 
 	out, err := resp.Append(ctx.Out)
@@ -310,16 +317,26 @@ func createStatus(err error, disp wire.CreateDisposition) status.Status {
 
 // createResponseContexts 生成要回给客户端的 create context 链。
 //
-// 目前只支持 "QFid"（请求稳定 FileId）—— macOS 与 Windows 都会带，
-// 回它可以让客户端少发一轮 QUERY_INFO。其余 context（DHnQ/RqLs/AAPL）
-// 属于后续阶段，**不认识的 context 必须静默忽略**而不是报错
-// （MS-SMB2 §3.3.5.9：服务端忽略不支持的 create context）。
-func createResponseContexts(req *wire.CreateRequest, attr *vfs.Attr) []wire.CreateContext {
-	if _, ok := wire.FindCreateContext(req.Contexts, wire.CreateContextQFid); !ok {
-		return nil
+// 目前支持两个：
+//   - "QFid"（请求稳定 FileId）—— macOS 与 Windows 都会带，
+//     回它可以让客户端少发一轮 QUERY_INFO；
+//   - "AAPL"（Apple 扩展）—— 由 negotiateAAPL 预先算好，见 aapl.go。
+//
+// 其余 context（DHnQ/RqLs 等）属于后续阶段，**不认识的 context 必须静默忽略**
+// 而不是报错（MS-SMB2 §3.3.5.9：服务端忽略不支持的 create context）。
+func createResponseContexts(req *wire.CreateRequest, attr *vfs.Attr, aapl []byte) []wire.CreateContext {
+	var out []wire.CreateContext
+	if _, ok := wire.FindCreateContext(req.Contexts, wire.CreateContextQFid); ok {
+		out = append(out, wire.CreateContext{
+			Name: wire.CreateContextQFid,
+			Data: wire.DiskIDContext{DiskFileID: attr.FileID}.Encode(),
+		})
 	}
-	return []wire.CreateContext{{
-		Name: wire.CreateContextQFid,
-		Data: wire.DiskIDContext{DiskFileID: attr.FileID}.Encode(),
-	}}
+	if len(aapl) > 0 {
+		out = append(out, wire.CreateContext{
+			Name: wire.CreateContextAAPL,
+			Data: aapl,
+		})
+	}
+	return out
 }
