@@ -166,14 +166,32 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 一个会偷偷降级的 `native` 等于没有 —— 这个亏本项目已经吃过：
 某个策略开关只测了「允许」这条路径，全绿，而「拒绝」那条路径压根没接线，
 测试从头到尾都在验证同一条路。
-同理，`portable` 也必须在 CI 里真跑一遍，否则 builtin 就是一份薛定谔的实现。
 
 **实现排期：v0.3.0。** 本期只定规矩，不动代码结构 ——
 现在改会和正在收尾的 Time Machine 工作抢文件。
+所以上面那张三态表描述的是**将要建成的东西**：截至本节写就，
+`internal/oscap` 与配置项 `filesystem_mode` **都还不存在**，别照着去找代码。
+
+**v0.3.0 落地时的前置要求（现在就写下来，免得到时忘）**：
+`portable` 模式必须**在 CI 里真跑一遍**，不能只是配置项里多一个取值。
+理由：builtin 是「将来移植到未知系统」的唯一底座，而一条在 CI 里从未被执行过的路径，
+到需要它的那天一定是坏的 —— 那时既没有原始作者在场，也没有可对照的正确行为。
+**没有 CI 覆盖的 builtin 就是一份薛定谔的实现**，写了等于没写。
+本仓库已有同型前科：挂在特定 build tag 下的代码，默认 CI 一行都不会编译执行，
+直到有人专门补一关才被真正看见（`test/ci/check-test-compile.sh` 的注释里记了两例）。
 
 **门禁**：C9 由 `scripts/check-constraints.sh` 的 C9 段做机器校验（扫描禁用符号与 import），
 配 `test/ci/negative-verify.sh` 做**反向对照**（故意塞一段违规代码，确认门禁真的会红）。
 反向对照不是可选项：**一个从来没红过的门禁，和没有门禁是一回事。**
+
+**但门禁覆盖的只是上面那张清单的「可机检子集」，清单本身仍然是完整的约束。**
+有些条目落不进正则：FUSE 是 `open("/dev/fuse")` 加 ioctl，loop 设备是 `/dev/loop*` 加
+`LOOP_SET_FD`，都没有稳定的符号特征；`smbd` / `avahi-daemon` 这类**守护进程依赖**
+归 C3（禁止 fork/exec）管，不在 C9 段重复扫。
+**机器扫不到的部分，靠 code review 和 §9 研究准则兜**：评审时问一句「这个能力是我们自己
+实现的，还是问 OS 要来的」；拿不准就按 §9 查规范、查真实客户端行为，别猜。
+写这一段是因为反过来更危险 —— 读者若默认「凡是写进清单的都被机器兜住了」，
+评审时就会放松警惕，而这恰好是本项目栽过的那类坑的完整形态。
 
 ---
 
@@ -423,10 +441,20 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 推荐提交命令（**必须显式写出分支名**，理由见下）：
 
 ```sh
-CGO_ENABLED=0 go build ./... && git add -A \
+sh test/ci/check-test-compile.sh && git add -A \
   && git commit -m "<模块>: <做了什么>" \
   && git push origin "$(git branch --show-current)"
 ```
+
+> **⚠️ 血泪教训（R15）：不要用 `go build ./...` 当推送前的自检 —— 它不编译 `_test.go`。**
+> 真实事故：某 agent 照着旧版本条做，`CGO_ENABLED=0 go build ./...` 给了绿灯，推送成功，
+> 结果远端那个 commit `go vet` 直接失败
+> （`create_context_durable_test.go:166:42`：`cannot use intent (*wire.DurableIntent) as *Tree value`）。
+> **关键路径上的分支在远端是坏的，而本人以为已经安全推送了** —— 又一例「成功回显 ≠ 事情真的发生」。
+> `test/ci/check-test-compile.sh` 用**全部已注册的 build tag** 在**四个平台**上跑 vet，
+> 包含 `_test.go`，正好堵住这个洞（实测约 18 秒，值这个钱）。
+> 顺带：**新增任何 build tag，必须同步登记进该脚本的 `TAGS=`**，否则带该 tag 的文件
+> 没有任何一关会编译它 —— 脚本自己会检查这件事并报错，别把它当成误报绕过去。
 
 > **⚠️ 血泪教训：推送的 refspec 必须是自己的分支，不能写死也不能省略。**
 > 多个 worktree **共享同一份 `.git`**，所以在自己 worktree 里执行 `git push origin main`
