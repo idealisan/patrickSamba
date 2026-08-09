@@ -30,3 +30,4 @@
 - [两个 CodeBuddy 进程可同挂一个 session](project_dual_codebuddy_session.md) — codebuddy -c 不查占用；「双进程=两套同名 agent 共写 /work」是机制推演，本次实测**未发生**（跨 owner 写冲突 0 次），当危险信号看、别当事故成因；附自检命令与「崩溃丢什么/不丢什么」判据
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
 - [墙钟耗时不能当 CI 判据](project_timing_criteria_flaky.md) — 微秒级比值在共享 runner 必假红；改数事件次数；附 GOGC=5 复现配方与 overlay 配对对照
+- [CNB Release API 与 tag_push 发布链路实测](reference_cnb_release_api.md) — 判最新版看 is_latest（latest 恒 null）；git:release 的 options 不吃变量，分渠道要两个互斥 stage + if:；整条发布 0.16~0.19 核时，付得起真跑
