@@ -33,7 +33,8 @@ server:
   # smb1: true
   # 强制 SMB 签名（防中间人篡改）。不强制时会有一条启动 WARN。
   signing_required: false
-  # 强制 SMB3 加密。需要 max_dialect >= 3.0。
+  # 强制 SMB3 加密。开启时 min_dialect 与 max_dialect 都要 >= 3.0，否则启动直接报错
+  # （SMB 2.x 没有加密能力，会被拒绝连接）。
   encryption_required: false
   # 并发连接数上限。留空或填 0 表示使用内置默认值 **256**（不是"不限"）。
   # 超过上限的新连接会被直接关闭。目前没有"完全不限"的选项，

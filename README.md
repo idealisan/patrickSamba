@@ -258,7 +258,7 @@ done
 | `guest_ok` | 允许 guest 访问本共享 | `false` |
 | `valid_users` | 限定可访问用户，留空表示所有已认证用户；名字必须在 `auth.users` 里定义过 | 所有已认证用户 |
 | `time_machine` | 把本共享宣告为 Time Machine 备份目标（阶段二） | `false` |
-| `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)） | `0` |
+| `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)）。⚠️ 上报的**可用空间 = `quota_bytes` − 宿主卷已用空间**（出于性能不递归统计本共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，否则即使共享是空的，客户端也会看到可用空间为 0 而拒绝开始备份 | `0` |
 | `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS 留空即可 | 空 |
 
 ### `mdns`
@@ -320,8 +320,8 @@ done
 - **SMB3 加密**：3.0 / 3.0.2 用 AES-128-CCM（经 `SMB2_GLOBAL_CAP_ENCRYPTION` 能力位
   隐式启用），3.1.1 经 `ENCRYPTION_CAPABILITIES` 协商上下文选择密码套件
   （AES-128/256-CCM 或 GCM）。可由 `encryption_required` 强制——开启后协商到
-  **SMB 2.0.2 / 2.1（无加密能力）的客户端会在协商阶段被 `STATUS_ACCESS_DENIED` 拒绝**，
-  而非降级为明文。
+  **SMB 2.0.2 / 2.1（无加密能力）的客户端会被拒绝连接（返回 `STATUS_NOT_SUPPORTED`，
+  因为无共同方言），而非降级为明文**。
 - **FSCTL**：实现了 `VALIDATE_NEGOTIATE_INFO`（防降级复核）、`SET_SPARSE`、
   `SET_ZERO_DATA`、`QUERY_ALLOCATED_RANGES`（稀疏文件三件套，Time Machine 关键路径）、
   `ENUMERATE_SNAPSHOTS`（回 0 个快照）、`QUERY_NETWORK_INTERFACE` 等。
@@ -350,23 +350,52 @@ done
 
 ## Time Machine 状态 <a name="timemachine"></a>
 
-> **本节结论待定**：Time Machine 端到端「备份并成功恢复」的验收由 `tmverify` 专门进行，
-> 本 README 在拿到其报告前**不做最终结论**。
+> **v0.1.0 尚未通过 Time Machine 端到端验收。** 本项目**从未跑过一次真实的 Time Machine
+> 备份，更没有做过恢复**——开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过。
+> 下面列的是「服务端前置能力已实现并实测」，**不等于「Time Machine 能用」**：前者是
+> 对服务端行为的探针，后者需要真机端到端验证。
 
-当前已具备的 Time Machine 前置能力（均已实现，并已对代码核实）：
+服务端侧的多项 Time Machine 前置能力已实现，并用 impacket 低阶 SMB2 客户端逐项实测通过：
 
-- `AAPL` 协商与 `SUPPORTS_FULL_SYNC` 宣告；
+- `AAPL` 协商（server query / readdir_attr）；
+- 命名流与 Alternate Data Stream（含目录上的流，`.sparsebundle` 依赖）；
 - 稀疏文件 FSCTL 三件套（`SET_SPARSE` / `SET_ZERO_DATA` / `QUERY_ALLOCATED_RANGES`）；
-- `quota_bytes` 通过 `FileFsFullSizeInformation` 上报卷容量（限制备份体积的唯一手段）；
-- `_adisk._tcp` mDNS 宣告；
-- `readdir_attr` 目录扩展元数据。
+- 卷容量与 `quota_bytes` 上报；
+- 大目录枚举性能（5 万 band 文件全量枚举约 0.28 s，内存不增长）；
+- `_adisk._tcp` mDNS 广播。
 
-**暂未实现、会影响 Time Machine 体验的点**：
+`F_FULLFSYNC`：Linux / Windows 分支实测通过；**Darwin 的 `F_FULLFSYNC` 分支在本容器里
+编不了也跑不了，只有交叉编译通过做保证**。
 
-- `resolveID`（AAPL）未实现，但 macOS 在未被宣告该能力时不会使用，影响不大；
-- 真实 oplock/lease 能力未实现（见上）。
+但以下能力**未实现**，可能导致备份不稳定甚至失败（按对 Time Machine 的实际影响排序）：
 
-能否作为 Time Machine 目标成功完成备份与恢复，请以 `tmverify` 的验收报告为准。
+- **durable / persistent handle** —— **对 TM 影响最大**。一次备份动辄数小时，没有它，
+  网络抖动会导致句柄丢失、备份中断重来。服务端在客户端请求 `DHnQ` / `DH2Q` 时**明确
+  不予授予**（不返回对应响应 context），客户端因此知道没拿到、不会去做断线 reclaim——
+  行为可预期，但意味着 Wi-Fi 一抖整次备份就失败重来。
+- **oplock / lease** —— 服务端不声明 `SMB2_GLOBAL_CAP_LEASING`、不授予任何 oplock
+  （`create.go` 恒回 `OplockLevelNone`），客户端退化为不缓存，`.sparsebundle` 的 band
+  目录那种小文件密集写吞吐明显低于 Samba；不影响正确性。
+- **AAPL resolveID** —— 对 TM 本身**无实际影响**（我们不宣告 `kAAPL_SUPPORT_RESOLVE_ID`，
+  客户端就不会使用），仅 Finder 的别名 / 最近项目按 64 位 file id 反查路径会退化为按路径查找。
+
+### 使用须知
+
+- **不要拿真实备份数据试。** 请仅用测试数据（或一台可随时清空的机器）试用，确认能完成
+  一轮完整备份并成功浏览快照后，再考虑放真实数据。**请勿把它作为唯一一份备份的目的地。**
+- **最可能的失败模式是稳定性，不是连不上。** 服务端不授予任何 oplock / lease，长时间大体量
+  备份（`.sparsebundle` band 目录海量小文件）下的表现未知——可能慢，也可能中途报错。
+  **所有 macOS 版本均未经实测**，不要写成「某版本有点抖」这类暗示我们试过的口吻。
+- **备份共享务必显式设 `quota_bytes`。** 不设时上报宿主真实剩余空间，Time Machine 会一路
+  写满磁盘。注意：`quota_bytes` 上报的**可用空间 = 配额 − 宿主卷已用空间**（出于性能不
+  递归统计共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，
+  否则即便共享是空的，客户端也会看到可用空间为 0 而**直接拒绝开始备份**。（`quota_bytes`
+  小于 1 GiB 时启动会告警；在过小的卷上 TM 会反复失败。）
+- 若备份失败，请提供服务端 `log.level: debug` 的日志（含每个 SMB 命令与 NTSTATUS），
+  这比 macOS 侧报错更有用。
+
+逐项验证证据见 [Time Machine 支持状态](docs/timemachine-status.md)。
+
 v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影响**。
 
 ---
@@ -392,6 +421,11 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
    Finder / 资源管理器的目录列表不会自动更新，需手动刷新。
 
 5. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
+
+6. **不授予任何 oplock / lease**：`CREATE` 恒回 `OplockLevelNone`，且 `tree_connect` 虽宣告了
+   `SMB2_GLOBAL_CAP_LEASING` 之外的 `FORCE_LEVELII_OPLOCK` 能力位，但这是**有意为之**
+   （约束客户端别申请独占 oplock，语义上不是虚假宣告）。对普通文件共享几乎无影响；
+   对 Time Machine 的影响是客户端退化为不缓存，见[上](#timemachine)。
 
 ---
 
