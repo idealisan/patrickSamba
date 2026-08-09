@@ -146,7 +146,7 @@ func (c *Connection) logReadError(err error) {
 func (c *Connection) handleFrame(frame []byte) ([]byte, error) {
 	switch {
 	case wire.IsSMB2(frame):
-		return c.handleSMB2Chain(frame)
+		return c.handleSMB2Frame(frame, false)
 
 	case wire.IsSMB1(frame):
 		return c.handleSMB1(frame)
@@ -211,7 +211,9 @@ func (c *Connection) handleEncrypted(frame []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: 解密结果不是合法 SMB2 消息", errUnknownFrame)
 	}
 
-	resp, err := c.handleSMB2Chain(plain)
+	// encrypted=true 会让 command 层豁免验签（MS-SMB2 §3.3.5.2.4：
+	// 加密消息不验签），并满足会话级"必须加密"的要求。
+	resp, err := c.handleSMB2Frame(plain, true)
 	if err != nil {
 		return nil, err
 	}
@@ -238,13 +240,23 @@ type respMsg struct {
 	hashSession *command.Session
 }
 
-// handleSMB2Chain 处理一个 SMB2 帧（可能是复合请求链）。
+// handleSMB2Chain 处理一个**明文** SMB2 帧。
+//
+// 保留这个签名是为了单元测试与调用方便；加密路径走 handleSMB2Frame。
+func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
+	return c.handleSMB2Frame(frame, false)
+}
+
+// handleSMB2Frame 处理一个 SMB2 帧（可能是复合请求链）。
+//
+// encrypted 表示本帧来自 SMB3 TRANSFORM_HEADER 解密结果，
+// 会透传给每条消息的 Context（影响验签与加密强制）。
 //
 // MS-SMB2 §3.3.5.2.7 / protocol-notes §2：
 //   - NextCommand != 0 时本条消息长度即 NextCommand，== 0 时延伸到帧尾；
 //   - 每段起点 8 字节对齐；
 //   - 响应也必须拼成复合链一次性提交给传输层。
-func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
+func (c *Connection) handleSMB2Frame(frame []byte, encrypted bool) ([]byte, error) {
 	chain := &command.Chain{}
 	var out []byte
 	var msgs []respMsg
@@ -279,7 +291,7 @@ func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
 			setNextCommand(out, prev, uint32(len(out)-prev))
 		}
 
-		ctx := c.processMessage(hdr, msg, chain, out)
+		ctx := c.processMessage(hdr, msg, chain, out, encrypted)
 		if ctx.Suppressed() {
 			// 本条消息不产生任何响应字节。除了丢弃它自己的响应头
 			// （Context.discard 已做），还要把刚补的对齐填充和上一条的
@@ -344,9 +356,10 @@ func (c *Connection) finishChain(out []byte, msgs []respMsg) {
 
 // processMessage 处理复合链中的一条消息，把响应追加到 out。
 func (c *Connection) processMessage(hdr wire.Header, msg []byte,
-	chain *command.Chain, out []byte) *command.Context {
+	chain *command.Chain, out []byte, encrypted bool) *command.Context {
 
 	ctx := command.NewContext(c.state, chain, hdr, msg, out)
+	ctx.Encrypted = encrypted
 
 	// —— credit 记账（protocol-notes §12）——
 	// 任何响应都至少授予 1 个 credit，否则客户端会停止发送并挂死。

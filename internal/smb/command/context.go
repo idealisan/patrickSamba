@@ -98,6 +98,15 @@ type Context struct {
 	// **不参与**，见 protocol-notes §6）。
 	HashResponseSession *Session
 
+	// Encrypted 表示本条请求是从 SMB3 TRANSFORM_HEADER 解密出来的。
+	//
+	// MS-SMB2 §3.3.5.2.4 原文："If the SMB2 header of the request has
+	// SMB2_FLAGS_SIGNED set in the Flags field **and the message is not
+	// encrypted**, the server MUST verify the signature."
+	// 加密本身已经提供了完整性保护，客户端在加密信封内不再签名，
+	// 所以验签与"要求签名"两条规则对加密消息都必须豁免。
+	Encrypted bool
+
 	// Log 是日志句柄。
 	Log *slog.Logger
 

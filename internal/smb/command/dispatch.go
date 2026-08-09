@@ -158,6 +158,9 @@ func dispatch(ctx *Context) error {
 	if err := ctx.checkSignature(); err != nil {
 		return err
 	}
+	if err := ctx.checkEncryption(); err != nil {
+		return err
+	}
 
 	if spec.needSession {
 		if ctx.Session == nil {
@@ -275,7 +278,24 @@ func (c *Context) resolve() error {
 // SESSION_SETUP 是例外：认证完成前还没有会话密钥，签名由该命令的 handler
 // 在密钥派生之后自行处理（§3.3.5.5.3）。
 func (c *Context) checkSignature() error {
+	if c.Header.Command == wire.CommandNegotiate {
+		// MS-SMB2 §3.3.5.2.4 第一句："If the SMB2 header of the SMB2
+		// NEGOTIATE request has the SMB2_FLAGS_SIGNED bit set in the Flags
+		// field, the server MUST fail the request with
+		// STATUS_INVALID_PARAMETER."（协商阶段还没有任何密钥可用）
+		if c.Header.IsSigned() {
+			return status.InvalidParameter
+		}
+		return nil
+	}
 	if c.Header.Command == wire.CommandSessionSetup {
+		return nil
+	}
+
+	// 加密消息一律豁免（见 Context.Encrypted 的注释）。既不验签，
+	// 也不因为"未签名"而拒绝 —— Windows 与 Samba 都是这个行为，
+	// 否则开启 SMB3 加密后所有请求都会被打成 ACCESS_DENIED。
+	if c.Encrypted {
 		return nil
 	}
 
@@ -297,8 +317,12 @@ func (c *Context) checkSignature() error {
 	}
 
 	if len(key) == 0 {
-		// 客户端声称签了名，但我们没有密钥可校验 —— 只能拒绝。
-		return status.AccessDenied
+		// MS-SMB2 §3.3.5.2.4："If Session.SigningKey ... is NULL, the server
+		// MUST fail the request with STATUS_NOT_SUPPORTED and MUST stop
+		// processing the request."（注意不是 ACCESS_DENIED）
+		c.Log.Warn("请求声称已签名但会话没有签名密钥",
+			"command", c.Header.Command.String(), "session", s.ID)
+		return status.NotSupported
 	}
 	if err := crypto.VerifyWith(c.Conn.SigningAlg(), key, c.Msg); err != nil {
 		c.Log.Warn("请求签名校验失败",
@@ -310,6 +334,30 @@ func (c *Context) checkSignature() error {
 	// 之后统一执行（签名范围含尾部对齐填充）。
 	c.SignKey = key
 	return nil
+}
+
+// checkEncryption 强制会话级加密（MS-SMB2 §3.3.5.2.9）。
+//
+// 原文："If Session.EncryptData is TRUE and the request is not encrypted ...
+// the server MUST fail the request with STATUS_ACCESS_DENIED."
+//
+// SESSION_SETUP 与 LOGOFF 是例外：会话密钥在 SESSION_SETUP 完成之前还不存在，
+// 客户端无从加密；LOGOFF 允许明文，否则会话拆不掉。
+func (c *Context) checkEncryption() error {
+	if c.Encrypted {
+		return nil
+	}
+	switch c.Header.Command {
+	case wire.CommandNegotiate, wire.CommandSessionSetup, wire.CommandLogoff:
+		return nil
+	}
+	s := c.Session
+	if s == nil || !s.Established() || !s.EncryptData() {
+		return nil
+	}
+	c.Log.Warn("会话要求加密但请求是明文",
+		"command", c.Header.Command.String(), "session", s.ID)
+	return status.AccessDenied
 }
 
 // fail 丢弃已写入的响应体，改写成一条 SMB2 ERROR Response。
