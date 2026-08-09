@@ -45,9 +45,23 @@ package vfs
 //	OS X maps NTFS illegal characters to the Unicode private range
 //	in SMB requests.                        —— vfs_fruit(8) 手册
 //
-// 也就是说客户端在线上发的是 U+F03A（= 0xF000 + ':'），不是裸冒号。
+// 也就是说客户端在线上发的是 **U+F022**，不是裸冒号。
 // 于是 SplitStreamPath 按裸冒号切分**依然是正确的**，
 // ValidateStreamName 拒绝裸冒号也依然正确 —— 合法请求里根本不会有。
+//
+// ⚠️ 这张映射表**不是** `0xF000 + 字符`（那是老的 SFM 方案，会得出
+// U+F03A）。macOS/Samba 用的是一张紧凑分配的表，后 8 个非法字符接着
+// U+F01F 顺序往下排，与字符码点无关。出处
+// `source3/lib/string_replace.c:186` 的 macos_string_replace_map：
+//
+//	0x01..0x1F 控制字符 → U+F001..U+F01F
+//	0x22 "  → U+F020    0x2A *  → U+F021
+//	0x3A :  → U+F022    0x3C <  → U+F023
+//	0x3E >  → U+F024    0x3F ?  → U+F025
+//	0x5C \  → U+F026    0x7C |  → U+F027
+//
+// 本实现原样透传、不做还原，所以**代码本身不依赖这张表**；
+// 记在这里是因为写测试数据时必须用对，用错了测的就不是真实客户端行为。
 //
 // 我们把流名**原样**（连同私用区字符）拼进 xattr 名，不还原成 ASCII。
 // 依据：Samba 的 `fruit:encoding` 默认值就是 `private`（保留私用区字符，
