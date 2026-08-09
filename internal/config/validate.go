@@ -130,8 +130,24 @@ func validateServer(c *Config, errs *ValidationErrors) {
 	}
 
 	// SMB3 加密最低要求 3.0（MS-SMB2 §3.3.5.4）。
+	//
+	// max_dialect 与 min_dialect 都要卡：
+	//   - max_dialect < 3.0 → 谁都加密不了，配置自相矛盾；
+	//   - min_dialect < 3.0 → 区间里的 2.x 全是死档位。协商层对它们会
+	//     fail closed 直接 ACCESS_DENIED（见 command/negotiate.go），
+	//     用户在运行期只能看到"连不上"，根本猜不到是这个组合导致的。
+	//     所以启动时就报错，而**不是**悄悄把 min_dialect 抬到 3.0 ——
+	//     静默改写用户写下的配置是魔法行为，本项目一律用"启动时一次性
+	//     校验 + 人话错误"处理这类矛盾（与上面 max_dialect 那条对称）。
 	if c.Server.EncryptionRequired && maxRank >= 0 && maxRank < dialectRank("3.0") {
 		errs.add("server.encryption_required", "要求加密但 max_dialect 为 %s，SMB3 加密最低需要 3.0", c.Server.MaxDialect)
+	}
+	if c.Server.EncryptionRequired && minRank >= 0 && minRank < dialectRank("3.0") {
+		errs.add("server.min_dialect",
+			"server.encryption_required 为 true 时 min_dialect 不能低于 3.0（当前 %s）——"+
+				"SMB 2.x 没有加密能力，这些客户端会被直接拒绝。"+
+				"请设 min_dialect: \"3.0\"，或关闭 encryption_required",
+			c.Server.MinDialect)
 	}
 
 	if c.Server.MaxConnections < 0 {
@@ -455,19 +471,6 @@ func Warnings(c *Config) []string {
 	if c.Auth.AllowGuest {
 		w = append(w, "auth.allow_guest=true：任何人都可以匿名访问共享，请确认这是你想要的"+
 			"（注意 Windows 10/11 默认拒绝不安全的 guest 登录）")
-	}
-
-	// SMB 2.0.2 / 2.1 没有加密能力。要求加密时它们会在**协商阶段**
-	// 被 STATUS_ACCESS_DENIED 拒掉（fail closed），于是 min_dialect
-	// 写的值实际不可达 —— 配置说一套、行为是另一套，必须说出来。
-	if c.Server.EncryptionRequired {
-		if r := dialectRank(c.Server.MinDialect); r >= 0 && r < dialectRank("3.0") {
-			w = append(w, fmt.Sprintf(
-				"server.encryption_required=true 时 server.min_dialect=%s 实际不可达："+
-					"SMB 2.0.2/2.1 没有加密能力，这类客户端会在协商阶段被拒绝。"+
-					"建议把 min_dialect 改成 3.0 让配置与行为一致",
-				c.Server.MinDialect))
-		}
 	}
 
 	for i := range c.Shares {

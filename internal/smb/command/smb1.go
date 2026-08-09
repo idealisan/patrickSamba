@@ -35,6 +35,9 @@ var (
 	// ErrNoSMB2Dialect 表示 SMB1 方言列表里没有任何 SMB2 方言，
 	// 此时应当关闭连接（我们不实现 SMB1 文件共享）。
 	ErrNoSMB2Dialect = errors.New("command: SMB1 方言列表中没有 SMB2")
+	// ErrSMB1EncryptionRequired 表示配置要求加密，但客户端在 SMB1 多协议协商里
+	// 只报了 "SMB 2.002" —— 2.0.2 没有任何加密能力，此路无救，直接关连接。
+	ErrSMB1EncryptionRequired = errors.New("command: 配置要求加密但客户端只协商 SMB 2.002")
 )
 
 // SMB1 方言串（MS-SMB2 §3.3.5.3.1）。
@@ -92,6 +95,10 @@ func ParseSMB1NegotiateDialects(frame []byte) ([]string, error) {
 //     SMB2 NEGOTIATE（**不**把连接标记为已协商）；
 //   - 只含 "SMB 2.002" → 直接按 2.0.2 完成协商；
 //   - 都没有 → 返回 ErrNoSMB2Dialect，调用方关闭连接。
+//
+// 加密强制（EncryptionRequired）在这里也必须 fail closed，理由见下方分支注释：
+// **本函数是独立于 handleNegotiate 的第二个协商出口**，
+// handleNegotiate 里的拒绝逻辑覆盖不到只含 "SMB 2.002" 的那条路径。
 func AppendSMB1NegotiateReply(conn *Conn, dialects []string, out []byte) ([]byte, error) {
 	wildcard := false
 	smb2002 := false
@@ -105,6 +112,22 @@ func AppendSMB1NegotiateReply(conn *Conn, dialects []string, out []byte) ([]byte
 	}
 	if !wildcard && !smb2002 {
 		return nil, ErrNoSMB2Dialect
+	}
+
+	// 加密强制：只含 "SMB 2.002" 时在这里就拒绝。
+	//
+	// 这条分支下面会直接 `conn.Dialect = dialect.SMB202; NegotiateDone = true`
+	// 把协商就地做完，**永远不会再进 handleNegotiate**，因此那里的
+	// `EncryptionRequired && Cipher == 0` 一次都不会执行 —— 曾经的缺口就是
+	// 客户端走 SMB1 多协议协商只报 "SMB 2.002" 即可拿到 2.0.2 明文会话。
+	// 2.0.2 永远不可能满足加密要求，没有任何补救余地，在此拒绝最干净。
+	//
+	// 含 "SMB 2.???" 通配的那条分支**刻意放过**：它只回一个 0x02FF 占位应答，
+	// 不定型方言、不置 NegotiateDone，客户端随后必然再发一个真正的
+	// SMB2 NEGOTIATE，那一发会走 handleNegotiate 并被那里的 fail-closed
+	// 拦住。所以这里不重复检查，不是漏了。
+	if !wildcard && conn.Settings.EncryptionRequired {
+		return nil, ErrSMB1EncryptionRequired
 	}
 
 	// 通配优先：能升级到更高方言就不要锁死在 2.0.2。
