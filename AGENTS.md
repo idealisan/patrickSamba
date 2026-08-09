@@ -340,8 +340,9 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
   （§10.3 第 6 条那类"莫名其妙的 `undefined: xxx`"从根上消失）。
 - 它们共享同一个 `.git` 对象库，所以 `git fetch` / 分支 / 提交历史都是互通的，不占额外下载。
 - 一个分支只能被一个 worktree 检出，**这天然强制了「一人一分支」**。
-- 完事清理：`git -C /workspace worktree remove /work/<agent 角色>`；
-  强行删目录会留下悬空记录，用 `git worktree prune` 收拾。
+- **完事之后不要清理，把 worktree 留在原地。** `git worktree remove` / `git worktree prune`
+  会命中 CodeBuddy 的 HIGH 风险判定并弹出确认面板，而该面板存在缺陷会卡死主 TUI（见 §7.5）。
+  留着的 worktree 除了占点磁盘没有任何害处，悬空记录也无害。确实需要清理时由人类操作者手动执行。
 - 起服务调试仍按 §7.1 用**自己的专属端口**，worktree 隔离的是文件，不是端口。
 
 #### 7.3.2 分支与 PR 规则
@@ -382,7 +383,30 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
 
 例：`wire: 实现 SMB2 Packet Header 编解码与 golden test`
 
----
+### 7.5 禁止使用会触发 CodeBuddy 高危确认面板的命令形态
+
+> **实证**：CodeBuddy 会用一组正则把 Bash 命令分档（SAFE/LOW/MEDIUM/HIGH/CRITICAL），
+> 命中 HIGH/CRITICAL 会弹出「requires confirmation every time」确认面板。
+> 该面板存在缺陷：一旦超时就再也无法关闭，**任何按键都消不掉，主 TUI 就此卡死**，
+> 而后台 agent 仍在运行 —— 表现为「界面死了但活还在干」，极难判断。
+> 判定规则的实测复现器见 `scripts/diag/risk-replica.js`，详情见 `docs/troubleshooting-codebuddy.md`。
+
+**以下命令形态一律禁止在 agent 工作流中使用**（多段命令按 `;`/`&&`/`|` 拆开逐段判定并取最高档，
+所以把它藏在一长串命令的末尾同样会触发）：
+
+| 禁用 | 档位 | 替代做法 |
+|---|---|---|
+| `git worktree remove` / `git worktree prune` | HIGH | **不清理**，留在原地（§7.3.1） |
+| `rm -r` / `rm -rf` / `rm *` | HIGH | 留着不删；确需删除交由人类操作者 |
+| `git restore <file>` | HIGH | `git checkout HEAD -- <file>`（实测 SAFE） |
+| `git checkout -- <path>` | HIGH | 同上 |
+| `git branch -D` / `git rm -r` | HIGH | `git branch -d`；或留着不删 |
+| `git push -f` / `--force` / `--delete` | HIGH | `--force-with-lease`（实测 SAFE，且 §7.3.2 本就要求用它） |
+| `git reset --hard` / `git clean -fd` | CRITICAL | 用临时 worktree 取干净基线（§10.3 第 7 条） |
+| `sudo` / `chmod 777` / `find -delete` / `find -exec rm` / `\| xargs rm` | HIGH | 视情况改写；一般本项目用不到 |
+
+**验证代码时不要靠"改一下再改回来"**（那需要 `git restore`）。
+用 `go test -overlay=<json>` 注入变异体，工作树全程零修改 —— 这也是本项目做变异测试的标准做法。
 
 ## 8. 安全准则
 
@@ -511,8 +535,21 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
    ```
 
    这样拿到一个干净且可编译的基线继续干活，既不用等别人落盘，也不用去动别人的文件。
-   实测有效（tmverify 在 uid/gid 删除窗口期就是这么绕过去的）。用完 `git worktree remove`。
+   实测有效（tmverify 在 uid/gid 删除窗口期就是这么绕过去的）。**用完留在原地不要删**（见 §7.5）。
    注意这只是**应急**手段；常态应当按 §7.3.1 一开始就待在自己的 worktree 里。
 8. **致命坑二：smbclient 4.22 的 `-c` 不按换行分割命令**。多条命令必须用**分号**分隔。
    写成多行会产生 `NT_STATUS_NO_SUCH_FILE listing \get` 这种**假故障**，
    看起来像服务端 bug，其实是测试脚本的问题。
+9. **worktree 里 `.git` 是文件不是目录**，任何 `$REPO/.git/xxx` 的写法都会静默失效。
+   真实事故：`scripts/save.sh` 用 `mkdir "$REPO/.git/xxx.lock"` 做互斥锁，在 worktree 下
+   `mkdir` 必然 `ENOTDIR`，而代码不区分失败原因，当成「锁被别人占着」空转 **120 秒**后
+   报「等待推送锁超时」退出 —— **提交已落地、推送从未发生**。也就是说在 §7.3 强制的
+   worktree 工作流下，那个脚本 100% 推不出去。同理 `[ -d "$REPO/.git/rebase-merge" ]` 恒为
+   false，冲突检测形同虚设。
+   **一律用 `git rev-parse --git-common-dir`（跨 worktree 共享的真 .git）与
+   `git rev-parse --git-path <名字>`（当前 worktree 的私有路径），不要自己拼 `.git/`。**
+10. **CI 的红绿要看事件类型**：`push` 事件与 `pull_request` 事件跑的是不同版本的 `.cnb.yml`，
+    同一个 commit 可以 push 红、PR 绿。已实测：`tm-handle/durable` 与 `r-infra/test-infra`
+    开 PR 前只有 push 记录且全红，开 PR 后 PR 事件立刻 success。
+    **合并前要看的是 PR 事件的构建**，不要被 push 的「假红」吓住。
+    查询用 `scripts/ci-status.sh <分支名>`（退出码 0=绿 1=红 2=跑着 3=无记录 4=调用失败）。
