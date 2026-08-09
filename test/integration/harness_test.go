@@ -52,6 +52,10 @@ type harnessOptions struct {
 
 	SigningRequired    bool
 	EncryptionRequired bool
+	// EncryptionDisabled 强制服务端**不**对外宣告 SMB3 加密能力
+	// （即使 MaxDialect 本身就支持加密）。用于反向探针：确认「关掉加密后
+	// 客户端不会拿到加密会话、数据平面保持明文」。
+	EncryptionDisabled bool
 	AllowGuest         bool
 	ReadOnly           bool
 }
@@ -118,7 +122,7 @@ func startServer(t *testing.T, opt harnessOptions) *harness {
 		MaxDialect: opt.MaxDialect,
 
 		SigningRequired:    opt.SigningRequired,
-		EncryptionEnabled:  opt.MaxDialect.SupportsEncryption(),
+		EncryptionEnabled:  opt.MaxDialect.SupportsEncryption() && !opt.EncryptionDisabled,
 		EncryptionRequired: opt.EncryptionRequired,
 		AllowSMB1Negotiate: true,
 		AllowGuest:         opt.AllowGuest,
