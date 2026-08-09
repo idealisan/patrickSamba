@@ -824,11 +824,13 @@ func TestStreams(t *testing.T) {
 		t.Errorf("不存在的资源派生应返回 ErrNotFound，得到 %v", err)
 	}
 
-	// AFP 之外的通用 ADS 仍然明确不支持（见 stream_store.go 的说明）。
+	// 通用 ADS 现在**是支持的**（落 user.DosStream.* xattr，见 stream_xattr.go）。
+	// 没写过的通用流打开时应报「不存在」，而不是 ErrNotSupported ——
+	// 后者会让客户端以为整个共享不支持 ADS 而放弃使用。
 	if _, _, err := fs.Open(&OpenRequest{
 		Path: "f.txt", Stream: "SomeOtherStream", Flags: OpenRead, Disposition: OpenExisting,
-	}); !errors.Is(err, ErrNotSupported) {
-		t.Errorf("通用 ADS 应返回 ErrNotSupported，得到 %v", err)
+	}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("不存在的通用 ADS 应返回 ErrNotFound，得到 %v", err)
 	}
 }
 
