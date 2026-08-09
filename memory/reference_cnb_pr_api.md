@@ -1,6 +1,6 @@
 ---
-name: CNB PR API 的调用方式与六个坑
-description: cnb.cool 创建/更新/合并 PR 的写法，以及 merge 用 PUT、更新用 PATCH（PUT 会 404）、参数名是 merge_style、commit_title 必填、GET/PUT 都要求 Accept: application/json、以及已合并的 PR 仍回 merged=null（判合并要用 git 祖先关系）
+name: CNB PR API 的调用方式与七个坑
+description: cnb.cool 创建/更新/合并 PR 的写法，以及 merge 用 PUT、更新用 PATCH（PUT 会 404）、参数名是 merge_style、commit_title 必填、GET/PUT 都要求 Accept: application/json、已合并的 PR 仍回 merged=null，且 squash 合并下祖先关系判定也会假阴性（要比内容）
 type: reference
 ---
 
@@ -72,6 +72,33 @@ git fetch -q origin && git merge-base --is-ancestor <你的提交> origin/main \
 
 顺带：拿文件内容判「改动是否进了 main」时，grep 的字符串要从**文件正文**里取，
 别顺手抄 PR 标题——标题和正文常常差几个字，grep 落空会让你误判成没合。
+
+**⚠️ 但祖先关系也不是万能的：CNB 的合并方式逐 PR 不同，squash 合并下祖先判定会假阴性。**
+实测（2026-08-09，`git show --no-patch --format='%P'`）：
+
+| 合并提交 | PR | 父提交数 | `--is-ancestor` 判定 |
+|---|---|---|---|
+| `e4f0f80` | #129 | **2**（真 merge） | 分支是 main 祖先 ✅ 判对 |
+| `ff77acb` | #135 | **1**（squash） | 分支**不是** main 祖先 ❌ **判错** |
+| `d351683` | #138 | 1 | 同上 |
+| `c269b76` | #141 | 1 | 同上 |
+
+单父的合并提交里，分支上那串 commit 的 SHA 一个都不是 main 的祖先，
+`git merge-base --is-ancestor` 会回「未合并」——**而工作其实已经完整进主干了**。
+这个假阴性比 `merged=null` 更危险：它会让你以为白干了，进而去重推、重做、
+甚至在已经合并的分支上继续 rebase 制造重复提交。
+
+**判定改动是否进了主干，最终判据是内容不是 SHA**：
+
+```sh
+git fetch -q origin
+git diff --stat origin/main <你的分支> -- <你负责的那几个文件>   # 空 = 内容已在 main
+```
+
+`git cherry` 在这里同样不可靠：squash 把 N 个提交压成 1 个，逐个 patch-id 对不上。
+
+先看合并提交有几个父，再决定用哪种判据：
+`git show --no-patch --format='%P' <合并提交>` 输出一个 SHA = squash，两个 = 真 merge。
 
 **Why**：这些坑每一条都有人真的踩过并浪费时间排查，团队要求写进
 `docs/dev-workflow.md` 免得下一个人再试一遍。

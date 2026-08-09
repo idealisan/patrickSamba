@@ -14,7 +14,7 @@
 - [验收判据必须可证伪](feedback_falsifiable_assertions.md) — 加密曾用「能读到内容」判定而漏掉明文旁路；探针要有反向对照，失败用例不许 skip
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
-- [CNB PR API 的调用方式与六个坑](reference_cnb_pr_api.md) — 合并 PUT、更新 PATCH、merge_style、commit_title 必填、都要 Accept；已合并的 PR 仍回 merged=null，判合并只能用 git 祖先关系
+- [CNB PR API 的调用方式与七个坑](reference_cnb_pr_api.md) — 合并 PUT、更新 PATCH、merge_style、commit_title 必填、都要 Accept；merged=null 与 squash 下祖先判定双双假阴性，判合并要比内容
 - [不要把失败用例搬到 build tag 后面来止血](feedback_no_hiding_failing_tests.md) — 根因已有人在修时用例应留在默认路径裸奔；加 tag 藏起来和删除是同一类动作
 - [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 七个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 后的代码从未编译/go build 不编译 _test.go
 - [durable handle 的四条设计约束](project_durable_handle_design.md) — Persistent 全局唯一（含哨兵不变量）、加锁次序铁律、不起常驻回收 goroutine；第 4 条是刻意推迟到 v0.2.1+ 的欠账
