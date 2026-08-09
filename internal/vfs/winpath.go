@@ -48,6 +48,22 @@ import (
 	"strings"
 )
 
+// IsWindowsSlash 报告 c 是否为 Windows 路径分隔符。
+//
+// Win32 API 在大多数场合把 '/' 和 '\' 都当作分隔符（MS Docs
+// "Naming Files, Paths, and Namespaces" → "Win32 File Namespaces"）。
+// 这是「什么算 Windows 分隔符」的**唯一真源**，被 internal/config
+// （validate.go 的 isAbsWindowsPath）复用，避免两层各写一份后慢慢漂移。
+// 它特意留在 vfs（更低的层）：config 本来就 import vfs，不会产生新的
+// 依赖环；vfs 反过来绝不能 import config。
+//
+// 注意：本谓词只判断「分隔符」。文件名分量合法性的安全边界在
+// ValidateComponent 经由 invalidNameChars（`"*/:<>?\|`）实现，那条**更严**
+// （还禁了 ':' '*' '?' '"' '<' '>'）。两者不可混用：config 的
+// isAbsWindowsPath 刻意放宽（不校验 UNC 的 host\share 是否齐全），
+// 它**绝不能被当成**路径穿越安全检查——那是 vfs 的职责。
+func IsWindowsSlash(c byte) bool { return c == '\\' || c == '/' }
+
 // winTrimmedChars 是 Win32 会从分量结尾裁掉的字符。
 //
 // 只有 ASCII 空格 (0x20) 和点——不含 TAB 等其它空白，

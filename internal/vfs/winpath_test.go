@@ -202,3 +202,32 @@ func TestValidateWindowsNameSupersetOfLegacyReservedNames(t *testing.T) {
 		}
 	}
 }
+
+// TestIsWindowsSlashIsTheSeparatorSourceOfTruth 把「Windows 分隔符」钉死，
+// 并确认它与分量合法性所用的 invalidNameChars 里的分隔符**完全一致**——
+// 这是防止 vfs 与 config 两层各自定义分隔符后漂移的护栏：改动任一边、只要
+// 分隔符集合不再重合，这个用例就会红。
+func TestIsWindowsSlashIsTheSeparatorSourceOfTruth(t *testing.T) {
+	// 1) 唯一真源只认 '/' 和 '\'。
+	if !IsWindowsSlash('/') || !IsWindowsSlash('\\') {
+		t.Fatal("IsWindowsSlash 必须同时认 '/' 与 '\\'")
+	}
+	// 其它字节一律不是分隔符，尤其 Windows 的其它禁用字符（':' '*' '?' 等）
+	// 绝不能混进来——那是 invalidNameChars 的职责，不是分隔符。
+	for _, c := range []byte{':', '*', '?', '"', '<', '>', '|', '.', ' ', 'a', '0', 0} {
+		if IsWindowsSlash(c) {
+			t.Errorf("IsWindowsSlash(%q) = true，但它不是 Windows 路径分隔符", c)
+		}
+	}
+
+	// 2) 与分量合法性的分隔符集合重合：invalidNameChars 里凡被 vfs 当成
+	//    分隔符的字符，IsWindowsSlash 也必须认；反之亦然。
+	for c := byte(0); c < 128; c++ {
+		isSepInName := strings.IndexByte(invalidNameChars, c) >= 0 &&
+			(c == '/' || c == '\\') // invalidNameChars 中真正充当分隔符的只有这两个
+		if isSepInName != IsWindowsSlash(c) {
+			t.Errorf("分隔符定义不一致：invalidNameChars 把 %q 当分隔符=%v，"+
+				"但 IsWindowsSlash=%v", c, isSepInName, IsWindowsSlash(c))
+		}
+	}
+}
