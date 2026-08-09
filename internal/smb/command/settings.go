@@ -156,6 +156,10 @@ type Share struct {
 	// 互斥，两个会话连到同一个共享的同一个文件必须能看见彼此的锁。
 	// 零值可用，惰性建表。
 	locks lockTable
+
+	// shareModes 是本共享的共享模式（ShareAccess）表（见 share_access.go）。
+	// 与 locks 同理：跨会话可见才有意义。零值可用。
+	shareModes shareModeTable
 }
 
 // IsIPC 报告本共享是否为 IPC$ 管道共享。
