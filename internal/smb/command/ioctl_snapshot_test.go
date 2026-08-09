@@ -116,6 +116,36 @@ func TestIoctlEnumerateSnapshotsDispatched(t *testing.T) {
 	}
 }
 
+// TestUnimplementedFSCTLStatusByTreeType：未实现的控制码在磁盘树与 IPC$ 树上
+// 回不同的状态码，且都**不是** STATUS_NOT_SUPPORTED。
+//
+// 依据 Samba `smb2_ioctl_network_fs.c` 的 default 分支改写规则（见
+// unimplementedFSCTL 的注释）。客户端的退化路径是照 Samba 写的：
+// 收到 NOT_SUPPORTED 有些客户端会重试到超时。
+func TestUnimplementedFSCTLStatusByTreeType(t *testing.T) {
+	const bogus = wire.CtlCode(0x00090000) // 一个我们肯定不实现的 FSCTL
+
+	// 磁盘树 → STATUS_INVALID_DEVICE_REQUEST
+	ctx, req := newSparseCtx(t, 0)
+	req.CtlCode = bogus
+	req.Input = nil
+	if err := unimplementedFSCTL(ctx, req); err != status.InvalidDeviceRequest {
+		t.Errorf("磁盘树 err = %v, 期望 %v", err, status.InvalidDeviceRequest)
+	}
+
+	// IPC$ 树 → STATUS_FS_DRIVER_REQUIRED
+	ctx.Tree.Share.Type = wire.ShareTypePipe
+	if err := unimplementedFSCTL(ctx, req); err != status.FSDriverRequired {
+		t.Errorf("IPC$ 树 err = %v, 期望 %v", err, status.FSDriverRequired)
+	}
+
+	// 没有树上下文（IOCTL 不要求 TreeConnect）时不能 panic，按磁盘树处理。
+	ctx.Tree = nil
+	if err := unimplementedFSCTL(ctx, req); err != status.InvalidDeviceRequest {
+		t.Errorf("无树上下文 err = %v, 期望 %v", err, status.InvalidDeviceRequest)
+	}
+}
+
 // --- 辅助 -------------------------------------------------------------------
 
 // ioctlRespFixedSize 是 SMB2 IOCTL Response 的固定部分长度（MS-SMB2 §2.2.32）。

@@ -18,8 +18,7 @@ func init() {
 
 // handleIoctl 处理 SMB2 IOCTL（MS-SMB2 §3.3.5.15）。
 //
-// 认不出的控制码一律回 STATUS_INVALID_DEVICE_REQUEST —— 这是 Windows 的行为，
-// 客户端会据此优雅退化。回 NOT_SUPPORTED 有些客户端会重试到超时。
+// 未实现的控制码回什么，见 unimplementedFSCTL —— 不是 STATUS_NOT_SUPPORTED。
 func handleIoctl(ctx *Context) error {
 	req, err := wire.ParseIoctlRequest(ctx.Msg)
 	if err != nil {
@@ -48,9 +47,32 @@ func handleIoctl(ctx *Context) error {
 	case wire.FSCTLSrvEnumerateSnapshots:
 		return ioctlEnumerateSnapshots(ctx, req)
 	default:
-		ctx.Log.Debug("未实现的 FSCTL", "ctl", req.CtlCode)
-		return status.InvalidDeviceRequest
+		return unimplementedFSCTL(ctx, req)
 	}
+}
+
+// unimplementedFSCTL 是所有我们没实现的控制码的统一出口。
+//
+// **不回 STATUS_NOT_SUPPORTED**，这一点是刻意的，依据是真实 Samba 的行为
+// （AGENTS.md §9 真实客户端行为优先）：Samba 的
+// `source3/smbd/smb2_ioctl_network_fs.c` 在 default 分支里把底层
+// `SMB_VFS_FSCTL` 返回的 NT_STATUS_NOT_SUPPORTED **改写**成：
+//
+//	磁盘树   → STATUS_INVALID_DEVICE_REQUEST
+//	IPC$ 树  → STATUS_FS_DRIVER_REQUIRED
+//
+// 客户端的错误处理路径是照着 Samba 的行为写的：收到 NOT_SUPPORTED 时有些
+// 客户端会重试到超时，而收到 INVALID_DEVICE_REQUEST 会立刻优雅退化。
+//
+// 两个树类型要分开是因为 IPC$ 上「设备请求非法」讲不通 —— 那里根本没有设备，
+// 缺的是能处理该控制码的文件系统驱动。
+func unimplementedFSCTL(ctx *Context, req *wire.IoctlRequest) error {
+	if ctx.Tree != nil && ctx.Tree.Share != nil && ctx.Tree.Share.IsIPC() {
+		ctx.Log.Debug("未实现的 FSCTL（IPC$）", "ctl", req.CtlCode)
+		return status.FSDriverRequired
+	}
+	ctx.Log.Debug("未实现的 FSCTL", "ctl", req.CtlCode)
+	return status.InvalidDeviceRequest
 }
 
 // ioctlValidateNegotiate 处理 FSCTL_VALIDATE_NEGOTIATE_INFO（MS-SMB2 §3.3.5.15.12）。
