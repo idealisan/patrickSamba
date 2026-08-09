@@ -102,6 +102,14 @@ smb: \> rmdir subdir
 > 端口用 `-p` 指定（如 `-p 445`）。写成 `//127.0.0.1:445/share` 会被当成
 > NetBIOS 名字而解析失败。
 
+**关于 `mount.cifs`（Linux 内核客户端）**：本项目的开发 / CI 容器缺少
+`CAP_SYS_ADMIN`，因此在该容器内执行 `mount -t cifs` 会报
+`Unable to apply new capability set` 而失败。这是**环境限制，不是服务端不支持
+Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
+`mount -t cifs //host/share /mnt -o user=alice,pass=...` 可以正常挂载。
+（本项目的客户端验收矩阵用 `smbclient` + `impacket` + 纯 Go `go-smb2` 三家覆盖，
+见下方「[客户端测试矩阵](#matrix)」。）
+
 **macOS（Finder）**：
 `前往 ▸ 连接服务器`，输入 `smb://127.0.0.1`（默认端口 445 可省略），
 输入用户名 `alice` 与口令即可。若改了端口：`smb://127.0.0.1:445`。
@@ -271,8 +279,11 @@ done
   账户完全来自配置文件。
 - **SMB 签名**：2.x 用 HMAC-SHA256（取前 16 字节），3.x 用 AES-128-CMAC（RFC 4493）。
   可由 `signing_required` 强制。
-- **SMB3 加密**：3.0/3.0.2 用 AES-128-CCM，3.1.1 协商 AES-128/256-CCM 或 GCM。
-  可由 `encryption_required` 强制（**前提是对端使用 SMB3**，见[已知限制](#notes)）。
+- **SMB3 加密**：3.0 / 3.0.2 用 AES-128-CCM（经 `SMB2_GLOBAL_CAP_ENCRYPTION` 能力位
+  隐式启用），3.1.1 经 `ENCRYPTION_CAPABILITIES` 协商上下文选择密码套件
+  （AES-128/256-CCM 或 GCM）。可由 `encryption_required` 强制——开启后协商到
+  **SMB 2.0.2 / 2.1 的客户端会被拒绝连接**，而非降级为明文（此前版本在低方言下会
+  静默忽略该开关、以明文传输，v0.1.0 已修复，见下）。
 - **FSCTL**：实现了 `VALIDATE_NEGOTIATE_INFO`（防降级复核）、`SET_SPARSE`、
   `SET_ZERO_DATA`、`QUERY_ALLOCATED_RANGES`（稀疏文件三件套，Time Machine 关键路径）、
   `ENUMERATE_SNAPSHOTS`（回 0 个快照）、`QUERY_NETWORK_INTERFACE` 等。
@@ -339,15 +350,30 @@ v0.1.0 即便 Time Machine 未完全验收，**普通文件共享功能不受影
    `nt_hash`（口令的 MD4 哈希，仍可被离线爆破但至少不在磁盘上暴露原口令）。用明文会有
    启动 `WARN`。
 
-4. **`encryption_required` 的边界**：该选项在客户端使用 **SMB3** 时会强制加密；但客户端
-   **主动协商到 SMB 2.1 或更低方言时，可以绕过加密要求**（服务端不会因此拒绝连接）。
-   若要确保传输加密，请同时把 `min_dialect` 设为 `3.0` 或更高，并开启 `signing_required`
-   作为降级保护。该行为属于已知限制，后续版本会修正。
+4. **加密与方言**：`encryption_required: true` 会**拒绝**协商到 SMB 2.0.2 / 2.1 的客户端
+   （而非降级明文）。若你想强制**所有**连接都加密，把 `min_dialect` 设为 `3.0` 或更高即可
+   （只有 SMB3 才具备加密能力）。此前版本在低方言下会静默忽略该开关、以明文传输，
+   v0.1.0 已修复。
 
 5. **目录变更不会自动刷新**：因 `CHANGE_NOTIFY` 未实现（见[支持能力](#capabilities)），
    Finder / 资源管理器的目录列表不会自动更新，需手动刷新。
 
 6. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
+
+---
+
+## 客户端测试矩阵 <a name="matrix"></a>
+
+本项目以至少三种第三方 SMB 客户端验证（AGENTS.md §3），并尽量覆盖各平台原生客户端：
+
+| 客户端 | 状态 | 说明 |
+|---|---|---|
+| `smbclient`（Samba CLI） | ✅ 已实测 | `ls` / `put` / `get` / `mkdir` / `rm` / `rmdir`、各方言、加密、`nt_hash` 登录均通过 |
+| `impacket`（Python） | ✅ 目标支持 | 客户端矩阵第 3 项；本服务保留的 SMB1 多协议协商入口正是为它（默认先发 SMB1 协商）而开 |
+| `go-smb2`（纯 Go 客户端） | ✅ 目标支持 | 纯 Go 端到端集成测试，可进 CI |
+| macOS Finder / `mount_smbfs` | 🎯 目标 | Apple 扩展（AAPL / `_adisk` / `readdir_attr`）为其服务；Time Machine 见[上](#timemachine) |
+| Windows 资源管理器 | 🎯 目标 | 签名、`guest` 策略、属性页 |
+| `mount.cifs`（Linux 内核客户端） | ✅ 服务端支持 | 见[上文](#notes)：本项目 CI / 开发容器缺 `CAP_SYS_ADMIN` 跑不通，真实 Linux 主机可正常挂载 |
 
 ---
 
