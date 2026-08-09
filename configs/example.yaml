@@ -107,9 +107,10 @@ shares:
     comment: "Time Machine"
     # 宣告为 Time Machine 目标（进 mDNS 的 _adisk._tcp）。不能同时是只读。
     time_machine: true
-    # 只写进 mDNS _adisk 的 TXT，让 Finder 的「选择备份磁盘」界面显示容量；
-    # 不影响 SMB 卷容量上报。0 = 不填这个字段。
-    time_machine_max_size: 0
+    # time_machine_max_size 目前**不起任何作用**，设了会有一条启动 WARN。
+    # _adisk 的 TXT 词汇表里没有经过验证的容量键，macOS 是按 SMB 上报的
+    # 卷容量判断备份磁盘大小的 —— 要限制体积请用下面的 quota_bytes。
+    # time_machine_max_size: 0
     # 向所有 SMB 客户端上报的卷容量上限（字节）。0 = 不限（按宿主真实剩余上报）。
     # 主要影响 Time Machine：不设的话 TM 会一直写到把卷吃满。
     # 这不是强制配额，只改上报的数字，不阻止本地写入。低于 1 GiB 会有 WARN。
