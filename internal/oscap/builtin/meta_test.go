@@ -13,7 +13,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
-func TestCreationTimeRoundTrip(t *testing.T) {
+func TestPortableCreationTimeRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.txt", nil)
 
@@ -47,7 +47,7 @@ func TestCreationTimeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCreationTimeEpochAndFuture(t *testing.T) {
+func TestPortableCreationTimeEpochAndFuture(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.txt", nil)
 	for _, want := range []time.Time{
@@ -65,7 +65,7 @@ func TestCreationTimeEpochAndFuture(t *testing.T) {
 	}
 }
 
-func TestDOSAttributesRoundTrip(t *testing.T) {
+func TestPortableDOSAttributesRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.txt", nil)
 
@@ -96,7 +96,7 @@ func TestDOSAttributesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFileIDStableUniqueAndSurvivesRename(t *testing.T) {
+func TestPortableFileIDStableUniqueAndSurvivesRename(t *testing.T) {
 	e := newEnv(t)
 	a := e.file("a.txt", []byte("a"))
 	b := e.file("b.txt", []byte("b"))
@@ -141,7 +141,7 @@ func TestFileIDStableUniqueAndSurvivesRename(t *testing.T) {
 	}
 }
 
-func TestFileIDMissingObject(t *testing.T) {
+func TestPortableFileIDMissingObject(t *testing.T) {
 	e := newEnv(t)
 	ref := oscap.Ref{Path: filepath.Join(e.root, "nope")}
 	if _, err := e.set.IDs.FileID(ref); !errors.Is(err, oscap.ErrNotFound) {
@@ -149,13 +149,13 @@ func TestFileIDMissingObject(t *testing.T) {
 	}
 }
 
-// TestFileIDFallbackAllocation 直接验证「拿不到 inode」那条路：
+// TestPortableFileIDFallbackAllocation 直接验证「拿不到 inode」那条路：
 // 库分配的号必须唯一、稳定、且与真实 inode 不撞号段。
 //
 // 不能靠「找一个没有 inode 的文件系统」来触发（构建机上不存在），
 // 所以绕开 inodeOf 直接测底层分配器 —— 这条路径在 Windows 上是常态，
 // 而 CI 跑在 Linux 上，不这么测它就永远不会被执行到。
-func TestFileIDFallbackAllocation(t *testing.T) {
+func TestPortableFileIDFallbackAllocation(t *testing.T) {
 	e := newEnv(t)
 	a := e.file("a.txt", nil)
 	b := e.file("b.txt", nil)
@@ -181,9 +181,9 @@ func TestFileIDFallbackAllocation(t *testing.T) {
 	}
 }
 
-// TestDefaultMetadataPathOutsideRoot 盯的是一条硬要求：
+// TestPortableDefaultMetadataPathOutsideRoot 盯的是一条硬要求：
 // 默认库文件**不能落在共享根里面**，否则客户端会在共享里看见它。
-func TestDefaultMetadataPathOutsideRoot(t *testing.T) {
+func TestPortableDefaultMetadataPathOutsideRoot(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "share")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("建目录失败: %v", err)

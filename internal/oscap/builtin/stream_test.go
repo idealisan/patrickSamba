@@ -9,7 +9,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
-func TestNamedStreamRoundTrip(t *testing.T) {
+func TestPortableNamedStreamRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("doc.txt", []byte("main data"))
 
@@ -116,7 +116,7 @@ func TestNamedStreamRoundTrip(t *testing.T) {
 	}
 }
 
-func TestNamedStreamReadAtEOFContract(t *testing.T) {
+func TestPortableNamedStreamReadAtEOFContract(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("doc.txt", nil)
 	h, err := e.set.Streams.OpenStream(ref, "s", oscap.StreamRead|oscap.StreamWrite|oscap.StreamCreate)
@@ -148,7 +148,7 @@ func TestNamedStreamReadAtEOFContract(t *testing.T) {
 	}
 }
 
-func TestNamedStreamTruncateFlag(t *testing.T) {
+func TestPortableNamedStreamTruncateFlag(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("doc.txt", nil)
 
@@ -180,10 +180,10 @@ func TestNamedStreamTruncateFlag(t *testing.T) {
 	}
 }
 
-// TestNamedStreamReadOnlyHandleRejectsWrite 验证「只读打开的句柄不能写」。
+// TestPortableNamedStreamReadOnlyHandleRejectsWrite 验证「只读打开的句柄不能写」。
 //
 // 这条与共享级只读是两回事：共享可写，但这个句柄只申请了读。
-func TestNamedStreamReadOnlyHandleRejectsWrite(t *testing.T) {
+func TestPortableNamedStreamReadOnlyHandleRejectsWrite(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("doc.txt", nil)
 

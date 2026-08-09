@@ -12,7 +12,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
-func TestPunchHoleObservableSemantics(t *testing.T) {
+func TestPortablePunchHoleObservableSemantics(t *testing.T) {
 	e := newEnv(t)
 	const blocks = 4
 	ref := e.file("band", bytesRepeat(0xAA, blocks*zeroBlockSize))
@@ -58,13 +58,13 @@ func TestPunchHoleObservableSemantics(t *testing.T) {
 	}
 }
 
-// TestAllocatedRangesSelfCorrectsAfterOverwrite 是本文件里最要紧的一条。
+// TestPortableAllocatedRangesSelfCorrectsAfterOverwrite 是本文件里最要紧的一条。
 //
 // 打洞记录存在旁路库里，而客户端把数据写回同一段是走**普通 IO** 的，
 // oscap 根本看不见。只信记账的实现会在这里少报一段真实数据 ——
 // ports.go 警告过这个方向：「少报会让客户端以为数据丢了」。
 // 这条用例就是那个可证伪的探针：如果哪天有人把回读校验优化掉，它会立刻红。
-func TestAllocatedRangesSelfCorrectsAfterOverwrite(t *testing.T) {
+func TestPortableAllocatedRangesSelfCorrectsAfterOverwrite(t *testing.T) {
 	e := newEnv(t)
 	const blocks = 3
 	ref := e.file("band", bytesRepeat(0xAA, blocks*zeroBlockSize))
@@ -95,7 +95,7 @@ func TestAllocatedRangesSelfCorrectsAfterOverwrite(t *testing.T) {
 	}
 }
 
-func TestPunchHoleClipsToEOF(t *testing.T) {
+func TestPortablePunchHoleClipsToEOF(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("small", bytesRepeat(0xCC, 100))
 
@@ -122,7 +122,7 @@ func TestPunchHoleClipsToEOF(t *testing.T) {
 	}
 }
 
-func TestSparseArgumentValidation(t *testing.T) {
+func TestPortableSparseArgumentValidation(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.bin", bytesRepeat(1, 10))
 
@@ -153,8 +153,8 @@ func TestSparseArgumentValidation(t *testing.T) {
 	}
 }
 
-// TestSetSparseAsymmetry 钉住 ports.go 那条刻意的不对称。
-func TestSetSparseAsymmetry(t *testing.T) {
+// TestPortableSetSparseAsymmetry 钉住 ports.go 那条刻意的不对称。
+func TestPortableSetSparseAsymmetry(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.bin", nil)
 	if err := e.set.Sparse.SetSparse(ref, true); err != nil {
@@ -165,7 +165,7 @@ func TestSetSparseAsymmetry(t *testing.T) {
 	}
 }
 
-func TestSparseMissingObject(t *testing.T) {
+func TestPortableSparseMissingObject(t *testing.T) {
 	e := newEnv(t)
 	ref := oscap.Ref{Path: filepath.Join(e.root, "nope")}
 	if err := e.set.Sparse.PunchHole(ref, 0, 10); !errors.Is(err, oscap.ErrNotFound) {
@@ -179,7 +179,7 @@ func TestSparseMissingObject(t *testing.T) {
 	}
 }
 
-func TestPreallocateKeepsLogicalSize(t *testing.T) {
+func TestPortablePreallocateKeepsLogicalSize(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("a.bin", bytesRepeat(7, 16))
 	if err := e.set.Sparse.Preallocate(ref, 0, 1<<20); err != nil {
@@ -190,7 +190,7 @@ func TestPreallocateKeepsLogicalSize(t *testing.T) {
 	}
 }
 
-func TestHolesSurviveReopen(t *testing.T) {
+func TestPortableHolesSurviveReopen(t *testing.T) {
 	e := newEnv(t)
 	ref := e.file("band", bytesRepeat(0xAA, 2*zeroBlockSize))
 	if err := e.set.Sparse.PunchHole(ref, 0, zeroBlockSize); err != nil {
@@ -207,8 +207,8 @@ func TestHolesSurviveReopen(t *testing.T) {
 	}
 }
 
-// TestRangeMath 是区间集合运算的纯函数用例（无 IO，跑得飞快）。
-func TestRangeMath(t *testing.T) {
+// TestPortableRangeMath 是区间集合运算的纯函数用例（无 IO，跑得飞快）。
+func TestPortableRangeMath(t *testing.T) {
 	t.Run("normalize", func(t *testing.T) {
 		in := []oscap.Range{
 			{Offset: 30, Length: 10},
@@ -249,9 +249,9 @@ func TestRangeMath(t *testing.T) {
 	})
 }
 
-// TestAppendZeroBlocksAlignsToFileOffset 盯的是分块对齐：块边界必须按**文件绝对
+// TestPortableAppendZeroBlocksAlignsToFileOffset 盯的是分块对齐：块边界必须按**文件绝对
 // 偏移**算，否则相邻两次读会错位，同一物理块被劈成两半分别判定。
-func TestAppendZeroBlocksAlignsToFileOffset(t *testing.T) {
+func TestPortableAppendZeroBlocksAlignsToFileOffset(t *testing.T) {
 	data := make([]byte, zeroBlockSize)
 	data[len(data)-1] = 1 // 尾字节非零，绝对偏移落在第二个块里
 
