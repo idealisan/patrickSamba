@@ -129,17 +129,23 @@
   但**所有平台都参与启动校验**。因此同一份配置跨平台复用时，这一项要么留空、
   要么按平台分开写。文档此前写作「会被忽略」，容易被读成「随便填」。
 
-### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
-
-以下两项都是 v0.3.0 的底座，写在这里是因为它们已经进了仓库（其中一项还进了
-`go.mod`），但**产品代码目前一行都没有引用**。不要读成功能承诺。
+### 内部：OS 能力抽象的地基（**接口与开关已就位，适配器尚未落地**）
 
 - **`internal/oscap`：OS 能力抽象 port（PR #123）**。按 AGENTS.md §1.2 C9 / §5 P7
   定义六项可选能力的接口——`xattr` / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 /
   DOS 属性位——外加逐能力降级矩阵、`auto`/`native`/`portable` 三态模式与平台探测，
-  并配 31 例单元测试。**只有 port，`native/` 与 `builtin/` 两个适配器都还不存在**，
-  配置项 `filesystem_mode` 也**尚未接入** `internal/config`（现在写进配置文件会因为
-  严格 YAML 的未知字段校验而启动失败）。
+  并配 31 例单元测试。
+- **配置项 `filesystem_mode`（PR #126）**：三态全局开关，默认 `auto`，取值合法性
+  校验委托 `oscap.ParseMode`（单一真源，防止配置层与 oscap 层各写一份取值表而漂移）。
+  `configs/example.yaml` 已列出该字段。
+  它是**全局策略**而非逐共享设置——表达的是「这台机器上我们信不信任宿主能力」；
+  各共享的落点仍逐个探测决定，同一次运行里 ext4 目录可走 native、exFAT 目录落 builtin。
+- ⚠️ **但此刻它还改变不了任何行为**：`native/` 与 `builtin/` 两个适配器**都还不存在**，
+  `internal/vfs` 也尚未改为经由 port 取能力。也就是说这三档现在**选哪个跑起来都一样**。
+  真正生效在 v0.3.0。在那之前不要根据这个开关下任何部署结论。
+
+### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
+
 - **`internal/meta`：POSIX 元数据旁路 KV 存储（PR #26）**。Windows 用
   `go.etcd.io/bbolt`（纯 Go，符合 C1 禁 CGO），非 Windows 为 noop 实现，bucket 名
   `posix.v2`。
@@ -163,8 +169,9 @@
   但定级的依据是 [`docs/timemachine-status.md`](docs/timemachine-status.md)，
   而该文档的 B 档要求包含「真机断线恢复证据」，本版本一条都没有（开发环境无 macOS）。
   **能力就位 ≠ 定级上调**，在真机跑过之前不动这个结论。**请勿用于唯一备份。**
-- **`internal/oscap` 只有 port，没有适配器**；`filesystem_mode` 配置项尚未接入，
-  写进配置文件会因严格 YAML 未知字段校验而启动失败。
+- **`filesystem_mode` 三档目前等价**：开关和接口都在了，但 `native/` 与 `builtin/`
+  适配器未实现、`internal/vfs` 未改为经由 port 取能力，所以选 `auto` / `native` /
+  `portable` 跑起来行为完全一样。v0.3.0 才真正生效。
 - **非 Windows 平台仍无元数据旁路兜底**：`internal/vfs/metadata_other.go` 直接
   返回 nil。宿主文件系统不支持 xattr 时（FAT32/exFAT 外置盘、`nouser_xattr` 挂载、
   只读根）这些元数据会**静默丢失**且不报错。这是 v0.3.0 builtin 完整化的第一优先级。
