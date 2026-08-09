@@ -196,9 +196,15 @@ func putBE32(b []byte, v uint32) {
 // ---------------------------------------------------------------- 枚举
 
 // streamsOf 列出一个对象的所有流，供 FileStreamInformation 使用。
+//
+// 必须与 openStream 的可用范围**严格一致**：列出一个打不开的流，
+// 或者能打开却不列出，都会让客户端行为错乱（前者报错，后者写得进读不到）。
+// 目录上的差别见下面各段注释。
 func (l *LocalFS) streamsOf(host string, a *Attr) []StreamInfo {
-	out := make([]StreamInfo, 0, 3)
-	if a.FileAttributes&FileAttributeDirectory == 0 {
+	isDir := a.FileAttributes&FileAttributeDirectory != 0
+
+	out := make([]StreamInfo, 0, 4)
+	if !isDir {
 		out = append(out, StreamInfo{
 			Name:  DefaultStreamName,
 			Size:  a.Size,
@@ -206,7 +212,8 @@ func (l *LocalFS) streamsOf(host string, a *Attr) []StreamInfo {
 		})
 	}
 
-	// AFP_AfpInfo：存在 xattr 就报告，长度恒为 60。
+	// AFP_AfpInfo：存在 xattr 就报告，长度恒为 60。**目录上同样报告** ——
+	// .sparsebundle 是目录，macOS 会往它上面设 FinderInfo。
 	if _, err := l.readAfpInfo(host); err == nil {
 		out = append(out, StreamInfo{
 			Name:  StreamName(StreamAFPInfo),
@@ -216,13 +223,20 @@ func (l *LocalFS) streamsOf(host string, a *Attr) []StreamInfo {
 	}
 
 	// AFP_Resource：报告 ._ 文件里资源段的长度，而不是整个 ._ 文件的长度。
-	if size, ok := resourceForkSize(dotUnderscoreName(host)); ok {
-		out = append(out, StreamInfo{
-			Name:  StreamName(StreamAFPResource),
-			Size:  size,
-			Alloc: allocSizeFallback(size),
-		})
+	// 目录**不报告**：目录没有资源派生（Samba fruit_streaminfo_rsrc()
+	// 对目录直接返回空，vfs_fruit.c:4047），openStream 那边也是回 ErrNotFound。
+	if !isDir {
+		if size, ok := resourceForkSize(dotUnderscoreName(host)); ok {
+			out = append(out, StreamInfo{
+				Name:  StreamName(StreamAFPResource),
+				Size:  size,
+				Alloc: allocSizeFallback(size),
+			})
+		}
 	}
+
+	// 通用 named stream（user.DosStream.*）。文件和目录都有。
+	out = append(out, l.dosStreamsOf(host)...)
 	return out
 }
 
