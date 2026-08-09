@@ -326,10 +326,10 @@ func (r *Resolver) EvalFinal(host string) (string, error) {
 	if err != nil {
 		return "", mapError(err)
 	}
-	if fi.Mode()&os.ModeSymlink == 0 {
+	if !hostIsRedirect(host, fi) {
 		return host, nil
 	}
-	real, err := filepath.EvalSymlinks(host)
+	real, err := hostEvalRedirect(host)
 	if err != nil {
 		return "", mapError(err)
 	}
@@ -365,7 +365,7 @@ func (r *Resolver) resolveComponents(comps []string) (string, error) {
 			return "", ErrNotFound
 		}
 
-		if fi.Mode()&os.ModeSymlink != 0 {
+		if hostIsRedirect(next, fi) {
 			if err := r.checkSymlink(next); err != nil {
 				return "", err
 			}
@@ -379,8 +379,13 @@ func (r *Resolver) resolveComponents(comps []string) (string, error) {
 }
 
 // checkSymlink 校验一个符号链接（含其后续链条）的最终目标仍在共享根内。
+//
+// 「什么算链接」与「链接指向哪」两件事都走平台钩子（redirect_unix.go /
+// redirect_windows.go）。POSIX 侧就是 ModeSymlink + EvalSymlinks，与原先一致；
+// Windows 侧必须另走一套，因为 Go 在那边既不把 junction 认作符号链接、
+// 也不用 EvalSymlinks 解析它 —— 详见 winreparse.go 顶部。
 func (r *Resolver) checkSymlink(link string) error {
-	real, err := filepath.EvalSymlinks(link)
+	real, err := hostEvalRedirect(link)
 	if err == nil {
 		if !r.contains(real) {
 			return fmt.Errorf("%w: 符号链接 %q 指向共享外", ErrPermission, link)
