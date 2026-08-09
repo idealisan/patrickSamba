@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -61,12 +62,48 @@ var errCorrupt = errors.New("oscap/builtin: 旁路存储记录损坏")
 // db 允许为 nil —— 只读共享且库文件尚不存在时就是这种状态：
 // 此时读一律「查不到」、写一律 ErrReadOnly，**绝不创建任何文件**
 // （oscap.Options.ReadOnly 的契约：不得创建/写入任何旁路文件）。
+//
+// readOnly 是**本视图**的只读性，与底层 db 是不是以只读方式打开的无关：
+// 同一个库可以同时被一个可写共享和一个只读共享使用（见 openDBs），
+// 只读那一侧照样必须拒绝写入。
 type store struct {
 	db       *bolt.DB
+	ref      *dbRef // 非 nil 时表示 db 来自共享登记表，close 要走引用计数
 	path     string
 	root     string
 	readOnly bool
 }
+
+// dbRef 是一个被多方共用的 bbolt 句柄。
+type dbRef struct {
+	db *bolt.DB
+
+	// readOnly 记录**打开时**用的模式。只读打开的句柄永远写不了，
+	// 所以后来者要写就不能搭它的车。
+	readOnly bool
+
+	refs int
+}
+
+// openDBs 登记本进程已经打开的库文件，key 是库文件的**绝对路径**。
+//
+// # 为什么必须有这张表
+//
+// bbolt 用 flock 互斥，同一个文件在**同一个进程内**开第二次同样会被自己挡住：
+// 第二次 bolt.Open 卡满 openFlockTimeout（5 秒）后报「是否已被另一个实例占用？」——
+// 而占用者就是自己，这句提示会把排查引到完全错误的方向。
+//
+// 这不是假想场景，是**必然发生**的：一个共享根被导出两次（例如同一目录既有
+// 可写共享又有只读共享）时，两个 LocalFS 会算出同一个库路径。
+// 本仓库现有测试里就有 6 处这种用法（同一 root 再开一个只读 LocalFS）。
+//
+// 表里存的是句柄不是 store：**句柄可共用，视图不可共用** ——
+// 每个 store 有自己的 root（决定 key 前缀）与 readOnly（决定能不能写）。
+// 把这两者混在一起共用，只读共享就会跟着可写共享一起获得写权限。
+var (
+	openDBsMu sync.Mutex
+	openDBs   = map[string]*dbRef{}
+)
 
 // openStore 打开（必要时创建）旁路存储。
 func openStore(o oscap.Options) (*store, error) {
@@ -80,25 +117,84 @@ func openStore(o oscap.Options) (*store, error) {
 		if _, err := os.Stat(p); err != nil {
 			// 库不存在：只读共享不许建它，退化成「空库」。
 			// 这不是降级失败，而是如实反映「这个共享没有任何旁路元数据」。
+			//
+			// 注意这一步要在 acquireDB 之前：登记表里可能有一个刚被别人
+			// 关掉、文件也已不在的条目，先 stat 才是对磁盘现状的判断。
 			return st, nil
 		}
-		db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout, ReadOnly: true})
-		if err != nil {
-			return nil, fmt.Errorf("oscap/builtin: 以只读方式打开旁路存储 %s 失败: %w", p, err)
-		}
-		st.db = db
-		return st, nil
-	}
-
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	} else if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return nil, fmt.Errorf("oscap/builtin: 创建旁路存储目录失败: %w", err)
 	}
-	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout})
+
+	ref, err := acquireDB(p, o.ReadOnly)
 	if err != nil {
-		return nil, fmt.Errorf("oscap/builtin: 打开旁路存储 %s 失败（是否已被另一个实例占用？）: %w", p, err)
+		return nil, err
 	}
-	st.db = db
+	st.ref = ref
+	st.db = ref.db
 	return st, nil
+}
+
+// acquireDB 取得库文件 p 的句柄，已经打开过就复用并把引用计数加一。
+func acquireDB(p string, readOnly bool) (*dbRef, error) {
+	key, err := filepath.Abs(p)
+	if err != nil {
+		// 拿不到绝对路径就退回原样：宁可退化成「不复用」（老行为，
+		// 顶多撞锁报错），也不能用一个可能与别人不一致的 key 去共用句柄。
+		key = p
+	}
+
+	openDBsMu.Lock()
+	defer openDBsMu.Unlock()
+
+	if r, ok := openDBs[key]; ok {
+		if !readOnly && r.readOnly {
+			// 已有句柄是只读打开的，写不了，也不能就地升级
+			// （bbolt 不支持）。**立刻报错，不要去 bolt.Open 白等 5 秒**：
+			// 那 5 秒既解决不了问题，还会给出「被另一个实例占用」这句
+			// 指向错误方向的提示。
+			return nil, fmt.Errorf(
+				"oscap/builtin: 旁路存储 %s 已被本进程以只读方式打开，"+
+					"无法再以可写方式使用（请让可写共享先于只读共享装配，"+
+					"或给它们配置不同的 metadata_path）: %w", key, oscap.ErrReadOnly)
+		}
+		r.refs++
+		return r, nil
+	}
+
+	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout, ReadOnly: readOnly})
+	if err != nil {
+		if readOnly {
+			return nil, fmt.Errorf("oscap/builtin: 以只读方式打开旁路存储 %s 失败: %w", p, err)
+		}
+		return nil, fmt.Errorf(
+			"oscap/builtin: 打开旁路存储 %s 失败（是否已被另一个进程占用？）: %w", p, err)
+	}
+	r := &dbRef{db: db, readOnly: readOnly, refs: 1}
+	openDBs[key] = r
+	return r, nil
+}
+
+// releaseDB 归还句柄，最后一个使用者负责真正关闭。
+func releaseDB(p string, ref *dbRef) error {
+	key, err := filepath.Abs(p)
+	if err != nil {
+		key = p
+	}
+
+	openDBsMu.Lock()
+	defer openDBsMu.Unlock()
+
+	ref.refs--
+	if ref.refs > 0 {
+		return nil
+	}
+	// 只删自己那一条：同一个 key 有可能已经被后来者重新打开成另一个 dbRef
+	// （前一个全部关闭 → 文件仍在 → 又被 acquireDB 开了一次）。
+	if cur, ok := openDBs[key]; ok && cur == ref {
+		delete(openDBs, key)
+	}
+	return ref.db.Close()
 }
 
 // resolveMetadataPath 决定库文件落在哪。
@@ -359,10 +455,11 @@ func (s *store) assignFileID(key []byte) (uint64, error) {
 
 // close 释放库句柄。可重复调用。
 func (s *store) close() error {
-	if s.db == nil {
+	if s.ref == nil {
+		// 只读且库文件不存在时压根没开过东西（db 恒为 nil）。
 		return nil
 	}
-	db := s.db
-	s.db = nil
-	return db.Close()
+	ref := s.ref
+	s.ref, s.db = nil, nil
+	return releaseDB(s.path, ref)
 }

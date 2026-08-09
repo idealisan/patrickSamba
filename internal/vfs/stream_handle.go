@@ -553,7 +553,7 @@ func (h *streamHandle) Xattr() (XattrAccessor, error) {
 	if h.closed {
 		return nil, ErrClosed
 	}
-	return newXattrAccessor(h.host, nil)
+	return h.fs.xattrAt(h.host, nil), nil
 }
 
 func (h *streamHandle) Close() error {

@@ -110,7 +110,11 @@ go vet -tags "$TAGS" ./...
 #   internal/oscap/probe_other.go、probe_helper_other_test.go
 #   internal/vfs/{attr,sparse,sys,xattr}_other.go
 # 选 freebsd 只是因为它是「非三大平台」里最省事的代表，换 openbsd/solaris 等价。
-# 负向对照见 test/ci/negative-verify.sh 的 freebsd 段。
+# 负向对照见 test/ci/negative-verify.sh 里锚点 `ANCHOR: freebsd-fallback-files` 那一节
+#（三向：干净树绿 / 注入类型错误后本门禁必须红且报错点名 / 退回旧四平台同一故障变回绿）。
+# 指锚点名而不指「第 6 节」是刻意的：节号会漂移、段名会失配，而锚点可以 grep 验证：
+#     grep -n 'ANCHOR: freebsd-fallback-files' test/ci/negative-verify.sh
+# 本行曾经是一句悬空引用（指向当时尚不存在的段落），别让它再悬空一次。
 for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64; do
     _os=${t%/*}
     _arch=${t#*/}

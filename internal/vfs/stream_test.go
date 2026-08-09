@@ -40,6 +40,12 @@ func openStreamH(t *testing.T, fs *LocalFS, path, stream string, flags OpenFlags
 	return h, act
 }
 
+// requireXattr 确认这个 LocalFS 的扩展属性能力**可用**。
+//
+// 历史：本函数原本在宿主不支持 xattr 时 t.Skip。接上 oscap 之后那两条
+// skip 已经不可达 —— 宿主没有扩展属性时由 builtin 适配器兜住，能力永远可用。
+// 因此改成**硬断言**：真失败了就说明接线坏了，必须红。
+// （AGENTS.md：失败用例不许 skip，一条会自己跳过的断言等于没有断言。）
 func requireXattr(t *testing.T, fs *LocalFS) {
 	t.Helper()
 	p := filepath.Join(fs.Root(), ".xattrprobe")
@@ -47,12 +53,8 @@ func requireXattr(t *testing.T, fs *LocalFS) {
 		t.Fatal(err)
 	}
 	defer func() { _ = os.Remove(p) }()
-	x, err := newXattrAccessor(p, nil)
-	if err != nil {
-		t.Skipf("本平台不支持扩展属性: %v", err)
-	}
-	if err := x.Set("user.probe", []byte{1}); err != nil {
-		t.Skipf("宿主文件系统不支持扩展属性: %v", err)
+	if err := fs.xattrAt(p, nil).Set("probe", []byte{1}); err != nil {
+		t.Fatalf("扩展属性能力不可用（matrix=%s）: %v", fs.caps.Matrix(), err)
 	}
 }
 
@@ -93,10 +95,7 @@ func TestAfpInfoStreamRoundTrip(t *testing.T) {
 
 	// 落盘的必须是 netatalk 兼容的 402 字节 AppleDouble blob，
 	// 而不是我们自己发明的格式 —— 否则 Netatalk / 既有 Samba 共享读不出来。
-	x, err := newXattrAccessor(filepath.Join(fs.Root(), "doc.txt"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	x := fs.xattrAt(filepath.Join(fs.Root(), "doc.txt"), nil)
 	raw, err := x.Get(netatalkMetaXattr)
 	if err != nil {
 		t.Fatalf("落盘的 xattr %q 不存在: %v", netatalkMetaXattr, err)
@@ -131,7 +130,7 @@ func TestAfpInfoStreamDeleteByZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	x, _ := newXattrAccessor(hostPath, nil)
+	x := fs.xattrAt(hostPath, nil)
 	if _, err := x.Get(netatalkMetaXattr); err != nil {
 		t.Fatalf("前置条件不成立，xattr 应存在: %v", err)
 	}

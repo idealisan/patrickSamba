@@ -301,7 +301,12 @@ func (l *LocalFS) appleInfoAt(host string, probeRsrc bool, scratch []byte) ([Fin
 	var fi [FinderInfoSize]byte
 	// 两者都是「没有就算了」：缺 FinderInfo 或缺资源派生都是正常状态，
 	// 磁盘上的 blob 损坏也一样（一个坏掉的 FinderInfo 不该让整条目录项失败）。
-	if blob, err := readMetaXattrFast(host, scratch); err == nil {
+	// scratch 目前没有用武之地：oscap.Xattr 的 GetXattr 自己分配返回值。
+	// 保留形参是刻意的 —— 批量枚举那条路径（AppleInfoAtBatch）复用同一个
+	// 缓冲，将来若给 port 补上「读进调用方缓冲」的定长快路径，改动就只在
+	// 这一行。**不要**因为「现在没用到」就把它删掉再让后来人重新加回来。
+	_ = scratch
+	if blob, err := l.xattrAt(host, nil).Get(netatalkMetaXattr); err == nil {
 		if got, err := parseMetaXattr(blob); err == nil {
 			fi = *got
 		}

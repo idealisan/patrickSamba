@@ -149,13 +149,22 @@ timeout 3 ./dhprobe -config badcase.yaml;  echo $?   # → 1
 | `probe_linux.go` `CapDOSAttributes` | 无条件 `return false` | POSIX 没有存放 DOS 属性位的地方；用 `user.DOSATTRIB` xattr 存一份属于 builtin，不算 native |
 | `probe_darwin.go` `CapDOSAttributes` | 无条件 `return false` | 同上；FinderInfo 的标志位语义不重合 |
 | `probe_darwin.go` `CapSparseFile` | 目前也 `return false` | 注释写明「native/ 补齐 `F_PUNCHHOLE` 之后再改成真实探测」 |
+| **`probe_windows.go:17-24` `CapXattr`** | **无条件 `return false`** | **NTFS ADS 与 xattr 语义不等价（大小限制/枚举方式/命名规则都不同），项目刻意不拿 ADS 冒充 xattr** |
 
-而 `native` 档的契约是「有一项不支持就启动报错、不降级」
-（`internal/oscap/matrix.go:76-88`、`provider.go:118/149`）。两者相乘：
+而 `native` 档的契约是「**六项全部**有一项不支持就启动报错、不降级」
+（判据是 `internal/oscap/matrix.go:132-143` 的 `case ModeNative:` 分支：遍历 `capCount`
+个能力收集 `missing`，非空即返回 `UnsupportedError`；该类型定义在同文件 74-95 行。
+另见 `provider.go:118/149`）。两者相乘：
 
-> **一旦接线，`filesystem_mode: native` 在 Linux/macOS 上会恒定启动失败**
-> （macOS 上同时命中 `dos_attributes` 与 `sparse_file` 两项），它实际只对 Windows 有意义。
-> **不要**把它当成「Linux 上钉死走原生路径」的手段——那条路不存在。
+> **一旦接线，`filesystem_mode: native` 在 linux / darwin / windows 上都会恒定启动失败
+> ——没有任何一个可用平台。** 逐平台命中项：linux 是 `dos_attributes`，
+> darwin 是 `dos_attributes` + `sparse_file`，windows 是 `xattr`。
+> **不要**把它当成「钉死走原生路径」的手段——任何平台上那条路都不存在；
+> 要钉死路径只能用 `portable`。
+
+> **⚠️ 表格最后一行与上面这段结论是 20:03 CST 修正后的版本。** 修正前这里写的是
+> 「它实际只对 Windows 有意义」，错因是只查了 POSIX 两家就外推第三家。
+> 形态见锚点 `ANCHOR: half-done-elimination` 那一节。
 
 **这不是 bug，是两条各自正确的设计相乘的结果。** 值得单独记，因为它有两副面孔：
 接线前表现为「设了没反应」，接线后表现为「升级后服务起不来」——
@@ -191,6 +200,45 @@ grep -rn 'DHnQ\|DH2Q' internal/smb/command/  # 实现存在
 **处置**：README TM 一节已改写——durable handle 移出「未实现」清单，
 标注为 **B 档**（单测 + impacket 线级用例，无真机），
 并明写「已验证的是握手与重连协议正确，不是真实备份过程不会中断」。
+
+---
+
+<!-- ANCHOR: half-done-elimination -->
+## 1c-2. 排除法只做了一半就下结论（本轮新增，**我自己犯的**）
+
+> 引用本节请用锚点名 `ANCHOR: half-done-elimination`，不要用节号 ——
+> 节号会随插入新节而漂移，正是本文 §4 批评过的那种引用方式。
+> 复算：`grep -n 'ANCHOR: half-done-elimination' docs/v020-honesty-audit.md`
+
+**形态**：查了 N 个平行分支里的 N-1 个，把「这 N-1 个都不行」外推成
+「剩下那个想必行」，并把外推结果写成了肯定句。**没查证的那一半不是「大概率成立」，
+它就是没查证。**
+
+**实例（2026-08-09 20:03 CST 自查发现）**：我在 CHANGELOG 里写过
+「接线之后 `native` 实际**只对 Windows** 有意义」。当时的实际动作是：读了
+`internal/oscap/probe_linux.go` 与 `probe_darwin.go`，确认两家的 `CapDOSAttributes`
+硬编码 `return false`，于是推断「POSIX 两家不行 → Windows 行」。
+**`probe_windows.go` 我根本没打开。** 打开之后：
+
+```sh
+grep -n -A2 'case CapXattr' internal/oscap/probe_windows.go   # → return false
+```
+
+Windows 的 `CapXattr` 同样是硬编码 `false`（NTFS ADS 与 xattr 语义不等价，
+项目刻意不拿 ADS 冒充 xattr）。而 `native` 档要求**六项全部**走原生
+（`internal/oscap/matrix.go:132-143` 的 `case ModeNative:` 分支），所以正确结论是
+**三个平台都起不来，没有任何一个平台可用** —— 与我写的那句话恰好相反。
+
+**为什么这类错特别容易溜过评审**：它的前半段是**真的**，而且有源码行号、有实测支撑，
+读者核对完前半段就会停下来。**错的是那个没带证据的转折词**（「所以」「因此」「实际只」），
+而转折词不长得像断言。
+
+**处置**：CHANGELOG 该条已改写为逐平台表格（三行三个出处），并把结论从
+「只对 Windows 有意义」改成「三平台皆不可用」，同时登记为待决 **D-native**
+（维持现状 / 放宽 native 语义 / 补齐原生实现，三选一需要拍板）。
+
+**防重演的判据**：断言里出现「只有 X」「唯独 X」「其余都不行」这类**全称或排他**措辞时，
+把 X 也查一遍再写。**排他性断言的成本是 N 次检查，不是 N-1 次。**
 
 ---
 
@@ -351,6 +399,56 @@ git show origin/main:test/ci/negative-verify.sh | grep -c freebsd
 **文档/注释里的「见 X」必须当断言核实**，它和「X 已经存在」是等价的。
 
 修脚本不归我（`test/` 是 vfs-deflake 的文件，已知会他在修），本轮只如实登记。
+
+---
+
+#### ⚠️ 后续（19:17 CST 追记）：上面这段的结论**已经过期，且是我自己造成的最坏形态**
+
+上面 343-345 行那句「所以 `freebsd/amd64` 这一档**目前**是『跑了但没牙』」是现在时断言，
+**它现在是假的**。事实：
+
+```sh
+# 2026-08-09 19:17 CST，origin/main = 762e335
+grep -c -i freebsd test/ci/negative-verify.sh   # → 8（⚠️ 这是个会漂的数，见下）
+```
+
+> **⚠️ 别把上面这个 `8` 当成长期判据。** 20:21 CST 复算时它在本 PR 分支上已是 **11** ——
+> 因为我在同一个 PR 里给那节加了锚点注释，注释里又提了三次 freebsd。
+> **写断言的人和破坏断言的人是同一个，改动躺在同一个 diff 里。**
+> 长期判据请改用锚点与退出码，它们不会因为有人多写一行注释而变：
+>
+> ```sh
+> grep -n 'ANCHOR: freebsd-fallback-files' test/ci/negative-verify.sh   # rc=0 即该节在位
+> sh test/ci/negative-verify.sh                                          # 20:19 CST：40 通过 / 0 失败
+> ```
+
+`vfs-deflake` 的 PR #160（`08cfa27`）补的还不止一个反向对照，是**三向**的
+（6a 正向 / 6b 反向且报错点名 `not an int` / 6c 旧四平台归因对照），整节无 skip 门控。
+
+**真正要记的是时序**：
+
+| 时刻 | 事件 |
+|---|---|
+| 18:59:00 | 我实测 `grep -c freebsd` → 0，写下断言 |
+| **19:08:59** | **`08cfa27` 合入 `main`，缺口被补上** |
+| 19:10:29 | 我的 `84e5d71` 合入 `main`，把那句断言带了进去 |
+
+**这句话在进入 `main` 的那一刻就已经是假的**，间隔 **90 秒**。
+
+它讽刺的地方在于：这条断言**该做的都做了**——可证伪、带判据命令、带实测时间戳、
+没有形容词。§4 立的规矩它一条没违反，**照样错了**。所以规矩要加一条，不是替换是追加：
+
+> **可证伪断言必须在「合入前」重跑一次判据，而不是只在「写作时」跑一次。**
+> 写作时刻为真 ≠ 合入时刻为真。风险最高的恰恰是「登记别人该修的缺口」这类断言——
+> 你把它写进 PR 的同时，那个人很可能正在修，且他会比你先合。
+
+**可操作的落法**（本轮起自用，建议全队采纳）：任何带 `实测 <时间>` 字样的断言，
+在 PR 进入合并队列前跑一遍它自己的判据命令；判据命令必须是**能一行复制执行**的
+（这正是可替换块要求「判据必须可一行复算」的第二个理由，第一个理由是给读者复核）。
+不能一行跑的断言，说明它本来就不可证伪，应当重写而不是保留。
+
+这也是「已知问题清单腐烂」这一反向不诚实形态的**最短周期实例**：**90 秒**。
+此前记录的同型例子周期都以天计，本例说明它可以短到在同一次会话里发生。
 **CHANGELOG 的「已知问题」条目已同步改为「已修复（但反向对照仍缺）」并保留形态记录。**
 
 > **这条留着当活样本**：`main` 在你写文档的这半小时里是会动的。

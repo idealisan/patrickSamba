@@ -29,8 +29,9 @@ import (
 //	#define AFPINFO_EA_NETATALK "user." NETATALK_META_XATTR
 //	#endif
 //
-// 这里写不带 `user.` 的裸名：xattr_unix.go 的 encodeName 会在 Linux 上
-// 自动补 `user.` 前缀（macOS 不需要前缀）。两边加起来正好等于 Samba 的行为。
+// 这里写不带 `user.` 的裸名：命名空间前缀由 oscap 的 native 适配器在 Linux 上
+// 自动补 `user.`（macOS 不需要前缀），见 oscap/native/posix.go 的 encodeXattrName。
+// 两边加起来正好等于 Samba 的行为。走 builtin 时没有命名空间概念，裸名直接入库。
 const netatalkMetaXattr = "org.netatalk.Metadata"
 
 // adoubleNamePrefix 是资源派生旁路文件的前缀（Samba ADOUBLE_NAME_PREFIX）。
@@ -62,11 +63,7 @@ func isDotUnderscoreName(name string) bool {
 // 返回 ErrNotFound 表示这个对象从来没设置过 FinderInfo ——
 // 调用方应当据此判断 AFP_AfpInfo 流「不存在」。
 func (l *LocalFS) readAfpInfo(host string) (*AfpInfo, error) {
-	x, err := newXattrAccessor(host, nil)
-	if err != nil {
-		return nil, err
-	}
-	blob, err := x.Get(netatalkMetaXattr)
+	blob, err := l.xattrAt(host, nil).Get(netatalkMetaXattr)
 	if err != nil {
 		return nil, err
 	}
@@ -83,10 +80,7 @@ func (l *LocalFS) readAfpInfo(host string) (*AfpInfo, error) {
 
 // writeAfpInfo 把 FinderInfo 写进 netatalk metadata xattr。
 func (l *LocalFS) writeAfpInfo(host string, ai *AfpInfo) error {
-	x, err := newXattrAccessor(host, nil)
-	if err != nil {
-		return err
-	}
+	x := l.xattrAt(host, nil)
 	// FinderInfo 全零 = 客户端要求删除这个流（Samba ai_empty_finderinfo）。
 	// 直接删 xattr，而不是写一个全零 blob —— 后者会让 Netatalk 认为
 	// 这个对象「有元数据但是空的」，与「没有元数据」在 Finder 里表现不同。

@@ -73,7 +73,11 @@ package vfs
 // 这是对的，xattr 名的上限本来就是按字节算的。
 
 import (
+	"errors"
+	"io"
 	"strings"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 const (
@@ -162,96 +166,91 @@ func validateDosStreamName(stream string) error {
 
 // readDosStream 读出一个通用流的内容。
 //
-// 流不存在返回 ErrNotFound；宿主文件系统不支持 xattr 返回 ErrNotSupported。
+// 流不存在返回 ErrNotFound。**不会**再返回「本平台不支持」——
+// 宿主没有扩展属性时由 builtin 适配器用旁路存储承载同一份语义。
 func (l *LocalFS) readDosStream(host, stream string) ([]byte, error) {
-	x, err := newXattrAccessor(host, nil)
+	h, err := l.caps.Streams().OpenStream(l.streamRef(host), stream, oscap.StreamRead)
 	if err != nil {
-		return nil, err
+		return nil, mapOscapError(err)
 	}
-	raw, err := x.Get(dosStreamXattrName(stream))
-	if err != nil {
-		return nil, err
-	}
-	return stripStreamMarker(raw)
-}
+	defer func() { _ = h.Close() }()
 
-// stripStreamMarker 去掉 Samba 格式末尾的 marker 字节。
-func stripStreamMarker(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		// 空值不该出现（marker 字节保证至少 1 字节）。当成空流处理
-		// 而不是报错：可能是别的工具直接写的 xattr。
+	size, err := h.Size()
+	if err != nil {
+		return nil, mapOscapError(err)
+	}
+	if size <= 0 {
 		return nil, nil
 	}
-	if marker := raw[len(raw)-1]; marker != 0 {
-		// Samba 的多 xattr 续存形态，我们读不全，见文件头说明。
-		return nil, ErrNotSupported
+	buf := make([]byte, size)
+	n, err := h.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		// io.EOF 在这里是正常的：Size 与 ReadAt 之间流被别人改短了，
+		// 读到多少算多少。别的错误如实上报。
+		return nil, mapOscapError(err)
 	}
-	return raw[:len(raw)-1], nil
+	return buf[:n], nil
 }
 
 // writeDosStream 覆盖写入一个通用流。
 func (l *LocalFS) writeDosStream(host, stream string, data []byte) error {
 	if len(data) > maxDosStreamSize {
+		// 上限在这一层就拦住，而不是等适配器报 ENOSPC：SMB 侧要的是
+		// STATUS_FILE_SYSTEM_LIMITATION（ErrTooLarge），语义比「磁盘满」准确。
 		return ErrTooLarge
 	}
-	x, err := newXattrAccessor(host, nil)
+	// Truncate：覆盖写的语义是「流内容变成 data」，不是「前 len(data) 字节
+	// 被替换」。少了它，把一个长流写短会在尾部留下旧数据。
+	h, err := l.caps.Streams().OpenStream(l.streamRef(host), stream,
+		oscap.StreamWrite|oscap.StreamCreate|oscap.StreamTruncate)
 	if err != nil {
-		return err
+		return mapOscapError(err)
 	}
-	// 末尾补 marker=0：既满足「xattr 值不能为空」，也让 Samba 读得懂。
-	buf := make([]byte, len(data)+1)
-	copy(buf, data)
-	return x.Set(dosStreamXattrName(stream), buf)
+	defer func() { _ = h.Close() }()
+
+	if len(data) == 0 {
+		return nil
+	}
+	if _, err := h.WriteAt(data, 0); err != nil {
+		return mapOscapError(err)
+	}
+	return nil
 }
 
 // removeDosStream 删除一个通用流。流本来就不存在时返回 nil。
 func (l *LocalFS) removeDosStream(host, stream string) error {
-	x, err := newXattrAccessor(host, nil)
-	if err != nil {
-		return err
-	}
-	if err := x.Remove(dosStreamXattrName(stream)); err != nil && err != ErrNotFound {
-		return err
+	err := l.caps.Streams().RemoveStream(l.streamRef(host), stream)
+	if err != nil && !errors.Is(err, oscap.ErrNotFound) {
+		return mapOscapError(err)
 	}
 	return nil
 }
 
 // dosStreamsOf 列出对象上所有通用流，供 FileStreamInformation 使用。
 //
-// 宿主文件系统不支持 xattr 时返回空列表而不是错误：那种情况下
-// 「没有任何通用流」是完全正确的答案，不该让整个 QUERY_INFO 失败。
+// 枚举失败返回空列表而不是错误：「这个对象没有任何通用流」是一个完全正确的
+// 答案，不该让整个 QUERY_INFO 失败。
 func (l *LocalFS) dosStreamsOf(host string) []StreamInfo {
-	x, err := newXattrAccessor(host, nil)
+	infos, err := l.caps.Streams().ListStreams(l.streamRef(host))
 	if err != nil {
 		return nil
 	}
-	names, err := x.List()
-	if err != nil {
-		return nil
-	}
-
-	out := make([]StreamInfo, 0, 4)
-	for _, raw := range names {
-		stream, ok := dosStreamFromXattrName(raw)
-		if !ok {
-			continue
-		}
-		// 长度要报**流数据**的长度，不含 marker 字节。
-		size := int64(0)
-		if v, err := x.Get(raw); err == nil {
-			if data, err := stripStreamMarker(v); err == nil {
-				size = int64(len(data))
-			} else {
-				// 读不全的多 xattr 流：列出来但报 0，
-				// 总比让客户端完全看不到它好。
-				continue
-			}
-		}
+	out := make([]StreamInfo, 0, len(infos))
+	for _, si := range infos {
 		out = append(out, StreamInfo{
-			Name:  StreamName(stream),
-			Size:  size,
-			Alloc: allocSizeFallback(size),
+			Name:  StreamName(si.Name),
+			Size:  si.Size,
+			Alloc: allocSizeFallback(si.Size),
 		})
 	}
 	return out
+}
+
+// streamRef 构造命名流操作用的 oscap.Ref。
+//
+// 一律不带 Handle：命名流的宿主对象句柄与流句柄是两回事，把基础文件的 fd
+// 传下去会让 native 侧对着**主数据流**的 fd 做 fsetxattr —— 在 POSIX 上
+// 恰好等价，在 Windows 的 ADS 实现上就不是了。不传更保险，代价是一次路径解析。
+func (l *LocalFS) streamRef(host string) oscap.Ref {
+	return oscap.Ref{Path: host}
 }

@@ -42,8 +42,8 @@ package vfs
 //
 // 两处改动叠加得来：
 //
-//   - readMetaXattrFast（xattr_unix.go）：metadata blob 的长度是规范固定的
-//     402 字节，不必像通用的 XattrAccessor.Get 那样「先问长度再分配」，
+//   - 经由 oscap.Provider 的 Xattr().Get（vfs 的 xattrAt，native 下落到宿主 getxattr）：
+//     metadata blob 的长度是规范固定的 402 字节，不必像「先问长度再分配」那样两趟，
 //     一趟读完。**这一条逐条调用也受益。**
 //   - AppleInfoAtBatch：那 402 字节的读缓冲整批复用一个，
 //     外加每条一次的锁获取变成整批一次。

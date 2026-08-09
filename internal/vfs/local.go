@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 // LocalConfig 是构造 LocalFS 所需的参数。
@@ -50,6 +52,22 @@ type LocalConfig struct {
 	// 空则放在 Root 下的默认位置。
 	MetadataPath string
 
+	// FilesystemMode 是 OS 能力抽象的三态开关（AGENTS.md §1.2 C9）。
+	// 零值 oscap.ModeAuto = 逐项探测，能 native 就 native。
+	FilesystemMode oscap.Mode
+
+	// Caps 是已经组装好的能力集合。
+	//
+	// 留 nil 时由 NewLocalFS 按 FilesystemMode 自己组装一个（native + builtin
+	// 两侧工厂），并在 Close 时负责关闭它。
+	//
+	// ⚠️ **这不是「nil 就走老代码」的开关。** 运行期永远只有一条数据路径 ——
+	// 扩展属性与命名流一律经由 oscap.Provider。这个字段的用途只有一个：
+	// 让测试能注入一个受控的 Provider（例如计数器或返回哨兵错误的变异体），
+	// 从而**证明**这条线真的被调用了。没有它，「测试通过」就只是
+	// 「测试通过」，证明不了接线成立（AGENTS.md：验收判据必须可证伪）。
+	Caps oscap.Provider
+
 	// QuotaBytes 限制**向客户端上报**的卷容量（字节），0 表示不限。
 	//
 	// Time Machine 会一直备份到把整个卷吃满为止，所以真实 NAS 都提供
@@ -78,6 +96,14 @@ type LocalFS struct {
 	// meta 是 POSIX 属主/权限的旁路存储，只在宿主文件系统表达不了它们的
 	// 平台（Windows）上非 nil。Linux/macOS 上恒为 nil，零开销。
 	meta MetadataStore
+
+	// caps 是 OS 可选能力的来源，**恒非 nil**（构造失败就没有 LocalFS）。
+	// 扩展属性与命名流全部经由它，vfs 不再直接碰任何平台系统调用。
+	caps oscap.Provider
+
+	// ownCaps 记录 caps 是不是我们自己造的。测试注入的 Provider 归调用方
+	// 所有，我们不能替它关 —— 关掉别人的资源是一类很难查的 bug。
+	ownCaps bool
 
 	// usage 统计本共享自身占了多少空间，只在设了配额时非 nil
 	// （不设配额就没人需要这个数字，一次目录遍历都不做）。
@@ -120,6 +146,13 @@ func NewLocalFS(cfg LocalConfig) (*LocalFS, error) {
 	}
 	l.meta = meta
 
+	if err := l.openCaps(); err != nil {
+		if meta != nil {
+			_ = meta.Close()
+		}
+		return nil, err
+	}
+
 	// 配额生效时才需要知道「本共享已用多少」。首次统计立刻异步开始，
 	// 好让客户端问到容量时（至少要先走完 NEGOTIATE/SESSION_SETUP/TREE_CONNECT）
 	// 已经有真实数字可用。构造过程本身不阻塞。
@@ -151,6 +184,17 @@ func (l *LocalFS) Root() string { return l.res.Root() }
 // ReadOnly 实现 FileSystem。
 func (l *LocalFS) ReadOnly() bool { return l.cfg.ReadOnly }
 
+// CapabilityMatrix 报出这个共享**实际**在用的能力矩阵（哪一项走 native、哪一项走 builtin）。
+//
+// 存在的理由是可证伪性，不是好奇心：`filesystem_mode` 这类开关最典型的失败形态是
+// "配置读进来了、字段填上了、运行期没人消费"，而这种失败**不会报错**，
+// 表现为三个取值行为完全一样。装配层的测试需要一个从包外看得见的判据来钉死
+// "YAML 里写的 portable 真的让这个共享落到了 builtin"，光看配置结构体做不到这件事。
+//
+// 也适合启动日志打一行：运维排查"为什么这台机器上创建时间不对"时，
+// 第一件想知道的就是这几项到底走的哪条路。
+func (l *LocalFS) CapabilityMatrix() oscap.Matrix { return l.caps.Matrix() }
+
 // Close 实现 FileSystem。
 func (l *LocalFS) Close() error {
 	var err error
@@ -158,6 +202,15 @@ func (l *LocalFS) Close() error {
 		l.usage.stop()
 		if l.meta != nil {
 			err = l.meta.Close()
+		}
+		// 只关自己造的那个（注入的 Provider 归调用方所有）。
+		// **不因为 meta 关失败就跳过这一步**：另一侧的资源同样要还，
+		// 尤其 builtin 侧持有 bbolt 的文件锁，漏关会让下一次打开同一个库
+		// 阻塞到超时。
+		if l.ownCaps && l.caps != nil {
+			if cerr := l.caps.Close(); cerr != nil && err == nil {
+				err = cerr
+			}
 		}
 	})
 	return err
