@@ -791,6 +791,7 @@ ad27691  test: 三客户端端到端冒烟套件 test/e2e/smoke.sh + 变异生�
 | **D-新1** | `qa-e2e` 那 2 个孤儿提交谁接手代开 PR？ | 建议指派 `qa-verify`（其职责本就是端到端验证与 CI 接入，且分支空着正好承接） | A 块进度 |
 | **D-新2** | PR #35 是否**先合**？（合了 `main` 仍红在 race，但它让红灯前移到真问题） | 建议**先合**：它本身已过目标关卡且经独立复现；留着不合只会让后续所有 PR 继续红在一个已知已修的点上 | 全部 5 个 PR |
 | **D-新3** | 是否把「推送前跑 `check-test-compile.sh`」写进 AGENTS.md §7.2？ | 建议写入，可交正在改 AGENTS.md 的 `oscap-rules` 顺带落笔（避免与其冲突） | 全队纪律 |
+| **D-新6** | **#35 把 `TestQADefectDurableReconnectRebindsTree` 等 3 条留在 `qadefect` tag 后面，与你此前「根因已修就该去 tag 挪回默认路径」的拍板相抵触，是否要求 fix-ci 调整？** | 建议：**不必单独返工**——qa-proto 的分支已把这 3 条提升到默认路径，按「先合 #35、再合 qa-proto（测试文件取 qa-proto 侧）」的顺序合完，终态自然正确。但 #35 的「归位」措辞与 D-新4 的语义问题相关，值得你复核一句 | fix-ci / qa-proto 合并顺序 |
 | **D-新4** | `qadefect` 里那些**故意失败**的用例，语义上应「只编译」还是「要执行并断言其失败」？ | 现状只编译不执行。若本意是后者，则归位工作还差一步 | fix-ci / qa 口径 |
 
 ### 12.10 本轮资源用量说明
@@ -840,31 +841,55 @@ ad27691  test: 三客户端端到端冒烟套件 test/e2e/smoke.sh + 变异生�
 
 **即：`#35` + `qa-proto` 修复 = `main` 可以绿。这是本轮最重要的正面结论。**
 
-### ⚠️ 但探针本身丢了东西，**不可照抄**
+### ~~⚠️ 但探针本身丢了东西~~ → **PM 误报，已撤回（见下）**
 
-按 R5 要求对探针做反向核对，发现它并不干净：
+我最初按 `func Test` 计数发现 `durable_defect_test.go` 从 7 掉到 4，判定
+「`-X theirs` 静默删掉了 fix-ci 归位的 3 个用例」，并据此要求 qa-proto 做并集。
+**这个判断是错的，已向 qa-proto、fix-ci、team-lead 全部更正。**
 
-| 文件 | fix-ci `20af87d` | qa-proto `a094a43` | `-X theirs` 结果 |
-|---|---|---|---|
-| `durable_defect_test.go` | **7** 个 `func Test` | 4 | **4** ← 丢了 3 个 |
-| `durable_qa_test.go` | 5 | 9 | 9 |
+### ✅ 更正后的事实：那 3 个用例是被**提升**，不是被删
 
-探针结果与 qa-proto 侧**逐字相同**，即
-**它把 fix-ci 归位的 3 个缺陷复现用例静默删掉了**——而「归位漏搬的失败用例」正是 #35 的立项目的。
+只数了单个文件的数字就报警，没做**去向核对**。查清后三条一条不少：
 
-> **这恰好又是本项目反复出现的那个病：「断言从未运行」。**
-> 用例没了不会有任何报错，CI 照样全绿，只是再也抓不到那 3 个缺陷。
-> **所以「整链变绿」本身不能作为合并通过的依据**，必须另外核对用例数。
+| fix-ci 侧：`durable_defect_test.go`（`qadefect` tag 后，**不执行**） | qa-proto 侧：`durable_qa_test.go`（默认路径，**每次 CI 都跑**） |
+|---|---|
+| `TestQADefectDurableReconnectRebindsTree` | `TestQADurableReconnectRebindsTree` |
+| `TestQADefectExpiredEntryClosesHandle` | `TestQADurableExpiredEntryClosesHandle` |
+| `TestQADefectEvictionRequiresAuthorization` | `TestQADurableEvictionRequiresAuthorization` |
 
-**处置**：冲突必须做**真正的并集**，由 `qa-proto` 在 rebase 时解（他最懂这批用例的语义），
-解完以 `func Test` 计数交叉核对：`durable_defect_test.go` 应含 fix-ci 归位的全部 7 个；
-若其中确有与新签名语义冲突而应删的，**须逐个说明理由，不接受静默减少**。
+qa-proto 侧另有新增的 `TestQADurableExpiredEntriesReclaimedByNewRegistrations`。
 
-### 建议合并顺序
+**总用例数：qa-proto 侧 4+9 = 13，fix-ci 侧 7+5 = 12。qa-proto 比对方多一个，不是少三个。**
 
-1. **先合 #35**（PR 已开、目标关卡已达成；冲突交由后者解代价更小）
-2. `qa-proto` `git pull --rebase origin main` → 解 2 个冲突块（并集）→ 核对用例数 → 开 PR
+### 而且 qa-proto 的方向才是项目已拍板的那个方向
+
+`durable_defect_test.go` 文件头的规矩（team-lead 此前已就同一条用例拍过板）：
+
+> tag 后面放的是**根因未修**的复现用例；**每修好一个就去掉 tag 挪回** `durable_qa_test.go`
+> 当回归保护。「不要靠删除用例来『修复』失败」——**加 tag 藏起来和删除是同一类动作。**
+
+qa-proto 修好了 5 个根因（归属校验 / data race / 超时关句柄 / 先授权后驱逐 / 重连改绑树），
+随即把对应用例从 tag 后挪回默认路径——**完全合规**。
+
+反过来，**#35 把 `TestQADefectDurableReconnectRebindsTree` 留在 `qadefect` tag 后面，
+正是 team-lead 此前明确要求回退过的做法**（当时点名的就是这条用例）。**这需要 team-lead 复核**——见 D-新6。
+
+### 建议合并顺序（据上更正）
+
+1. **先合 #35**（其 `test/ci/check-test-compile.sh` 的 tag 注册是必需的，且该文件无冲突）
+2. `qa-proto` rebase → 两个测试文件**取自己那一侧**（不是并集）→ 核对计数应为 4 / 9
+   → 确认 `grep qadefect test/ci/check-test-compile.sh` 仍在 → 开 PR
 3. 该 PR 绿后合入，`main` 恢复绿；届时 #26/#31/#33/#34 逐个 rebase 即可脱红
+
+### 📌 PM 自查：本轮我犯了自己刚警告别人的那个错
+
+我在 §12.11 里刚写完「整链变绿不能当依据、必须做反向核对」，
+紧接着就用「计数变少」直接推出「用例被删」，**没做去向核对**——
+同一封信里既提出判据又违反判据。
+
+**教训（已写进记忆）：「数量减少」≠「成果丢失」。发现计数下降时，
+必须先 `grep` 用例名去别处找一遍，确认是「删除」还是「搬迁/改名」，再下结论。**
+这与 R5「判据必须可证伪」是同一条纪律。
 
 ### 12.12 建议补进 §7.1 文件所有权表
 
