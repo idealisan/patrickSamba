@@ -12,6 +12,11 @@
 #
 # 本文件把每个可用字段都写了出来并逐条注释，按需删减即可。
 # 改完用 `stupidsamba -config <本文件> -check` 校验，它会一次性报出全部问题。
+#
+# ⚠️ 本文件里的路径是 **Linux/macOS 写法**。所有路径字段（shares[].path、
+#    shares[].metadata_path、log.file）校验的是**当前运行平台**意义上的绝对路径，
+#    在 Windows 上 `/srv/share/public` 这种写法**不算绝对路径**，会启动失败。
+#    Windows 上请统一改成 `C:\\srv\\share\\public` 这类带盘符的写法。
 
 server:
   # NetBIOS/主机名，出现在 NTLM TargetInfo 与 mDNS 里；留空则用系统主机名。
