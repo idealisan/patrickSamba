@@ -21,8 +21,6 @@ auth:
   users:
     - name: alice
       password: "changeme"
-      uid: 1000
-      gid: 1000
     - name: bob
       nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
 

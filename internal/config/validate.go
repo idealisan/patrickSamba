@@ -135,7 +135,7 @@ func validateServer(c *Config, errs *ValidationErrors) {
 	}
 
 	if c.Server.MaxConnections < 0 {
-		errs.add("server.max_connections", "不能为负数（0 表示不限），当前 %d", c.Server.MaxConnections)
+		errs.add("server.max_connections", "不能为负数（0 表示使用默认上限 256），当前 %d", c.Server.MaxConnections)
 	}
 }
 
@@ -457,6 +457,19 @@ func Warnings(c *Config) []string {
 			"（注意 Windows 10/11 默认拒绝不安全的 guest 登录）")
 	}
 
+	// SMB 2.0.2 / 2.1 没有加密能力。要求加密时它们会在**协商阶段**
+	// 被 STATUS_ACCESS_DENIED 拒掉（fail closed），于是 min_dialect
+	// 写的值实际不可达 —— 配置说一套、行为是另一套，必须说出来。
+	if c.Server.EncryptionRequired {
+		if r := dialectRank(c.Server.MinDialect); r >= 0 && r < dialectRank("3.0") {
+			w = append(w, fmt.Sprintf(
+				"server.encryption_required=true 时 server.min_dialect=%s 实际不可达："+
+					"SMB 2.0.2/2.1 没有加密能力，这类客户端会在协商阶段被拒绝。"+
+					"建议把 min_dialect 改成 3.0 让配置与行为一致",
+				c.Server.MinDialect))
+		}
+	}
+
 	for i := range c.Shares {
 		s := &c.Shares[i]
 		if s.GuestOK && !c.Auth.AllowGuest {
@@ -466,15 +479,6 @@ func Warnings(c *Config) []string {
 		// 空间抖动，真实 NAS 都设下限。这里只 WARN 不报错：用户可能有意为之。
 		if s.QuotaBytes != 0 && s.QuotaBytes < quotaMinWarn {
 			w = append(w, fmt.Sprintf("shares[%d] %q 的 quota_bytes=%d 小于 1 GiB，Time Machine 在过小的卷上会反复失败", i, s.Name, s.QuotaBytes))
-		}
-		// 设了却不生效的字段必须说出来，否则用户会以为限额已经生效。
-		if s.TimeMachineMaxSize != 0 {
-			msg := fmt.Sprintf("shares[%d] %q 的 time_machine_max_size 目前不起任何作用"+
-				"（_adisk 的 TXT 里没有经过验证的容量键，macOS 是按 SMB 上报的卷容量判断的）", i, s.Name)
-			if s.QuotaBytes == 0 {
-				msg += "；要限制 Time Machine 的体积请改用 quota_bytes"
-			}
-			w = append(w, msg)
 		}
 		if s.MetadataPath == "" {
 			continue

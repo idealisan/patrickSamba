@@ -44,7 +44,7 @@ func NewStaticStore(cfg config.Auth, domain string) (*StaticStore, error) {
 			return nil, fmt.Errorf("auth.users[%d]: 用户名 %q 重复（大小写不敏感）", i, name)
 		}
 
-		acct := &Account{User: name, Domain: domain, UID: u.UID, GID: u.GID}
+		acct := &Account{User: name, Domain: domain}
 		switch {
 		case u.NTHash != "":
 			h, err := parseNTHash(u.NTHash)
