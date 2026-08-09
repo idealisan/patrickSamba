@@ -136,6 +136,35 @@ func TestRootKey(t *testing.T) {
 	wantNoRec(t, s, "x")
 }
 
+// TestNormKeyCaseFoldingIsContract 把「同名不同大小写视为同一键」钉成显式契约。
+//
+// Fold 依赖宿主文件系统大小写不敏感（Windows/NTFS 的默认行为），而 -tags metabolt
+// 只是 CI 在 Linux 上编译/测试的逃生口、不是生产配置（详见 normKey 注释）。这条
+// 假设一旦被改，应当让本测试变红，而不是静默漂移。
+func TestNormKeyCaseFoldingIsContract(t *testing.T) {
+	cases := []struct{ a, b string }{
+		{"a/b.txt", "A/B.TXT"},
+		{"Foo", "foo"},
+		{"Dir/File.Name", "DIR/FILE.NAME"},
+	}
+	for _, c := range cases {
+		ka, ea := normKey(c.a)
+		kb, eb := normKey(c.b)
+		if ea != nil || eb != nil {
+			t.Fatalf("normKey 不应报错: %v / %v", ea, eb)
+		}
+		if ka != kb {
+			t.Errorf("normKey(%q)=%q 与 normKey(%q)=%q 应当相同（大小写折叠契约）", c.a, ka, c.b, kb)
+		}
+	}
+	// 反向对照：大小写之外确有差异的名字不应被折到一起
+	ka, _ := normKey("a.txt")
+	kb, _ := normKey("b.txt")
+	if ka == kb {
+		t.Error("Fold 把不同名字折到了一起，违背契约")
+	}
+}
+
 func TestPutRejectsInvalidKey(t *testing.T) {
 	s := newStore(t)
 
