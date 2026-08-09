@@ -3,6 +3,7 @@ package command
 import (
 	"encoding/binary"
 	"sync/atomic"
+	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
@@ -275,4 +276,235 @@ func buildAAPLResponse(replyBitmap, serverCaps, volumeCaps uint64, model string)
 		copy(buf[off+8:], modelBytes)
 	}
 	return buf
+}
+
+// ---------------------------------------------------------------------------
+// AAPL readdir_attr —— QUERY_DIRECTORY 目录项的 Apple 扩展布局
+// ---------------------------------------------------------------------------
+//
+// # 来源（**唯一权威是 Samba 源码**，MS-FSCC/MS-SMB2 里没有这套语义）
+//
+// 已逐字核对 samba.git master：
+//
+//   - `source3/smbd/smb2_trans2.c` `smbd_marshall_dir_entry()` 的
+//     `case SMB_FIND_ID_BOTH_DIRECTORY_INFO:` 分支（约 L1506-1595）。
+//   - `source3/lib/readdir_attr.h` 的 `struct aapl`：
+//     `{ uint64_t rfork_size; char finder_info[16]; uint32_t max_access; mode_t unix_mode; }`
+//     —— **finder_info 就是 16 字节，不是 32**。
+//   - `source3/modules/vfs_fruit.c` 的 `readdir_attr_meta_finderi()`（L1012）
+//     与 `readdir_attr_macmeta()`（L1153）—— 决定这 16 字节怎么压缩出来。
+//   - `source3/lib/adouble.h`：`AD_DATE_DELTA = 946684800`、`AD_DATE_START = 0x80000000`。
+//
+// # 与常规 FileIdBothDirectoryInformation 的差异
+//
+// 只影响 `FileIdBothDirectoryInformation`(37) 这一个 information class，
+// 且只在 AAPL 协商出 kAAPL_SUPPORTS_READ_DIR_ATTR 之后生效。
+// 偏移量相对**条目起点**（MS-FSCC §2.4.17）：
+//
+//	 64 EaSize(4)            → max_access（小端）
+//	 68 ShortNameLength(1)   → 24
+//	 69 Reserved(1)          → 0
+//	 70 ShortName[0:8]       → rfork_size（**小端 uint64**）
+//	 78 ShortName[8:24]      → 压缩 FinderInfo（16 字节）
+//	 94 Reserved2(2)         → unix_mode；我们恒填 0，见下
+//	 96 FileId(8)            不变
+//
+// Samba 在 68 处写的是 `SSVAL(p, 0, 24)`，即 ShortNameLength=24、Reserved=0。
+// 源码注释写明：「按文档 short_name_len 应当为 0，但抓包显示客户端把它置成 24」
+// —— 以真实客户端行为为准（AGENTS.md §9），我们跟随 Samba 写 24。
+//
+// Reserved2 处 Samba 写的是 POSIX mode，但那受 `fruit:nfs_aces` 开关控制，
+// 且同一个开关决定是否在 ServerCapabilities 里宣告 kAAPL_SUPPORTS_NFS_ACE。
+// 我们不实现 NFS ACE（见 aaplSupportsNFSAce），所以这里**必须**留 0，
+// 否则客户端会按 NFS ACE 语义解读一个我们并不支持的字段。
+const (
+	// aaplDirEntryFixed 是 FileIdBothDirectoryInformation 的固定部分长度，
+	// 与 wire.DirInfoFixedSize 保持一致（MS-FSCC §2.4.17）。
+	aaplDirEntryFixed = 104
+
+	aaplOffEaSize       = 64
+	aaplOffShortNameLen = 68
+	aaplOffRsrcSize     = 70
+	aaplOffFinderInfo   = 78
+	aaplOffReserved2    = 94
+
+	// aaplShortNameLenValue 是 readdir_attr 模式下写入 ShortNameLength 的值。
+	// Samba: `SSVAL(p, 0, 24)`。
+	aaplShortNameLenValue = 24
+
+	// aaplFinderInfoSize 是压缩 FinderInfo 的字节数（struct aapl.finder_info[16]）。
+	aaplFinderInfoSize = 16
+)
+
+// AppleDouble 的日期基准（source3/lib/adouble.h）。
+const (
+	// aaplDateDelta 是 AD_DATE_DELTA：2000-01-01T00:00:00Z 的 Unix 秒。
+	// AppleDouble 的日期以 2000 年为纪元。
+	aaplDateDelta = 946684800
+	// aaplDateStart 是 AD_DATE_START，代表「日期未知」。
+	// readdir_attr_macmeta() 先无条件写它兜底，取到真实元数据后才覆盖。
+	aaplDateStart uint32 = 0x80000000
+)
+
+// aaplDirAttr 是一条目录项的 Apple 扩展数据，对应 Samba 的 `struct aapl`。
+type aaplDirAttr struct {
+	// MaxAccess 是该项的最大访问掩码，占用 EaSize 字段。
+	MaxAccess uint32
+	// RsrcSize 是资源派生（AFP_Resource）的字节数。
+	RsrcSize uint64
+	// FinderInfo 是压缩后的 16 字节 FinderInfo。
+	FinderInfo [aaplFinderInfoSize]byte
+}
+
+// patchIDBothDirEntry 把 Apple 扩展字段就地写进已编码好的目录项。
+//
+// buf 是 wire.DirEntryWriter 的输出缓冲，start 是本条目录项的起点。
+// 越界一律静默返回（AGENTS.md §5：先校验长度再切片，绝不 panic）。
+//
+// TODO: 这是一层补丁式的写法 —— 正确的分层应当是 wire 层的
+// AppendDirEntry 直接支持 AAPL 字段（P1：报文层与状态层分离）。
+// internal/smb/wire/** 不属于本 agent 的文件范围，已报 team-lead 协调。
+func (a *aaplDirAttr) patchIDBothDirEntry(buf []byte, start int) bool {
+	if start < 0 || start > len(buf)-aaplDirEntryFixed {
+		return false
+	}
+	f := buf[start : start+aaplDirEntryFixed]
+
+	aaplLE.PutUint32(f[aaplOffEaSize:], a.MaxAccess)
+	f[aaplOffShortNameLen] = aaplShortNameLenValue
+	f[aaplOffShortNameLen+1] = 0
+	aaplLE.PutUint64(f[aaplOffRsrcSize:], a.RsrcSize)
+	copy(f[aaplOffFinderInfo:aaplOffReserved2], a.FinderInfo[:])
+	// Reserved2：见上文，不实现 NFS ACE 就必须留 0。
+	aaplLE.PutUint16(f[aaplOffReserved2:], 0)
+	return true
+}
+
+// aaplCompressFinderInfo 把 32 字节的完整 FinderInfo 压成 readdir_attr 用的 16 字节。
+//
+// 严格对齐 vfs_fruit.c `readdir_attr_meta_finderi()`：
+//
+//	[0:4]   Finder 类型码      仅普通文件；目录留 0
+//	[4:8]   Finder 创建者码    仅普通文件；目录留 0
+//	[8:10]  Finder flags       = FinderInfo[8:10]
+//	[10:12] 扩展 Finder flags  = FinderInfo[24:26]  ← 注意跨到后 16 字节
+//	[12:16] date added         **大端** uint32(btime - AD_DATE_DELTA)
+//
+// date added 用 `RSIVAL`（大端）写入，而条目里其它所有字段都是小端 ——
+// 这是本函数最容易写错的一处，AppleDouble 自身就是大端格式。
+//
+// hasMeta 为 false（对象没有 AppleDouble/AFP_AfpInfo）时，Samba 的
+// readdir_attr_meta_finderi 会提前返回，只留下 macmeta 写的兜底值：
+// 整块为零、[12:16] 为 AD_DATE_START。这里保持一致。
+func aaplCompressFinderInfo(full [vfs.FinderInfoSize]byte, hasMeta, isDir bool, btime time.Time) [aaplFinderInfoSize]byte {
+	var out [aaplFinderInfoSize]byte
+	if !hasMeta {
+		binary.BigEndian.PutUint32(out[12:16], aaplDateStart)
+		return out
+	}
+	if !isDir {
+		copy(out[0:4], full[0:4])
+		copy(out[4:8], full[4:8])
+	}
+	copy(out[8:10], full[8:10])
+	copy(out[10:12], full[24:26])
+	binary.BigEndian.PutUint32(out[12:16], aaplDateAdded(btime))
+	return out
+}
+
+// aaplDateAdded 把创建时间换算成 AppleDouble 纪元的秒数。
+//
+// 对应 vfs_fruit.c 的 `convert_time_t_to_uint32_t(btime.tv_sec - AD_DATE_DELTA)`：
+// 直接截断成 32 位无符号，2000 年之前的时间会绕回成很大的值 —— 这与 Samba 行为
+// 一致，Finder 只把它当不透明的排序键。
+func aaplDateAdded(btime time.Time) uint32 {
+	if btime.IsZero() {
+		return aaplDateStart
+	}
+	return uint32(btime.Unix() - aaplDateDelta)
+}
+
+// aaplDirAttrSource 在一次 QUERY_DIRECTORY 内为每条目录项取 Apple 元数据。
+//
+// 每条目录项都要向后端多问一次（LocalFS 里是 lstat + getxattr + stat "._name"），
+// 这是 readdir_attr 的固有代价；Samba 同样是逐条 fetch。所以它**只在协商成功后**
+// 才启用，普通 Windows/Linux 客户端不会付这个钱。
+type aaplDirAttrSource struct {
+	meta vfs.AppleMetadata
+	// dir 是被枚举目录相对共享根的路径（'/' 分隔，空串表示共享根）。
+	dir string
+	// maxAccess 是树级别的最大访问掩码。
+	//
+	// Samba 用 smbd_calculate_access_mask_fsp(SEC_FLAG_MAXIMUM_ALLOWED) 逐文件算，
+	// 那是基于宿主 ACL 的。本项目的授权依据只有配置文件（AGENTS.md §1.1 C8：
+	// 不读宿主 ACL 做访问判定），因此同一棵树上所有条目取同一个值。
+	maxAccess uint32
+}
+
+// newAAPLDirAttrSource 在本连接协商过 readdir_attr、且后端能提供 Apple 元数据时
+// 返回取值器；否则返回 nil，调用方据此退化为标准布局。
+func newAAPLDirAttrSource(ctx *Context, open *Open, class wire.FileInfoClass) *aaplDirAttrSource {
+	// Samba 只在 SMB_FIND_ID_BOTH_DIRECTORY_INFO 上改布局，其余 class 原样。
+	// macOS 用的正是这个 class。
+	if class != wire.FileIdBothDirectoryInformation {
+		return nil
+	}
+	if !ctx.Conn.AAPLReaddirAttr() {
+		return nil
+	}
+	meta, ok := ctx.Tree.FS().(vfs.AppleMetadata)
+	if !ok {
+		return nil
+	}
+	return &aaplDirAttrSource{
+		meta:      meta,
+		dir:       open.Path,
+		maxAccess: uint32(maximalAccessFor(ctx.Tree)),
+	}
+}
+
+// entry 取一条目录项的 Apple 扩展数据。后端出错时退化成「没有元数据」，
+// 绝不让一个坏文件毁掉整批枚举（同 vfs_fruit：非致命错误照样返回该条目）。
+func (s *aaplDirAttrSource) entry(e *vfs.DirEntry) aaplDirAttr {
+	a := aaplDirAttr{MaxAccess: s.maxAccess}
+	isDir := e.Attr.FileAttributes&vfs.FileAttributeDirectory != 0
+
+	var full [vfs.FinderInfoSize]byte
+	var hasMeta bool
+	if p, ok := s.childPath(e.Name); ok {
+		fi, rsrc, err := s.meta.AppleInfo(p)
+		if err == nil {
+			full = fi
+			// vfs.AppleInfo 对「没有 Apple 元数据」与「有但全零」返回同样的结果，
+			// 只能用全零近似判定。差异仅体现在 date added 是真实时间还是
+			// AD_DATE_START，Finder 不据此做任何功能性决策。
+			//
+			// TODO: 待 vfs 层能区分（AppleInfo 多返回一个 hasMeta，
+			// 或缺元数据时返回 ErrNotFound）后改为精确判定。
+			hasMeta = full != [vfs.FinderInfoSize]byte{}
+			// 目录没有资源派生；Samba 也只对文件取 rfork_size。
+			if !isDir && rsrc > 0 {
+				a.RsrcSize = uint64(rsrc)
+			}
+		}
+	}
+	a.FinderInfo = aaplCompressFinderInfo(full, hasMeta, isDir, e.Attr.CreateTime)
+	return a
+}
+
+// childPath 拼出目录项相对共享根的路径。
+//
+// "." 指向被枚举目录自身；".." 直接跳过 —— 它可能指到共享根之外，
+// 而 Finder 从不看 ".." 的 Apple 元数据（AGENTS.md §8：不给路径穿越留口子）。
+func (s *aaplDirAttrSource) childPath(name string) (string, bool) {
+	switch name {
+	case ".":
+		return s.dir, true
+	case "..":
+		return "", false
+	}
+	if s.dir == "" {
+		return name, true
+	}
+	return s.dir + "/" + name, true
 }

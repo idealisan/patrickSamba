@@ -69,9 +69,22 @@ func handleQueryDirectory(ctx *Context) error {
 		return noMoreFiles(first)
 	}
 
+	// Apple 扩展：协商过 kAAPL_SUPPORTS_READ_DIR_ATTR 后，
+	// FileIdBothDirectoryInformation 的 EaSize/ShortName 区改放 Apple 元数据
+	// （见 aapl.go）。未协商时 src 为 nil，走标准布局。
+	src := newAAPLDirAttrSource(ctx, open, req.FileInformationClass)
+
 	w := wire.NewDirEntryWriter(req.FileInformationClass, maxOut)
 	written := 0
 	for i := range entries {
+		// 记录本条目录项在缓冲里的起点，供随后的 Apple 字段就地改写。
+		// 规则与 wire.DirEntryWriter.Add 一致：第一条紧贴缓冲起点，
+		// 后续条目落在 8 字节对齐处。
+		start := w.Len()
+		if w.Count() > 0 {
+			start = (start + 7) &^ 7
+		}
+
 		ok, werr := w.Add(dirEntry(&entries[i]))
 		if werr != nil {
 			// 不认识的 information class。
@@ -81,6 +94,10 @@ func handleQueryDirectory(ctx *Context) error {
 			// 缓冲放不下了：把没写进去的条目退回句柄，下一轮再来。
 			open.UnreadDir(entries[i:])
 			break
+		}
+		if src != nil {
+			attr := src.entry(&entries[i])
+			attr.patchIDBothDirEntry(w.Bytes(), start)
 		}
 		written++
 	}
