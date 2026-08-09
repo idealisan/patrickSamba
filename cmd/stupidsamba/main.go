@@ -116,25 +116,31 @@ func run(configPath string, checkOnly bool) error {
 		"dialects", fmt.Sprintf("%s..%s", settings.MinDialect, settings.MaxDialect),
 		"shares", shareNames(cfg))
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// 缓冲 2：第一个信号触发优雅关闭，第二个信号强制断开。
+	// 用 signal.Notify 而不是 NotifyContext，就是为了能收到"第二次 Ctrl-C"。
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
+	// 刻意传 Background 而不是信号 ctx：internal/server 在 ctx 取消时会
+	// 直接 Close 每条连接的 socket，那样"等待在途请求完成"就无从谈起，
+	// 客户端会看到连接被硬断。停止 accept 与等待排空统一由 srv.Shutdown 驱动。
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ctx) }()
+	go func() { serveErr <- srv.Serve(context.Background()) }()
 
 	responder := startMDNS(cfg, log)
 
 	select {
-	case <-ctx.Done():
-		log.Info("收到退出信号，开始优雅关闭")
+	case sig := <-sigCh:
+		log.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, server.ErrServerClosed) {
-			shutdown(responder, srv, log)
+			shutdown(responder, srv, log, sigCh)
 			return err
 		}
 	}
 
-	shutdown(responder, srv, log)
+	shutdown(responder, srv, log, sigCh)
 	return nil
 }
 
@@ -164,19 +170,41 @@ func startMDNS(cfg *config.Config, log *slog.Logger) *mdns.Responder {
 	return r
 }
 
-// shutdown 按「先撤广播、后停服务」的顺序优雅关闭。
+// shutdown 优雅关闭：停止 accept → mDNS goodbye → 等待在途请求 → 强制收尾。
 //
-// 顺序很重要：先让 mDNS 发 goodbye（TTL=0）把自己从客户端的服务列表里摘掉，
-// 再关 SMB 监听。反过来会留下一个「Finder 里还看得见但点进去连不上」的窗口。
-func shutdown(r *mdns.Responder, srv *server.Server, log *slog.Logger) {
+// 三段顺序都有理由：
+//   - 先停 accept：关闭期间不该再放新客户端进来。srv.Shutdown 的第一件事
+//     就是关监听套接字，所以先把它挂到 goroutine 上跑起来。
+//   - 再发 goodbye（TTL=0）：把自己从客户端的服务列表里摘掉。晚于关监听会
+//     留下"Finder 里还看得见但点进去连不上"的窗口，早于关监听则等于还在
+//     广播一个正在退场的服务。
+//   - 最后等在途请求自然结束，超时（或再收到一次信号）才强制断开。
+//
+// force 用于接收第二次退出信号：卡住的客户端不该让 Ctrl-C 失效。
+func shutdown(r *mdns.Responder, srv *server.Server, log *slog.Logger, force <-chan os.Signal) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- srv.Shutdown(ctx) }()
+
+	// r.Stop 会发两轮 goodbye（各隔 250ms），期间 accept 已经停了。
 	if r != nil {
 		r.Stop()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Warn("等待连接结束超时，强制断开", "timeout", shutdownTimeout, "err", err)
+	go func() {
+		select {
+		case sig := <-force:
+			log.Warn("再次收到退出信号，立即断开所有连接", "signal", sig.String())
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	if err := <-done; err != nil {
+		log.Warn("在途请求未能在超时内结束，已强制断开",
+			"timeout", shutdownTimeout, "err", err)
 	}
 	log.Info("已退出")
 }
