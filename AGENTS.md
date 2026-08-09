@@ -456,7 +456,30 @@ sh test/ci/check-test-compile.sh && git add -A \
 > 顺带：**新增任何 build tag，必须同步登记进该脚本的 `TAGS=`**，否则带该 tag 的文件
 > 没有任何一关会编译它 —— 脚本自己会检查这件事并报错，别把它当成误报绕过去。
 
-> **⚠️ bisect 约定（同源血的延伸）：** `git bisect` 每走到一个**因 `_test.go` 未编译而 `go vet`/`go test` 失败**的提交，都会撞上与被查 bug **无关**的编译错误 —— `git bisect run` 会把它误判成 `bad` 或干脆卡死，污染整条二分结论。修正：**每个被检出的提交先跑 `sh test/ci/check-test-compile.sh`，不过就 `git bisect skip`**（别硬跑 `go test` 去浪费在注定失败的编译上）。理由同上 —— 8199288 那个洞已经进了 main（`go build` 过、`go vet` 不过），将来任何人 bisect 到它都会被误导；让 `skip` 跳过这类「测试代码编译失败」的地雷，只让真正的 product 回归参与二分。
+> **⚠️ bisect 约定（同源血的延伸）：** R15 那个洞**已经进了 main**，所以它不再只是历史故事 ——
+> 它是一颗埋在主干历史里、将来一定会被 `git bisect` 踩到的地雷。
+> `git bisect` 走到这类提交时，撞上的是与被查 bug **完全无关**的 `_test.go` 编译错误。
+> 而 `git bisect run` 的判据是**退出码**：`0`=good、`1..124`=bad、**`125`=skip**、`126/127/>127`=中止。
+> 编译失败时 `go vet` / `go test` 退出 `1`，于是**被判成 `bad`** —— 二分会一路收敛到错误的提交，
+> 且全程不报任何异常。**这是「成功回显 ≠ 事情真的发生」在 bisect 上的同型变体。**
+>
+> 修正：**先编译自检，不过就返回 125 让 bisect 跳过**，别让它参与二分：
+>
+> ```sh
+> git bisect run sh -c 'sh test/ci/check-test-compile.sh || exit 125; <真正的判定命令>'
+> ```
+>
+> **实测证据**（2026-08-09，用临时 worktree 逐个提交跑出来的，不是推断）：
+> 洞的范围是主干上**恰好一个提交** `0ad6441`（`server: durable 登记表修复…`）——
+> 在它上面 `CGO_ENABLED=0 go build ./...` **通过**、`go vet ./...` **失败**于
+> `create_context_durable_test.go:166:42`；紧随其后的 `68b35ad`（`test: 适配 reconnect 新签名`）
+> 已修复，之后的 `83ff755` / `4844647` 均正常。四个提交上 `test/ci/check-test-compile.sh` 都**存在**，
+> 所以上面这条 `run` 命令在整段区间里都是可用的，不会因为脚本缺失而自己变成 `126/127` 中止。
+>
+> **顺带一条 SHA 引用纪律**：本条最初引用的是 `8199288`。那个 SHA 与 `0ad6441` 的 `patch-id` 完全相同
+> （同一份改动的 rebase 前版本），但它**不被任何 ref 引用**，`git for-each-ref --contains` 返回空 ——
+> 也就是说它随时会被 gc 掉，将来读者 `git show 8199288` 只会得到 `unknown revision`。
+> **文档里引用提交必须引用主干可达的那个 SHA**，落笔前先 `git merge-base --is-ancestor <sha> origin/main` 验一次。
 
 > **⚠️ 血泪教训：推送的 refspec 必须是自己的分支，不能写死也不能省略。**
 > 多个 worktree **共享同一份 `.git`**，所以在自己 worktree 里执行 `git push origin main`
