@@ -118,6 +118,40 @@ func winLegacyIsRedirect(attrs, tag uint32) bool {
 // 前缀比较必须卡在分隔符上，否则 `C:\share` 会把 `C:\shareEvil` 也算进来。
 // root 末尾的分隔符先剥掉再统一补一个，这样共享根是盘符根（`\\?\C:\`）时
 // 也不会拼出 `\\?\C:\\`。
+// winStripLongPathPrefix 把 GetFinalPathNameByHandleW 输出的 `\\?\` 形式
+// 还原成普通 Win32 路径形式。
+//
+// 为什么需要它：Resolver.contains 拿共享根 `r.root` 做前缀比较，而 r.root 是
+// `filepath.EvalSymlinks` 产出的普通形式（`C:\srv\share`）。final path 是
+// `\\?\C:\srv\share`，两种形式直接比必然不相等 —— 不还原的话结果是**拒绝一切**，
+// 方向虽安全但功能全废。
+//
+//	`\\?\C:\srv\share`          → `C:\srv\share`
+//	`\\?\UNC\host\share\a.txt`  → `\\host\share\a.txt`
+//
+// 认不出的形式（例如卷 GUID `\\?\Volume{...}\`）**原样返回**，让它在后续的
+// 前缀比较里自然地匹配不上、判为共享外。这是刻意的：与其猜一个可能错的等价
+// 形式，不如失败在「拒绝」这一侧。
+func winStripLongPathPrefix(p string) string {
+	const dosPrefix = `\\?\`
+	const uncPrefix = `\\?\UNC\`
+	if strings.HasPrefix(p, uncPrefix) {
+		return `\\` + p[len(uncPrefix):]
+	}
+	if !strings.HasPrefix(p, dosPrefix) {
+		return p
+	}
+	rest := p[len(dosPrefix):]
+	// 只还原盘符形式（`C:` 开头）。卷 GUID 等其它形式保持原样。
+	if len(rest) >= 2 && rest[1] == ':' {
+		c := rest[0]
+		if ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
+			return rest
+		}
+	}
+	return p
+}
+
 func winPathContains(root, p string) bool {
 	root = strings.TrimRight(root, `\`)
 	if root == "" || p == "" {
