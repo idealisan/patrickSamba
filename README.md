@@ -183,6 +183,16 @@ tar -xzf stupidsamba_v0.2.0_linux_amd64.tar.gz
 
 v0.2.0 起每个版本同时发布**多架构容器镜像**（`linux/amd64` + `linux/arm64`），
 基础镜像是 `scratch`——镜像里只有一个静态二进制和一份配置，没有 shell、没有包管理器。
+镜像里的二进制与上面裸包里的是**同一份字节**（发布脚本从 `.tar.gz` 里解出来再 `COPY`
+进镜像），所以裸包做过的那几项自检对镜像同样成立。
+
+**先登录，镜像和本仓库一样是私密的**（实测：不登录直接 pull 会被拒，报
+`pull access denied ... no basic auth credentials`）：
+
+```sh
+# 用户名是固定字面量 cnb，不是你的账号名；密码是 CNB 访问令牌
+docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
+```
 
 ```sh
 # 试跑：内置配置开着 guest 匿名读写，所以刻意只发布在回环地址上
@@ -193,6 +203,9 @@ docker run -d --name stupidsamba \
 
 smbclient //127.0.0.1/public -p 4445 -N -m SMB3 -c ls
 ```
+
+`docker pull` 会按当前平台自动挑架构，不需要指定。要在 amd64 机器上核对 arm64
+那一份，用 `docker pull --platform linux/arm64 ...`。
 
 ⚠️ **内置配置 [`configs/docker.yaml`](configs/docker.yaml) 是试用配置，不要直接用于生产**：
 它开着 guest 匿名读写。正式使用请挂载自己的配置覆盖它：
