@@ -201,13 +201,14 @@ curl -sS -X PUT \
   "https://api.cnb.cool/$CNB_REPO_SLUG/-/pulls/12/merge"
 ```
 
-### 5.4 CNB API 的三个坑（**已经有人替你踩过了，别再试一遍**）
+### 5.4 CNB API 的四个坑（**已经有人替你踩过了，别再试一遍**）
 
 | 症状 | 原因 | 正确做法 |
 |---|---|---|
 | `404` | 合并用了 `POST` | 合并是 **`PUT`**，只有创建 PR 是 `POST` |
 | `400` | 参数名写成 `merge_method` | CNB 用的是 **`merge_style`**（不是 GitHub 的那套） |
 | `400` | 漏了 `commit_title` | **`commit_title` 必填**，不是可选项 |
+| `406` `{"errcode":406,"errmsg":"either of 'application/json' or 'application/vnd.cnb.api+json' content type supported"}` | **GET 和 PUT 都要求 `Accept: application/json`**，缺了就报 406。报错文案说的是 content type，极易误导你去查 `Content-Type` 头——但 `Content-Type: application/json` 明明已经带了，真正缺的是 `Accept` | 请求务必带 `-H "Accept: application/json"`（上面的 curl 已经带了，照抄别漏） |
 
 ### 5.5 评审与合并规则
 
