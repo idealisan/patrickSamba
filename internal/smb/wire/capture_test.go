@@ -478,10 +478,58 @@ func reencode(h Header, isErr bool, m []byte) ([]byte, error) {
 			return nil, fmt.Errorf("ParseSetInfoRequest: %w", err)
 		}
 		return r.Append(dst)
+
+	case CommandLock:
+		if resp {
+			r, err := ParseLockResponse(m)
+			if err != nil {
+				return nil, fmt.Errorf("ParseLockResponse: %w", err)
+			}
+			return r.Append(dst), nil
+		}
+		r, err := ParseLockRequest(m)
+		if err != nil {
+			return nil, fmt.Errorf("ParseLockRequest: %w", err)
+		}
+		return r.Append(dst)
+
+	case CommandChangeNotify:
+		if resp {
+			r, err := ParseChangeNotifyResponse(m)
+			if err != nil {
+				return nil, fmt.Errorf("ParseChangeNotifyResponse: %w", err)
+			}
+			return r.Append(dst)
+		}
+		r, err := ParseChangeNotifyRequest(m)
+		if err != nil {
+			return nil, fmt.Errorf("ParseChangeNotifyRequest: %w", err)
+		}
+		return r.Append(dst), nil
+
+	case CommandOplockBreak:
+		switch PeekOplockBreakKind(m) {
+		case OplockBreakKindOplock:
+			r, err := ParseOplockBreak(m)
+			if err != nil {
+				return nil, fmt.Errorf("ParseOplockBreak: %w", err)
+			}
+			return r.Append(dst), nil
+		case OplockBreakKindLease:
+			r, err := ParseLeaseBreakAck(m)
+			if err != nil {
+				return nil, fmt.Errorf("ParseLeaseBreakAck: %w", err)
+			}
+			return r.Append(dst), nil
+		}
+		// 44 字节的 Lease Break Notification 只会由服务端发出。
+		r, err := ParseLeaseBreakNotification(m)
+		if err != nil {
+			return nil, fmt.Errorf("ParseLeaseBreakNotification: %w", err)
+		}
+		return r.Append(dst), nil
 	}
 
-	// LOCK / CHANGE_NOTIFY / OPLOCK_BREAK：服务端统一回 STATUS_NOT_SUPPORTED，
-	// wire 层有意不实现（见 AGENTS.md §2 阶段划分）。
 	return nil, errSkip{h.Command}
 }
 
