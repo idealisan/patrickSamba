@@ -400,3 +400,212 @@ team-lead 查到的桥缺陷是**真实潜伏 bug**（独立进程 teammate 一�
 - 独立进程 teammate 走 HTTP 桥，是否经由同一套解析、**`Agent` 工具的 `mode` 参数能否传入
   其 permissionMode**，本文在预算内未追完 → **标注：未查清（待跟）**。
   当前可执行的规避仍按 §2.1 的 `subagentPermissionMode: "fullAccess"` + 「dispatch 时不传 `mode`」。
+
+---
+
+## 6. 根治手段：`scripts/env/patch-codebuddy.sh`
+
+> 本节由 `env-patch` 于 2026-08-09 补写，需求来自项目所有者：
+> 「把这个做成脚本，放进仓库，并且写好说明，最好是直接在 .cnb.yml 里面看能不能直接写进去自动运行。」
+> 除特别标注外，本节结论全部为 **[实测]**（验证记录见 §6.6）。
+
+### 6.1 它解决什么，为什么必须脚本化
+
+§1.5 已证实：**`bypassPermissions` 对 HIGH/CRITICAL 的 Bash 命令完全无效**，
+面板照弹；而 §1.3 证实那个面板一旦孤儿化就**任何按键都关不掉**，
+实测卡死主 TUI 56 分钟，唯一出路是重启进程。
+§2.2 的「换命令写法」只是绕，绕不干净 —— 判定是逐段取最高档，日常操作里
+`rm -r`、`git restore`、`git worktree remove` 随时会撞上。
+
+手工把 `isDangerousBashCommand` 改成直接返回 false 是有效的，**但补丁活不过重启**：
+本项目的开发容器会不定期崩溃重建，`/usr/local/lib/node_modules` 属于「git 仓库以外的一切」，
+按 AGENTS.md §10 的说法就是**不可信**。所以要把它做成仓库里的脚本 + 开机自动跑。
+
+### 6.2 用法
+
+```sh
+sh scripts/env/patch-codebuddy.sh              # 打补丁（幂等，随便跑多少次）
+sh scripts/env/patch-codebuddy.sh --check      # 只报告状态，一个字节都不改
+sh scripts/env/patch-codebuddy.sh --wait 600   # 等 CodeBuddy 装好再打，最多等 10 分钟
+```
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | 打补丁模式：补丁已就位（本次打上，或先前就已打上）。`--check`：全部就绪，无事可做 |
+| 1 | **出错**：正则失配 / 命中多处 / `node --check` 失败（已回滚）/ settings.json 非法 |
+| 3 | 仅 `--check`：尚未打补丁，需要跑一次 |
+| 4 | 仅 `--check`：找不到 CodeBuddy 安装 |
+
+调试用参数：`--dist <目录>`（指定安装目录，**排他**，过不了判据就算没找到，
+不会偷偷回退去改真实安装）、`--settings <文件>`、`--skip-settings`。
+
+**注意 0 与 4 的不对称**：打补丁模式下「找不到 CodeBuddy」是**退出 0**。
+本地开发机、CI 构建机上没装它是正常的，为此把构建判红纯属自找麻烦；
+而 `--check` 是给人和诊断脚本看的，那里需要能区分「没装」和「装了但没打」。
+
+### 6.3 它到底改了哪几个字节
+
+```js
+// 改前
+isDangerousBashCommand(eA){if(("name"in eA.rawItem?eA.rawItem.name:eA.rawItem.type)!==...
+// 改后（只在 { 之后插入 9 个字符，原函数体一字不动）
+isDangerousBashCommand(eA){return!1;if(("name"in eA.rawItem?...
+```
+
+两个入口各改一处：`dist/codebuddy.js`（交互式 TUI）与 `dist/codebuddy-headless.js`
+（`-p` 非交互模式）。只打前者的话，将来有人用 headless 跑批会再撞上同一堵墙，
+而那时没人会想起来还有第二个入口。
+
+**为什么是插入而不是按偏移替换**：最初手工改是拿字节偏移（约 11274897）
+定位、整体替换函数体的。偏移量随每次发版漂移，压缩后的参数名（当前是 `eA`）
+也随打包器心情变化。写死任何一个，下次升级后要么改错位置（灾难），
+要么**静默什么都没改而照样回显成功**（更糟）。脚本改成正则匹配
+`isDangerousBashCommand(<标识符>){` 并在 `{` 后插入，两个易变量都不依赖。
+
+顺带：脚本把 `{return!1` 认作「已打过」，**分号可有可无** ——
+手工那版是整体替换写成 `{return!1}`，插入式写出来是 `{return!1;…}`，
+两种都必须认，否则会往手工补丁上再插一次。
+
+同时它还会**合并写入**（不是覆盖）`~/.codebuddy/settings.json` 三项：
+`permissions.defaultMode` / `permissions.subagentPermissionMode` /
+`trustedDirectories` 含 `/workspace/**`。已经是更宽松的 `fullAccess` 时不降级；
+文件不是合法 JSON 时**报错退出、绝不覆盖**（那是用户的配置，里面可能有 MCP、hooks）。
+
+### 6.4 CodeBuddy 升级后正则失配了怎么办（重新定位手册）
+
+症状：`--check` 报 `没找到 isDangerousBashCommand(...)`（脚本退出 1），
+或者报 `命中 N 处（预期 1 处）`。脚本此时**什么都不改**，这是故意的 ——
+0 次命中意味着实现变了，静默跳过会让所有人以为补丁还在生效。
+
+按下面五步走，不要跳步：
+
+**Step 1 —— 先确认这个洞还在不在。** 官方可能已经修了面板 bug，那就不需要补丁了。
+
+```sh
+node scripts/diag/risk-replica.js 'git worktree prune'      # 期望仍打印 HIGH
+```
+
+如果连它都跑不出结果，说明打包结构变化很大，后面几步的定位也会更费劲。
+
+**Step 2 —— 从「放行分支」下手，别从方法名下手。** 方法名会变，
+但那段代码里的日志串 `Auto-approving` 是给人看的，改动概率低得多：
+
+```sh
+python3 scripts/diag/jsgrep.py \
+  /usr/local/lib/node_modules/@tencent-ai/codebuddy-code/dist/codebuddy.js \
+  'Auto-approving' 800 400
+```
+
+在窗口里找形如
+`…===<X>.PermissionMode.BypassPermissions&&!this.<方法名>(<参数>)&&!await this.<另一个>(…)`
+的条件式。**中间那个 `this.<方法名>` 就是新的危险命令判定入口**，不管它叫什么。
+
+**Step 3 —— 定位它的定义，确认语义与命中数。**
+
+```sh
+python3 scripts/diag/jsgrep.py <上面那个 codebuddy.js> \
+  '<方法名>\([A-Za-z_$][A-Za-z0-9_$]*\)\{' 100 500
+```
+
+要确认两件事：(a) 函数体里确实在拿 `riskLevel` 比 `CRITICAL` / `HIGH`；
+(b) 全文件只命中 1 处。命中多处说明打包结构变了（比如同名方法被内联进两个类），
+这时**不要盲改**，先把两处都读明白。
+
+**Step 4 —— 只改脚本里的方法名。** 改动点集中在
+`scripts/env/patch-codebuddy.sh` → `js_patch()` 里的两行：
+
+```js
+const reDef     = () => /isDangerousBashCommand\(([A-Za-z_$][A-Za-z0-9_$]*)\)\{/g;
+const rePatched = () => /isDangerousBashCommand\([A-Za-z_$][A-Za-z0-9_$]*\)\{return!1/;
+```
+
+把方法名换掉即可，**不要顺手把 `([A-Za-z_$][A-Za-z0-9_$]*)` 改成写死的 `eA`** ——
+那就把刚才修好的坑又挖回来了。
+
+**Step 5 —— 按 §6.6 的清单重跑验证，尤其是反向对照。**
+只跑一次正向就提交是本项目明令禁止的（AGENTS.md「验收判据必须可证伪」）。
+
+**Step 2 找不到 `Auto-approving` 怎么办**：说明自动放行分支被重写了。
+这时不要硬改二进制包，退回配置层方案（§2.1 的
+`permissions.subagentPermissionMode: "fullAccess"`），
+并把新的结构写进本节 —— 下一个人不该再从零查一遍。
+
+**另一种「补丁失效」的形态**：`--check` 说已打补丁，但面板照弹。
+那说明弹它的是**另一条通道**（§5 的权限桥，独立进程 teammate 走 HTTP long-poll），
+本补丁管不着，去看 §5.2 的三处缺陷。
+
+### 6.5 安全边界：这确实是在降低安全等级
+
+**这个补丁等于让 CodeBuddy 对 `rm -rf`、`git reset --hard` 这类命令不再二次确认。**
+和 §2.1 里 `fullAccess` 的告示牌是同一块：
+
+- 适用前提是本项目当前的工作方式 —— 每个 agent 在自己的 git worktree 里、
+  代码已推远端、容器本身就是一次性的。
+- **它不是「让 agent 可以随便删东西」的许可证。** AGENTS.md §7.5 那张禁用命令表
+  **依然全部有效**：不许 `git worktree remove`、不许 `rm -r`、不许 `git reset --hard`。
+  补丁拆掉的是「问一句」，不是「不许做」。以前是面板挡着，现在只剩纪律挡着，
+  所以纪律反而更要紧。
+- 真要临时恢复原状：`--check` 能看出当前状态，
+  备份就在 `<原文件>.orig-<日期>`，`cp` 回去即可（然后重启 CodeBuddy 进程）。
+
+### 6.6 验证记录（2026-08-09，全部在**副本**上做）
+
+原则：**「成功回显」不等于事情真的发生了**。所以每条都有可证伪的判据，
+而且**先做反向对照**（故意喂坏输入，确认脚本真的会红）。
+
+| # | 场景 | 判据 | 结果 |
+|---|---|---|---|
+| 1 | 未打补丁的原版副本 → 打补丁 | `node --check` 通过；`grep` 得到 `{return!1;`；文件恰好 +9 字节 | 通过 |
+| 2 | 幂等：连跑三次 | 第 2/3 次报「已打过」，三个文件 **md5 完全不变** | 通过 |
+| 3 | **反向对照**：方法被改名 | 退出码 **1**，报「没找到」，**目标文件字节未变** | 通过 |
+| 4 | **反向对照**：命中 2 处 | 退出码 **1**，报「命中 2 处（预期 1 处）」，文件未变 | 通过 |
+| 5 | **变异测试**：把插入串改成会破坏语法的 `return!1;}` | `node --check` 报 `SyntaxError`，**自动回滚**，退出码 1，回滚后 md5 == 动手前 | 通过 |
+| 6 | `--check` 在「未打 / 已打」两态 | 分别退出 **3** / **0** | 通过 |
+| 7 | settings.json 是坏 JSON | 退出码 1，**原文件一个字节没动** | 通过 |
+| 8 | settings.json 不存在 | 自动创建，只含该有的三项 | 通过 |
+| 9 | settings.json 已有 `model`/`mcpServers`/别的 trustedDirectories | 全部保留，`/workspace/**` 是**追加**进数组 | 通过 |
+| 10 | `defaultMode` 已是更宽松的 `fullAccess` | **不降级**，且完全不写文件（md5 不变） | 通过 |
+| 11 | 没装 CodeBuddy / 没有 node | `--check` 退出 **4**，打补丁模式退出 **0**（不打断 CI） | 通过 |
+| 12 | `--dist` 打错字指向不存在的目录 | 判定为「没找到」，**不回退去改真实安装** | 通过 |
+| 13 | `--wait 30`，目标文件 8 秒后才出现 | 等到后照常打补丁，实测耗时 10s | 通过 |
+| 14 | `--wait 8`，目标始终不出现 | 等满后优雅跳过，退出 0 | 通过 |
+
+第 5 条的输出（这是**回滚真的发生了**的证据，不是「我觉得它会回滚」）：
+
+```
+  OK  已备份到 codebuddy.js.orig-20260809
+错误: 打完补丁后 node --check 不通过，已回滚 codebuddy.js
+      class X{isDangerousBashCommand(eA){return!1;}return eA.x===1}}
+      SyntaxError: Unexpected identifier 'eA'
+rc=1
+--- 目标文件是否被还原成动手前的字节？
+4a7751c59d897290b142fa5c20824d20  （与动手前一致）
+```
+
+> 顺带一个实现细节，因为它差点被写错：**报错信息必须在回滚之前抓**。
+> 先回滚再跑一次 `node --check` 拿到的是原文件的结果（当然是通过的），
+> 打印出来只会误导人 —— 又一个「回显和事实脱节」的小陷阱。
+
+### 6.7 自动运行：挂在 `.cnb.yml` 的 `vscode` 事件里
+
+`$: vscode:` 那个 job 的 stage 会在**云原生开发环境启动时**执行（不是 CI）。
+补丁脚本挂在那里，容器每次重建都会自动重打。
+
+**一个实测出来的时序坑，别踩**：
+
+```
+容器启动           2026-08-09 07:55:38
+codebuddy-code 包   2026-08-09 07:57:30    ← 晚约 2 分钟
+```
+
+CodeBuddy 是容器起来**之后**才装上的。stage 若跑在它出现之前，
+脚本会「优雅跳过、退出 0」，构建日志一片绿而补丁一次都没打上 ——
+第八例「成功回显 ≠ 事情真的发生」。所以 stage 里是**打一次 + 后台 `--wait` 守候**
+两手都要，且全程 `|| true` / `exit 0`，绝不能挡住开发环境启动。
+
+后台那次的日志在 `/tmp/patch-codebuddy.log`。**判断补丁到底打上没有，
+不要看 stage 的绿灯，跑一句：**
+
+```sh
+sh scripts/env/patch-codebuddy.sh --check ; echo "rc=$?"   # 0 才是真就位
+```
