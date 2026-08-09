@@ -4,8 +4,10 @@ package vfs
 //
 // 没有 build tag、不 import `golang.org/x/sys/windows`、不做任何系统调用，
 // 因此可以在 Linux 上做表驱动测试。真正的 `CreateFileW` 调用在
-// open_windows.go —— 那部分我们没有 Windows 机器可以跑，所以能挪到这里的
-// 判断逻辑就都挪到这里，让"不可测的那一半"尽可能薄。
+// openhost_windows.go（openHostFile 接缝的 Windows 侧）—— 那部分我们没有
+// Windows 机器可以跑，所以能挪到这里的判断逻辑就都挪到这里，让"不可测的那
+// 一半"尽可能薄。注意 openhost_windows.go 第一步只是转调 os.OpenFile，
+// CreateFileW 接入是第二步（见该文件的 TODO）。
 //
 // # 为什么不直接用 os.OpenFile
 //
