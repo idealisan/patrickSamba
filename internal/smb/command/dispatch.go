@@ -27,6 +27,12 @@ type handlerSpec struct {
 	needSession bool
 	// needTree 表示必须有一个有效的树连接。
 	needTree bool
+	// noResponse 表示本命令**永不产生响应**。
+	//
+	// 目前只有 SMB2 CANCEL（MS-SMB2 §3.3.5.16）。这类命令跳过全部前置
+	// 检查直接执行 handler，且不参与 credit 记账 —— 客户端收不到响应就
+	// 拿不回 credit，在这里扣减会让双方水位永久错位。
+	noResponse bool
 }
 
 // handlers 是命令分发表（AGENTS.md §5 P2 策略模式）。
@@ -44,10 +50,25 @@ func register(cmd wire.Command, needSession, needTree bool, fn Handler) {
 	handlers[cmd] = handlerSpec{fn: fn, needSession: needSession, needTree: needTree}
 }
 
+// registerNoResponse 登记一个**不产生响应**的命令处理器（见 handlerSpec.noResponse）。
+func registerNoResponse(cmd wire.Command, fn Handler) {
+	if _, dup := handlers[cmd]; dup {
+		panic(fmt.Sprintf("command: %s 重复注册", cmd))
+	}
+	handlers[cmd] = handlerSpec{fn: fn, noResponse: true}
+}
+
 // Registered 报告某个命令是否已经实现，用于日志与测试。
 func Registered(cmd wire.Command) bool {
 	_, ok := handlers[cmd]
 	return ok
+}
+
+// NoResponse 报告某个命令是否永不产生响应（MS-SMB2 §3.3.5.16 的 CANCEL）。
+//
+// internal/server 用它决定是否要为这条消息记 credit 账。
+func NoResponse(cmd wire.Command) bool {
+	return handlers[cmd].noResponse
 }
 
 // defaultHandler 处理所有未实现的命令（AGENTS.md §5 P2）。
@@ -62,6 +83,19 @@ func defaultHandler(ctx *Context) error {
 // 无论成功失败都会产生一条格式正确的响应 —— SMB2 不允许对请求静默不答，
 // 客户端会一直等到超时。
 func Dispatch(ctx *Context) {
+	// 不产生响应的命令（SMB2 CANCEL）在这里短路：它连一条 ERROR Response
+	// 都不能回 —— 那条响应的 MessageId 与被取消的请求相同，客户端会把它
+	// 错配成被取消请求的应答（MS-SMB2 §3.3.5.16）。
+	//
+	// 也正因为如此，这里**刻意跳过**会话定位与验签：验签失败同样不能回
+	// 错误响应，只能丢弃。handler 自己不信任任何前置状态。
+	if spec, ok := handlers[ctx.Header.Command]; ok && spec.noResponse {
+		_ = spec.fn(ctx)
+		ctx.suppress = true
+		ctx.discard()
+		return
+	}
+
 	err := dispatch(ctx)
 	if err != nil {
 		ctx.fail(status.FromVFSError(err))

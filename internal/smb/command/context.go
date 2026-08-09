@@ -79,7 +79,13 @@ type Context struct {
 
 	// Log 是日志句柄。
 	Log *slog.Logger
+
+	// suppress 表示本条消息**不产生任何响应字节**（SMB2 CANCEL）。
+	suppress bool
 }
+
+// Suppressed 报告本条消息是否不产生响应。internal/server 据此回滚响应缓冲。
+func (c *Context) Suppressed() bool { return c.suppress }
 
 // NewContext 构造一条请求的处理上下文。
 //
@@ -114,6 +120,14 @@ func (c *Context) MsgStart() int { return c.msgStart }
 // 用于错误兜底：handler 写了一半才发现要失败。
 func (c *Context) ResetBody() {
 	c.Out = c.Out[:c.msgStart+wire.HeaderSize]
+}
+
+// discard 连响应头一起丢弃，使本条消息在缓冲里不留任何痕迹。
+func (c *Context) discard() {
+	c.Out = c.Out[:c.msgStart]
+	c.SignKey = nil
+	c.HashResponseConn = false
+	c.HashResponseSession = nil
 }
 
 // finishHeader 把 Status / Credits 写入 RespHeader 并原地回填到 Out。
