@@ -6,8 +6,8 @@
 
 | 项 | 值 |
 |---|---|
-| 基线 commit | `5428bcd`（`main`，即首次跑全量时 HEAD；该 commit 之后无产品代码改动） |
-| 验收脚本 | `scripts/acceptance.sh`（commit 同基线） |
+| 基线 commit | 全量套件首次跑绿于 `5428bcd`；此后 `b7ef0ed`（audit 补齐三道加密 fail-closed + `min_dialect` 启动硬错误）落地，加密矩阵已按新行为改写并**重新验证通过**（见「加密用例详解」）。打 tag 前会按 team-lead 通知再跑一次全量，届时本表头部基线一并更新。 |
+| 验收脚本 | `scripts/acceptance.sh`（与基线同提交，加密矩阵段因 `b7ef0ed` 后改写，提交晚于 `5428bcd`） |
 | 测试容器 | Linux amd64，Go `go1.25.0 linux/amd64`（与 CI 镜像 `golang:1.25` 同版本） |
 | 主服务端口 | `SMB_PORT=4481`；派生端口 `GUEST=+1000 / STRICT=+2000 / ENC=+3000 / TAP=+4000`（偏移取 1000 起是为了避开多 agent 并行时连号分配的调试端口，已实测会撞） |
 | smbclient | `Version 4.22.10-Debian-4.22.10+dfsg-0+deb13u2` |
@@ -82,35 +82,42 @@ c2s_plain_postauth_cmds=0x3,0x4,0x5,0x6,0x8,0xe,0x10
 
 ### 测试配置的可得性（关键洞察）
 
-`config-strict` 的 `min_dialect: "3.0"` 会让低方言在**方言选择**那一层就被挡掉，**根本走不到**本次修复的 negotiate 阶段 fail-closed 代码。因此新增第 4 个服务 **`config-enc`**：`encryption_required: true` + **`min_dialect: "2.0.2"`**，故意把门开到最低，让客户端真能协商到 2.0.2/2.1，才能验证"加密强制自己"会不会 fail closed。B 组返 `NT_STATUS_ACCESS_DENIED`、C 组返 `NT_STATUS_NOT_SUPPORTED` 正好证明**方言层拦截**与**加密层拒绝**是两道独立的防线，都在。
+"加密强制不能被绕过"在协议栈里有**三道独立的防线**，验收必须分别打中、不能互相替代：
+
+1. **配置层 fail fast**（`internal/config/validate.go`）：`encryption_required + min_dialect < 3.0` 在启动期直接报错，错误点名 `server.min_dialect`。这是把矛盾一次性暴露给用户，而不是让他在运行期看到"连不上"去瞎猜。默认 `min_dialect` 是 `2.0.2`，所以**只写 `encryption_required: true` 不带 `min_dialect` 也会 fail fast**——这个默认值陷阱被专门覆盖。
+2. **方言选择层**：合法配置（`min_dialect: 3.0`）下，客户端 `-m SMB2_02/SMB2_10` 因无公共方言被 `NT_STATUS_NOT_SUPPORTED` 拒。
+3. **negotiate 层 fail-closed**（`internal/smb/command/negotiate.go`）：协商出 3.0/3.0.2 但客户端没宣告 `CAP_ENCRYPTION` 时 `ACCESS_DENIED`；以及 **SMB1 多协议协商是第二个协商出口**——方言列表仅含 `"SMB 2.002"`（无 `"SMB 2.???"` 通配）时过去会就地定型 2.0.2 明文放行、绕过 negotiate，现已直接关连接。
+
+**诚实声明可达性**：第 3 道在当前环境的可达客户端里**无法端到端触发**——`smbclient 4.22` 即便 `--client-protection=off` 也照常宣告 `CAP_ENCRYPTION`（会话照常成功），而 `impacket` 走 SMB1 通配入口 `"SMB 2.???"` 会被放行到真正的 SMB2 协商、协商出 3.0+加密亦成功。因此第 3 道由 `internal/server` 的单元测试覆盖（audit 的 `encryption_paths_test.go`，每条都做过负向实验），本客户端矩阵不硬凑。验收脚本覆盖的是第 1、2 道确实可达的路径，外加 `cipher=` 日志断言证明第 3 道的**正常**路径（3.0/3.0.2→CCM、3.1.1→GCM）真的协商出来了。
 
 ### 实测结果
 
 ```
-A. 客户端主动要求加密（服务端未强制，4481）
+A. 客户端主动要求加密（服务端未强制，4495）
    SMB3_11: 加密帧 c2s=13 s2c=13，明文仅协商/认证，cipher=2(GCM) → OK
    SMB3_00: 加密帧 c2s=14 s2c=14，明文仅协商/认证，cipher=1(CCM) → OK
-B. encryption_required + 允许低方言接入（7481）—— 降级绕过回归
-   SMB2_02: 被拒绝（NT_STATUS_ACCESS_DENIED），线上无明文业务命令 → OK
-   SMB2_10: 被拒绝（NT_STATUS_ACCESS_DENIED），线上无明文业务命令 → OK
+B. encryption_required + min_dialect < 3.0 配置层拦截（反向配置，应当启动失败）
+   config-enc (min 2.0.2):           启动报错且点名 'server.min_dialect' → OK
+   config-enc-default (不带 min):     启动报错且点名 'server.min_dialect' → OK
+C. encryption_required + min_dialect 3.0（合法配置，6495）—— 端到端拒绝 + 加密
+   SMB2_02: 被拒绝（NT_STATUS_NOT_SUPPORTED），线上无明文业务命令 → OK
+   SMB2_10: 被拒绝（NT_STATUS_NOT_SUPPORTED），线上无明文业务命令 → OK
    SMB3_00: cipher=1(CCM)，加密帧 c2s=14 s2c=14 → OK
    SMB3_02: cipher=1(CCM)，加密帧 c2s=14 s2c=14 → OK
    SMB3_11: cipher=2(GCM)，加密帧 c2s=13 s2c=13 → OK
-   服务端为被拒的低方言留下了告警日志 → OK
-C. encryption_required + min_dialect 3.0（6481）
-   SMB2_10: 被拒绝（NT_STATUS_NOT_SUPPORTED），线上无明文业务命令 → OK
-   SMB3_11: cipher=2(GCM) → OK
 D. go-smb2 对强制加密服务 → OK
 ```
 
 `cipher=` 来自服务端日志（`internal/smb/command/negotiate.go` 的 `SMB 方言协商完成` 一行），作为线级判据的交叉校验保留：`cipher=1` = AES-128-CCM（3.0/3.0.2），`cipher=2` = AES-128-GCM（3.1.1）。这正是被修复的两条协商路径都走到了的证据。
 
+> 历史注记：早期版本（commit `623c904` 之前）`config-enc` 是常驻服务（`min_dialect: 2.0.2` 跑得起来），端到端直接打中第 3 道的 `ACCESS_DENIED`；自 `b7ef0ed` 起 `min_dialect < 3.0` 改为配置层硬错误，`config-enc` 不再能启动，于是 B 组改为断言"配置层拦截"本身。这是加固，不是覆盖率倒退——第 3 道只是从"客户端端到端"挪到了"单元测试"，且在第 1 道被更早发现。
+
 ---
 
-## 已知遗留（不阻断 v0.1.0）
+## 已知遗留
 
-- `internal/smb/command/session_setup.go:144` 的 `if conn.Settings.EncryptionRequired && conn.Cipher != 0` 逃生口：negotiate 层已 fail closed，走到这里时 `Cipher != 0` 恒成立，当前不构成现实风险。team-lead 已要求 audit 改为 backstop（`EncryptionRequired && Cipher == 0` → `STATUS_ACCESS_DENIED` + WARN），作为纵深防御，本次验收后归集进 v0.1.0 发布。
-- `validate.go` 对 `encryption_required + min_dialect < 3.0` 的处置是**启动 WARN 而非硬错误**（commit `656bff5`），是有意为之：保留 `config-enc` 这种配置的可验证性，重于早期静态拒绝。
+- 无。原 `session_setup.go:144` 的 `&& conn.Cipher != 0` 逃生口已在 `b7ef0ed` 改为 backstop（`EncryptionRequired && Cipher == 0` → `STATUS_ACCESS_DENIED` + error 日志），第 3 道防线的正常路径与拒绝路径均有 `internal/server/encryption_paths_test.go` 覆盖。
+- `validate.go` 对 `encryption_required + min_dialect < 3.0` 在 `b7ef0ed` 由 WARN 升级为**启动硬错误**（字段 `server.min_dialect`，文案直接给改法），与 `max_dialect` 那条对称；不做静默抬高 `min_dialect` 的魔法行为。
 
 ## 复跑方式
 

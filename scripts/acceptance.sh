@@ -217,6 +217,36 @@ log:
 EOF
 echo "  OK ($WORK/config.yaml, config-guest.yaml, config-strict.yaml, config-enc.yaml)"
 
+# 反向配置二：只写 encryption_required: true、**不写 min_dialect**（默认 2.0.2）。
+# 自 b7ef0ed 起，默认 min_dialect < 3.0 同样 fail fast。这是 audit 特意点名的
+# 默认值陷阱——只写 encryption_required 的极简配置现在也必须显式给 min_dialect。
+cat > "$WORK/config-enc-default.yaml" <<EOF
+server:
+  name: STUPIDENCD
+  domain: WORKGROUP
+  smb1: true
+  # 注意：故意不写 min_dialect，让它落到默认 "2.0.2"
+  max_dialect: "3.1.1"
+  encryption_required: true
+listen:
+  addresses:
+    - 127.0.0.1
+  port: $PORT_ENC
+auth:
+  allow_guest: false
+  users:
+    - name: $USER
+      password: "$PASS"
+shares:
+  - name: secure
+    path: $SHARE
+    read_only: false
+mdns:
+  enabled: false
+log:
+  level: debug
+EOF
+
 # 用 Go 编译一个无外部依赖的端口探针（不依赖 python3 / nc 等，
 # 因为这些工具在重启后的环境里经常缺失）
 cat > "$WORK/probe.go" <<'GOEOF'
@@ -290,7 +320,11 @@ say "启动服务"
 start_server "$WORK/config.yaml"        "$PORT"        "$LOG"
 start_server "$WORK/config-guest.yaml"  "$PORT_GUEST"  "$WORK/server-guest.log"
 start_server "$WORK/config-strict.yaml" "$PORT_STRICT" "$LOG_STRICT"
-start_server "$WORK/config-enc.yaml"    "$PORT_ENC"    "$LOG_ENC"
+# config-enc / config-enc-default 不再作为常驻服务启动：自 b7ef0ed 起，
+# `encryption_required + min_dialect < 3.0` 在**配置校验阶段**就启动报错，
+# 不再能跑到 negotiate 的 fail-closed。它们在 t_encryption 的 B 组里被当作
+# "应当启动失败"的反向配置来断言（见 expect_config_block）。
+
 
 SKIPPED=""
 skip() { printf '\033[1;33m  [SKIP] %s (%s)\033[0m\n' "$1" "$2"; SKIPPED="$SKIPPED $1"; }
@@ -565,6 +599,39 @@ enc_case() {
     return 0
 }
 
+# expect_config_block <配置文件> <端口> <错误里必须出现的子串>
+#
+# 与 start_server 相反：这个配置**应当启动失败**。我们用它来断言
+# `encryption_required + min_dialect < 3.0` 在配置校验阶段就 fail fast
+# （b7ef0ed 之后是硬错误，不是 WARN）。判定：
+#   1. 进程应该在几秒内退出（没退出 = 配置被接受了 = 失败）；
+#   2. 退出前的 stderr 必须包含指定的错误子串（点名 server.min_dialect）。
+# 端口用 PORT_ENC（这里不跑常驻服务，专留给"应当起不来的配置"做隔离）。
+expect_config_block() {
+    _cfg=$1; _port=$2; _need=$3
+    if "$WORK/probe" "127.0.0.1:$_port" 2>/dev/null; then
+        echo "    端口 $_port 被占用，无法验证启动失败：$(fuser "$_port"/tcp 2>&1 | tr -s ' ')"
+        return 1
+    fi
+    _out="$WORK/cfgfail-$(basename "$_cfg" .yaml).txt"
+    "$WORK/stupidsamba" -config "$_cfg" > "$_out" 2>&1 &
+    _pid=$!
+    _i=0
+    while kill -0 "$_pid" 2>/dev/null; do
+        _i=$((_i + 1)); [ $_i -ge 50 ] && break; sleep 0.1
+    done
+    if kill -0 "$_pid" 2>/dev/null; then
+        echo "    配置本应启动失败，但进程还活着（端口 $_port）"; kill "$_pid" 2>/dev/null || true
+        return 1
+    fi
+    if grep -q "$_need" "$_out"; then
+        echo "    配置层拦截 OK：启动报错且点名 '$_need'"
+        return 0
+    fi
+    echo "    配置未如预期报错（缺 '$_need'）："; sed 's/^/      /' "$_out" | head -5
+    return 1
+}
+
 t_encryption() {
     need_tool smbclient || return 77
     rc=0
@@ -582,26 +649,26 @@ t_encryption() {
     enc_case "$PORT" public "$LOG" SMB3_11 encrypt 2 --client-protection=encrypt || rc=1
     enc_case "$PORT" public "$LOG" SMB3_00 encrypt 1 --client-protection=encrypt || rc=1
 
-    # ---- B. encryption_required + min_dialect 2.0.2：方言降级不得绕过加密 ----
-    # 这是整组用例的核心。低方言必须在 NEGOTIATE 阶段就被拒，
-    # 不是"连上了但不加密"，更不是"连上了还能读文件"。
-    echo "  B. encryption_required + 允许低方言接入（$PORT_ENC）—— 降级绕过回归"
-    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB2_02 reject  - || rc=1
-    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB2_10 reject  - || rc=1
-    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_00 encrypt 1 || rc=1
-    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_02 encrypt 1 || rc=1
-    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_11 encrypt 2 || rc=1
+    # ---- B. encryption_required + min_dialect < 3.0：配置层 fail fast ----
+    # 曾经的缺口是"方言降级绕过加密"——客户端 -m SMB2_10 把方言压到 3.1.1 以下，
+    # 协商不出加密算法，加密强制静默失效、全程明文。修复把它彻底堵死：
+    #   - negotiate 阶段对 2.x 直接 ACCESS_DENIED（见 internal/server/encryption_test.go）；
+    #   - 配置校验阶段对 encryption_required + min_dialect < 3.0 直接启动报错。
+    # 因此"允许低方言接入"的配置本身已经起不来了——这正是我们想要的：
+    # 把矛盾在启动期一次性暴露，而不是让用户在运行期看到"连不上"去瞎猜。
+    # 这里用两个反向配置断言它确实起不来、且错误点名 server.min_dialect。
+    echo "  B. encryption_required + min_dialect < 3.0 配置层拦截"
+    expect_config_block "$WORK/config-enc.yaml"          "$PORT_ENC" "server.min_dialect" || rc=1
+    expect_config_block "$WORK/config-enc-default.yaml"  "$PORT_ENC" "server.min_dialect" || rc=1
 
-    # 拒绝必须是**显式**的：服务端要留下告警，而不是悄悄降级。
-    if [ "$(grep -c '拒绝协商' "$LOG_ENC")" -ge 2 ]; then
-        echo "    服务端为被拒的低方言留下了告警日志 → OK"
-    else
-        echo "    服务端拒绝低方言时没有告警日志（静默拒绝，运维无从发现）"; rc=1
-    fi
-
-    # ---- C. encryption_required + min_dialect 3.0：配置层再挡一道 ----
-    echo "  C. encryption_required + min_dialect 3.0（$PORT_STRICT）"
+    # ---- C. encryption_required + min_dialect 3.0（合法配置）：端到端拒绝 + 加密 ----
+    # 合法配置下，低方言在**方言选择层**被拒（无公共方言 → NOT_SUPPORTED），
+    # 与 negotiate 的 ACCESS_DENIED 是两道独立的防线。
+    echo "  C. encryption_required + min_dialect 3.0（$PORT_STRICT）—— 合法配置下的拒绝与加密"
+    enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB2_02 reject  - || rc=1
     enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB2_10 reject  - || rc=1
+    enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB3_00 encrypt 1 || rc=1
+    enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB3_02 encrypt 1 || rc=1
     enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB3_11 encrypt 2 || rc=1
 
     # ---- D. 换一个协议栈交叉验证，别只对 Samba 客户端调通 ----
@@ -611,6 +678,15 @@ t_encryption() {
     else
         echo "  D. go-smb2 对强制加密服务 → 失败"; rc=1
     fi
+
+    # ---- 诚实声明：negotiate 层 "Cipher==0 仍 ACCESS_DENIED" 这一档 ----
+    # 在本环境的可达客户端里**无法端到端触发**：smbclient 4.22 即使
+    # --client-protection=off 也会照常宣告 CAP_ENCRYPTION（会话照常成功），
+    # 而 impacket 走 SMB1 通配入口 "SMB 2.???" 会被放行到真正的 SMB2 协商、
+    # 协商出 3.0+加密亦成功。所以这一档（以及 SMB1 仅含 "SMB 2.002" 的入口）
+    # 由 internal/server 的单元测试覆盖（audit 的 encryption_paths_test.go，
+    # 每条都做过负向实验），不在客户端端到端矩阵里硬凑。上述 A~D 覆盖的是
+    # 配置层 fail fast 与方言层拒绝两条确实可达的路径。
     return $rc
 }
 
