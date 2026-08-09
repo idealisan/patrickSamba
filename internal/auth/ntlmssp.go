@@ -99,6 +99,12 @@ type ntlmContext struct {
 	challengeMsg    []byte
 	serverChallenge [8]byte
 
+	// clientMechListDER 是客户端 negTokenInit 里 MechTypeList 的完整 DER，
+	// 计算 / 校验 SPNEGO mechListMIC 的输入就是它（RFC 4178 §5）。
+	clientMechListDER []byte
+	// clientMechListMIC 是客户端在最终 negTokenResp 里带的 mechListMIC（可能为空）。
+	clientMechListMIC []byte
+
 	identity   *Identity
 	sessionKey []byte
 	done       bool
@@ -129,6 +135,13 @@ func (c *ntlmContext) Step(in []byte) ([]byte, bool, error) {
 	}
 	c.spnego = !tok.Raw
 
+	// mechListMIC 的计算输入固定是客户端**第一个** negTokenInit 里的
+	// MechTypeList，后续 negTokenResp 不再重复携带，必须在这里记下来。
+	if tok.Init && len(tok.MechTypesDER) > 0 {
+		c.clientMechListDER = tok.MechTypesDER
+	}
+	c.clientMechListMIC = tok.MechListMIC
+
 	// 客户端只列了机制没带 token（或带的是 Kerberos token）：
 	// 按 RFC 4178 §4.2.2 回 accept-incomplete + supportedMech，让它改发 NTLM。
 	if len(tok.Token) == 0 || !IsNTLMSSP(tok.Token) {
@@ -157,7 +170,9 @@ func (c *ntlmContext) Step(in []byte) ([]byte, bool, error) {
 }
 
 // wrap 按当前外壳形态包装服务端要回的 NTLM 报文。
-func (c *ntlmContext) wrap(state NegState, ntlm []byte) []byte {
+//
+// mic 为服务端的 mechListMIC，为空时不写 [3] 字段。
+func (c *ntlmContext) wrap(state NegState, ntlm, mic []byte) []byte {
 	if !c.spnego {
 		return ntlm
 	}
@@ -167,7 +182,7 @@ func (c *ntlmContext) wrap(state NegState, ntlm []byte) []byte {
 		mech = oidNTLMSSP
 		c.mechSent = true
 	}
-	return NegTokenResp(state, mech, ntlm, nil)
+	return NegTokenResp(state, mech, ntlm, mic)
 }
 
 // handleNegotiate 处理 Type 1，生成 Type 2 CHALLENGE。
@@ -193,7 +208,7 @@ func (c *ntlmContext) handleNegotiate(msg []byte) ([]byte, bool, error) {
 		},
 	}
 	c.challengeMsg = ch.Marshal()
-	return c.wrap(NegAcceptIncomplete, c.challengeMsg), false, nil
+	return c.wrap(NegAcceptIncomplete, c.challengeMsg, nil), false, nil
 }
 
 // challengeFlags 计算 CHALLENGE 里回给客户端的协商标志。
@@ -263,7 +278,7 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 		c.identity = &Identity{Workstation: m.Workstation, Anonymous: true}
 		c.sessionKey = make([]byte, SessionKeyLen)
 		c.done = true
-		return c.wrap(NegAcceptCompleted, nil), true, nil
+		return c.wrap(NegAcceptCompleted, nil, nil), true, nil
 	}
 
 	acct, lookupErr := c.lookup(m.UserName, m.DomainName)
@@ -287,7 +302,7 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 			}
 			c.sessionKey = make([]byte, SessionKeyLen)
 			c.done = true
-			return c.wrap(NegAcceptCompleted, nil), true, nil
+			return c.wrap(NegAcceptCompleted, nil, nil), true, nil
 		}
 		return nil, false, ErrLogonFailure
 	}
@@ -301,6 +316,13 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
+	// mechListMIC 必须在确立 identity 之前校验：它防的是中间人篡改 SPNEGO
+	// 机制列表做降级，校验不过等同于认证失败。
+	mic, err := c.spnegoMIC(esk, m.Flags)
+	if err != nil {
+		return nil, false, err
+	}
+
 	c.identity = &Identity{
 		User:        acct.User,
 		Domain:      m.DomainName,
@@ -311,11 +333,53 @@ func (c *ntlmContext) handleAuthenticate(msg []byte) ([]byte, bool, error) {
 	c.sessionKey = append([]byte(nil), esk[:]...)
 	c.done = true
 
-	// TODO: 待验证 —— 客户端携带 mechListMIC 时，RFC 4178 §5 要求服务端在
-	// 最终 negTokenResp 里回一个用 NTLM GSS_GetMIC 生成的 mechListMIC。
-	// smbclient / Windows / macOS 在不回的情况下均能完成认证（SMB 签名本身
-	// 已覆盖后续报文完整性），故暂不实现。
-	return c.wrap(NegAcceptCompleted, nil), true, nil
+	return c.wrap(NegAcceptCompleted, nil, mic), true, nil
+}
+
+// spnegoMIC 校验客户端的 mechListMIC 并生成服务端自己的（RFC 4178 §5）。
+//
+// 计算输入是**客户端 negTokenInit 里 MechTypeList 的完整 DER**
+// （含外层 SEQUENCE 的 tag 与 length），不是里面几个 OID 的裸拼接 ——
+// RFC 4178 §5 对此写得含糊，这里以 Windows / Samba 的实际行为为准。
+//
+// 两个方向各用一个独立的 NTLM 会话安全状态，序号都从 0 开始：
+// mechListMIC 是各自方向上第一次、也是唯一一次 GSS_GetMIC
+// （认证完成后 SMB2 改用自己派生的签名密钥，不再走 NTLM 的 MAC）。
+//
+// 返回服务端要放进最终 negTokenResp 的 mechListMIC；不需要时为 nil。
+func (c *ntlmContext) spnegoMIC(esk [16]byte, flags NegotiateFlags) ([]byte, error) {
+	// 裸 NTLMSSP 没有 SPNEGO 外壳，客户端也没发过 mechTypes，无从计算。
+	if !c.spnego || len(c.clientMechListDER) == 0 {
+		return nil, nil
+	}
+	// 没协商 extended session security 就没有 SignKey（MS-NLMP §3.4.5.2），
+	// 这类老客户端本来也不会发 mechListMIC。
+	if !flags.Has(NegotiateExtendedSessionSecurity) {
+		return nil, nil
+	}
+	// 客户端没带 MIC 时不能强制要求（老客户端不发），
+	// 也不主动回一个 —— RFC 4178 §5 是"对端发了才回"的对称语义。
+	if len(c.clientMechListMIC) == 0 {
+		return nil, nil
+	}
+
+	// 校验方向：客户端是发送方，用 client-to-server 的 SigningKey。
+	cc, err := NewSigningContext(esk[:], flags, true)
+	if err != nil {
+		return nil, err
+	}
+	want := cc.MIC(c.clientMechListDER)
+	if subtle.ConstantTimeCompare(want[:], c.clientMechListMIC) != 1 {
+		return nil, ErrLogonFailure
+	}
+
+	// 生成方向：服务端是发送方，用 server-to-client 的 SigningKey。
+	sc, err := NewSigningContext(esk[:], flags, false)
+	if err != nil {
+		return nil, err
+	}
+	out := sc.MIC(c.clientMechListDER)
+	return out[:], nil
 }
 
 // dummyAccount 用于用户不存在时的等时校验，NTHash 恒为零值。

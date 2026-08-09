@@ -283,12 +283,15 @@ func parseNegTokenInitBody(inner []byte) (*SPNEGOToken, error) {
 		}
 		switch t {
 		case tagContext0: // mechTypes
-			mt, mtSeq, _, err := derNext(content)
+			mt, mtSeq, after, err := derNext(content)
 			if err != nil || mt != tagSequence {
 				return nil, ErrInvalidToken
 			}
 			// mechListMIC 的计算范围是这层 SEQUENCE 的完整 DER。
-			out.MechTypesDER = derTLV(tagSequence, mtSeq)
+			// 这里保留**客户端原样发来的字节**而不是重新编码：
+			// 只要对端的 DER 长度域写法与我们不同（哪怕非最短形式），
+			// 重新编码就会算出不同的 MIC。
+			out.MechTypesDER = append([]byte(nil), content[:len(content)-len(after)]...)
 			for len(mtSeq) > 0 {
 				var ot byte
 				var oid []byte
