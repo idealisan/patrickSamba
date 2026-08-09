@@ -23,8 +23,14 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/server"
 )
 
-// version 由构建时通过 -ldflags 注入。
-var version = "dev"
+// 版本信息由 scripts/build-release.sh 通过 -ldflags -X main.xxx 注入。
+// 直接 go build 时保持下面的默认值 —— 默认值刻意不伪装成真版本号，
+// 让「哪里来的二进制」一眼可辨。三个变量都会在 -version 输出里体现。
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 // shutdownTimeout 是优雅关闭时等待既有连接结束的上限，超时则强制断开。
 const shutdownTimeout = 10 * time.Second
@@ -38,7 +44,8 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("stupidsamba %s (%s/%s, %s)\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version())
+		fmt.Printf("stupidsamba %s (commit %s, built %s, %s/%s, %s)\n",
+			version, commit, date, runtime.GOOS, runtime.GOARCH, runtime.Version())
 		return
 	}
 
