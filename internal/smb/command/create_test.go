@@ -3,6 +3,8 @@ package command
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -346,21 +348,45 @@ func TestMxAcMaximalAccess(t *testing.T) {
 	}
 }
 
-// TestCreateResponseContextsMxAc 做响应侧的字节级比对。
+// TestCreateResponseContextsMxAc 做响应侧的字节级比对，走注册表完整路径。
 func TestCreateResponseContextsMxAc(t *testing.T) {
 	const mtime = uint64(0x01d0_1111_2222_3333)
 	attr := &vfs.Attr{
 		FileID:    0x42,
 		WriteTime: vfs.FiletimeToTime(mtime),
 	}
-	req := &wire.CreateRequest{Contexts: []wire.CreateContext{
-		{Name: wire.CreateContextMxAc},
-	}}
 
-	// mtime 与请求里的 Timestamp 不同 → 应当回。
-	out := createResponseContexts(req, attr, nil,
-		mxAcRequest{Present: true, Timestamp: 1}, wire.MaximalAccessReadOnly)
+	// 只读共享：mxAcMaximalAccess 应回 MaximalAccessReadOnly。
+	newCtx := func() *Context {
+		share := &Share{Name: "s", Type: wire.ShareTypeDisk, ReadOnly: true}
+		return &Context{
+			Tree: &Tree{Share: share},
+			Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+	}
+	// 造一条带给定 Timestamp 的 MxAc 请求 context（Data 为 8 字节 FILETIME）。
+	mxAcReq := func(ts uint64) *wire.CreateRequest {
+		data := make([]byte, 8)
+		binary.LittleEndian.PutUint64(data, ts)
+		return &wire.CreateRequest{Contexts: []wire.CreateContext{
+			{Name: wire.CreateContextMxAc, Data: data},
+		}}
+	}
+	respond := func(ctx *Context, req *wire.CreateRequest) []wire.CreateContext {
+		t.Helper()
+		cc, err := newCreateContexts(ctx, req)
+		if err != nil {
+			t.Fatalf("newCreateContexts: %v", err)
+		}
+		resp := &wire.CreateResponse{}
+		if err := cc.respond(ctx, &Open{}, resp, attr); err != nil {
+			t.Fatalf("respond: %v", err)
+		}
+		return resp.Contexts
+	}
 
+	// mtime 与请求里的 Timestamp 不同 → 应当回只读 MaximalAccess。
+	out := respond(newCtx(), mxAcReq(1))
 	data, ok := findCreateCtx(out, wire.CreateContextMxAc)
 	if !ok {
 		t.Fatal("响应里没有 MxAc context")
@@ -376,14 +402,13 @@ func TestCreateResponseContextsMxAc(t *testing.T) {
 	}
 
 	// Timestamp 与 mtime 相同 → 不回（客户端缓存仍有效）。
-	out = createResponseContexts(req, attr, nil,
-		mxAcRequest{Present: true, Timestamp: mtime}, wire.MaximalAccessReadWrite)
+	out = respond(newCtx(), mxAcReq(mtime))
 	if _, ok := findCreateCtx(out, wire.CreateContextMxAc); ok {
 		t.Error("mtime 未变时不应回 MxAc context")
 	}
 
 	// 客户端没请求 → 不回。
-	out = createResponseContexts(req, attr, nil, mxAcRequest{}, wire.MaximalAccessReadWrite)
+	out = respond(newCtx(), &wire.CreateRequest{})
 	if _, ok := findCreateCtx(out, wire.CreateContextMxAc); ok {
 		t.Error("客户端没请求时不应回 MxAc context")
 	}
