@@ -41,7 +41,7 @@ if [ -z "$NAME" ] || [ -z "$WORK" ]; then
 fi
 
 if [ "$NAME" = "--list" ]; then
-    echo "write-corrupt read-corrupt rename-noop remove-noop readdir-hide"
+    echo "write-corrupt read-corrupt rename-noop remove-noop doc-noop readdir-hide"
     exit 0
 fi
 
@@ -71,8 +71,25 @@ rename-noop)
 remove-noop)
     SRC="internal/vfs/local.go"
     # 同上，删除变成空操作。
-    # 对照目标: <client>/rm-disk
+    #
+    # ⚠️ 注意：本变异只堵住了**两条删除路径中的一条**。
+    #    路径 A（本变异）：CLOSE handler -> ctx.deleteOnClose -> fs.Remove()
+    #        —— 客户端先 CREATE 再发 SET_INFO/FileDispositionInformation 时走这条。
+    #    路径 B（见下面的 doc-noop）：CREATE 直接带 FILE_DELETE_ON_CLOSE 选项，
+    #        create.go 会置 open.vfsOwnsDelete=true，命令层让出，改由
+    #        localHandle.Close() 自己 os.Remove —— **完全不经过 LocalFS.Remove**。
+    #    实测：smbclient 与 impacket 删**文件**走 B、删**目录**走 A；
+    #    go-smb2 两者都走 A。这个分叉就是失败对照实验替我们发现的。
+    # 对照目标: <client>/rmdir-disk（三家）、gosmb2/rm-disk
     EXPR='s|^func (l \*LocalFS) Remove(p string) error {$|&\n\treturn nil // MUTATION|'
+    ;;
+doc-noop)
+    SRC="internal/vfs/local_handle.go"
+    # 路径 B：句柄自持的 delete-on-close 变成空操作。
+    # 命令层因为 vfsOwnsDelete=true 已经让出删除权，所以文件会原封不动留在磁盘上，
+    # 而客户端收到的是一个彻底成功的 CLOSE。
+    # 对照目标: smbclient/rm-disk、impacket/rm-disk
+    EXPR='s|if del && !h.fs.cfg.ReadOnly {|if false \&\& del \&\& !h.fs.cfg.ReadOnly { // MUTATION|'
     ;;
 readdir-hide)
     SRC="internal/vfs/local_handle.go"
