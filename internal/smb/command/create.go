@@ -57,6 +57,15 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		return err
 	}
 
+	// 持久句柄重连（DHnC / DH2C）短路正常 open 路径：直接认领登记表里
+	// 等待重连的句柄，不打开任何文件。必须在 newCreateContexts 之后、
+	// fs.Open 之前判断。
+	if intent, ierr := wire.FindDurableIntent(req.Contexts); ierr != nil {
+		return ierr
+	} else if intent != nil && intent.IsReconnect() {
+		return handleDurableReconnect(ctx, intent)
+	}
+
 	// GENERIC_* 要先展开成具体位，后续判定才有意义（MS-DTYP §2.4.3）。
 	access := req.DesiredAccess.Expand()
 	// MAXIMUM_ALLOWED：按本树允许的上限授予。授权依据是配置，不是宿主 ACL。
