@@ -14,7 +14,10 @@ package vfs
 //
 // 这也是 Go 标准库的惯用法（io.ReaderFrom / http.Flusher 都是这个套路）。
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 // DeleteOnCloser 让已打开的句柄可以**事后**被标记为「关闭时删除」。
 //
@@ -114,11 +117,32 @@ type AppleMetadata interface {
 	AppleInfo(path string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)
 }
 
+// DirAppleMetadata 是 AppleMetadata 的**目录句柄内**版本，由目录 Handle 实现。
+//
+// 为什么要有第二个入口：readdir_attr 是逐条目调用的，而
+// FileSystem.AppleInfo 每次都要把 "bands/0001a" 这样的路径从共享根
+// 重新解析一遍（逐级 lstat + 软链校验）。目录句柄已经持有宿主机路径，
+// 直接拼一个分量即可，在十万级 band 目录上省掉的是十万次重复解析。
+//
+//	if dm, ok := dirHandle.(vfs.DirAppleMetadata); ok {
+//	    fi, rsrc, err := dm.AppleInfoAt(entry.Name)
+//	}
+type DirAppleMetadata interface {
+	// AppleInfoAt 取本目录下**直接子项** name 的 Apple 元数据，
+	// 语义与 AppleMetadata.AppleInfo 完全一致。
+	//
+	// name 必须是单个路径分量：含分隔符、".."、或其他非法字符时返回
+	// ErrInvalidPath —— 这是安全边界，不能因为「反正是内部调用」就省掉
+	// （AGENTS.md §8）。
+	AppleInfoAt(name string) (finderInfo [FinderInfoSize]byte, rsrcSize int64, err error)
+}
+
 var (
-	_ DeleteOnCloser = (*localHandle)(nil)
-	_ SparseFile     = (*localHandle)(nil)
-	_ AppleMetadata  = (*LocalFS)(nil)
-	_ HardLinker     = (*LocalFS)(nil)
+	_ DeleteOnCloser   = (*localHandle)(nil)
+	_ SparseFile       = (*localHandle)(nil)
+	_ AppleMetadata    = (*LocalFS)(nil)
+	_ DirAppleMetadata = (*localHandle)(nil)
+	_ HardLinker       = (*LocalFS)(nil)
 )
 
 // AppleInfo 实现 AppleMetadata。
@@ -141,9 +165,57 @@ func (l *LocalFS) AppleInfo(p string) ([FinderInfoSize]byte, int64, error) {
 		return fi, 0, mapError(err)
 	}
 
+	return l.appleInfoAt(host, true)
+}
+
+// AppleInfoAt 实现 DirAppleMetadata。
+func (h *localHandle) AppleInfoAt(name string) ([FinderInfoSize]byte, int64, error) {
+	var fi [FinderInfoSize]byte
+	if !h.isDir {
+		return fi, 0, ErrNotDir
+	}
+	// 安全边界（AGENTS.md §8）：name 必须是单个**真实**分量。
+	//
+	// ValidateComponent 会拒掉空串、控制字符、'/'、'\\' 与 Windows 保留
+	// 设备名，但它**故意放行 "." 与 ".."**（SplitPath 另行处理它们），
+	// 所以这里必须单独拦一道 —— 否则 filepath.Join(host, "..") 会直接
+	// 拼出父目录，把 readdir_attr 变成一个目录穿越原语。
+	if name == "." || name == ".." {
+		return fi, 0, ErrInvalidPath
+	}
+	if err := ValidateComponent(name); err != nil {
+		return fi, 0, err
+	}
+
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return fi, 0, ErrClosed
+	}
+	host := h.host
+	// 已经拍过快照的话，「这个条目有没有 ._ 旁路文件」是已知事实，
+	// 不必再对每个条目做一次注定 ENOENT 的 open。Time Machine 的 bands
+	// 目录里一个 ._ 都没有，这一条省掉的是「一次 syscall × 条目数」。
+	probeRsrc := true
+	if h.dirNames != nil {
+		_, probeRsrc = h.dotUnder[name]
+	}
+	h.mu.Unlock()
+
+	return h.fs.appleInfoAt(filepath.Join(host, name), probeRsrc)
+}
+
+// appleInfoAt 是两个入口共用的实现：宿主机路径 → FinderInfo + 资源派生大小。
+//
+// probeRsrc=false 表示调用方已经确知没有 ._ 旁路文件，跳过那次探测。
+func (l *LocalFS) appleInfoAt(host string, probeRsrc bool) ([FinderInfoSize]byte, int64, error) {
+	var fi [FinderInfoSize]byte
 	// 两者都是「没有就算了」：缺 FinderInfo 或缺资源派生都是正常状态。
 	if ai, err := l.readAfpInfo(host); err == nil {
 		fi = ai.FinderInfo
+	}
+	if !probeRsrc {
+		return fi, 0, nil
 	}
 	rsrc, _ := resourceForkSize(dotUnderscoreName(host))
 	return fi, rsrc, nil
