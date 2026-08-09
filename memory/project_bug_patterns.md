@@ -26,8 +26,21 @@ type: project
    2.0.2 并 `NegotiateDone = true`，写在 handleNegotiate 里的拒绝逻辑一次都不执行。
    三处都修完才算修完，只修最显眼的那处等于没修。
 
+6. **第四类的教科书实例：删除操作有两条完全不同的代码路径。** [实测]
+   客户端 CREATE 时直接带 `FILE_DELETE_ON_CLOSE` → `create.go` 置 `open.vfsOwnsDelete = true`，
+   命令层**主动让出**，改由 `internal/vfs/local_handle.go` 的 `localHandle.Close()` 自己
+   `os.Remove` —— **完全不经过 `LocalFS.Remove`**；只有「先 CREATE 再发
+   SET_INFO/FileDispositionInformation」那条路才走 `close.go` 的 `ctx.deleteOnClose` → `fs.Remove()`。
+   实测分布：smbclient 与 impacket 删**文件**走前者、删**目录**走后者；go-smb2 两者都走后者。
+   含义：任何只加在 `LocalFS.Remove` 上的逻辑（权限检查、审计、元数据清理、回收站语义）
+   对最常见的两个客户端的删文件路径**完全不生效**。
+   这条是变异测试逼出来的：`remove-noop` 变异没能打红预期的判据，追下去才发现有第二个出口——
+   **当时如果图省事把没红的判据从期望清单里划掉，这个事实就永远埋住了。**
+
 **How to apply:**
 - 新增配置字段时，**同时**搜一次它的读取点；没有读取点就不要合入。
+- **变异测试里「预期该红却没红」的判据是金矿，不是噪音。** 不要调整期望去迁就现实，
+  先问「为什么没红」——答案通常是存在你不知道的第二条代码路径。
 - 「优雅关闭/超时/重试」这类逻辑必须写端到端冒烟（起服务→操作→信号→断言退出码与耗时），
   因为它们的失效方式是"被上游架空"而不是"报错"。
 - `configs/example.yaml` 要纳入 CI 冒烟：示例配置必须能通过校验并真的起得来。

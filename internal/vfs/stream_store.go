@@ -113,7 +113,7 @@ func (l *LocalFS) openResourceFork(host string, write, create bool) (*os.File, i
 	if write {
 		flag = os.O_RDWR
 	}
-	f, err := os.OpenFile(adPath, flag|openNoFollow, l.cfg.FileMode)
+	f, err := openHostFile(adPath, flag|openNoFollow, l.cfg.FileMode)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, 0, mapError(err)
@@ -122,7 +122,7 @@ func (l *LocalFS) openResourceFork(host string, write, create bool) (*os.File, i
 			return nil, 0, ErrNotFound
 		}
 		// 新建：写入 82 字节的 AppleDouble 头，资源长度为 0。
-		f, err = os.OpenFile(adPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|openNoFollow, l.cfg.FileMode)
+		f, err = openHostFile(adPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|openNoFollow, l.cfg.FileMode)
 		if err != nil {
 			return nil, 0, mapError(err)
 		}
@@ -242,7 +242,7 @@ func (l *LocalFS) streamsOf(host string, a *Attr) []StreamInfo {
 
 // resourceForkSize 读出 ._ 文件里资源段的长度。
 func resourceForkSize(adPath string) (int64, bool) {
-	f, err := os.Open(adPath)
+	f, err := openHostFile(adPath, os.O_RDONLY, 0)
 	if err != nil {
 		return 0, false
 	}
