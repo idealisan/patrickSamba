@@ -31,7 +31,16 @@ export PATH
 export CGO_ENABLED=0
 
 SCRATCH=$(mktemp -d /tmp/ss-negverify.XXXXXX)
+
+# C9 那一节（第 5 节）是唯一一个**必须往工作树里真落一个文件**的反向对照：
+# check-constraints.sh 是文本扫描（find + grep），不经过 go 的构建系统，
+# 所以 -overlay 那套「只存在于内存映射」的手法对它无效。
+# 既然只能落盘，就必须保证**任何退出路径都清得掉** —— 残留一个违规样本
+# 会让整个仓库的 CI 从此变红，那比没有门禁更糟。故列进 cleanup。
+C9SCRATCH="$REPO/internal/vfs/zz_c9_negative_scratch.go"
+
 cleanup() {
+    if [ -f "$C9SCRATCH" ]; then rm "$C9SCRATCH"; fi
     rm -rf "$SCRATCH" "$REPO/test/ci/.negative-scratch"
 }
 trap cleanup EXIT INT TERM
@@ -283,6 +292,143 @@ assert_rc fail "新门禁 · 出现反向约束 '!integration' 时必须报错" 
 
 rm -rf "$REPO/test/ci/.negative-scratch"
 assert_rc pass "清理后新门禁恢复绿" sh -c "$GATE"
+
+# ============================================================ 5. C9 门禁
+say "5. C9 门禁：操作系统只作为「文件系统 + 套接字」提供方"
+
+# 这一节验的是 scripts/check-constraints.sh 新增的 C9 段。
+#
+# 为什么非验不可：C9 守的是项目所有者亲自划的那条线 ——
+#   「绝不应该依赖操作系统提供的任何相关机制，操作系统只被当作一个普通的
+#     文件系统提供方」。
+# 而在此之前这条线是靠**人肉 grep** 证明的。人肉 grep 只能证明「此刻是干净的」，
+# 证明不了「以后有人弄脏时会被发现」。一盏从来没亮过的红灯，
+# 和没有这盏灯是一回事 —— 这正是本文件存在的理由。
+#
+# 手法与前面几节不同：C9 是 find+grep 的文本扫描，不走 go 的构建系统，
+# 所以 -overlay 对它无效，只能往工作树里真落一个样本文件（见顶部 C9SCRATCH 注释）。
+# 样本带 `//go:build ignore`：go 工具链会完整跳过它（`ignore` 已在
+# check-test-compile.sh 的 KNOWN 列表里），因此不会干扰 go build/vet/list；
+# 而文本扫描照样看得见它 —— 要验的恰恰就是文本扫描这一层。
+
+C9GATE="sh $REPO/scripts/check-constraints.sh"
+
+# c9_expect_red <一句话说明> —— 断言当前样本会让 C9 判红。
+#
+# 两条断言缺一不可。只断言「退出码非零」是不够的：check-constraints.sh 里
+# 随便哪一段红了都会非零退出（go list 挂掉、C8 段误伤、脚本自己语法错…），
+# 那样这个反向对照就变成了**假阳性** —— 看着是"门禁抓住了"，实际抓的是别的东西。
+# 所以第二条断言要求报错信息**点名 C9**。
+c9_expect_red() {
+    assert_rc fail "C9 · $1 · 门禁必须非零退出" sh -c "$C9GATE"
+    assert_rc pass "C9 · $1 · 且报错点名 C9（排除「因别的原因红」的假阳性）" \
+        sh -c "$C9GATE 2>&1 | grep -q '违反 C9'"
+}
+
+echo "  5a. 正向对照：干净树上 C9 必须是绿的"
+echo "      （尤其要证明它没有误伤 internal/vfs/sys_windows.go 那行 kernel32 绑定 ——"
+echo "       门禁误伤现有代码 = 整个仓库变红，比没有门禁更糟）"
+assert_rc pass "干净树 · check-constraints.sh 全绿" sh -c "$C9GATE"
+
+echo "  5b. 反向对照：挂载系统调用符号"
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 违规样本，用完即删。
+package vfs
+
+func c9ScratchMount() error {
+	return unix.Mount("//192.168.1.2/share", "/mnt/x", "cifs", 0, "")
+}
+EOF
+c9_expect_red "unix.Mount 符号"
+
+echo "  5c. 反向对照：命名空间常量"
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 违规样本，用完即删。
+package vfs
+
+const c9ScratchFlags = CLONE_NEWUSER | CLONE_NEWNS
+EOF
+c9_expect_red "CLONE_NEWUSER / CLONE_NEWNS 命名空间常量"
+
+echo "  5d. 反向对照：系统名字解析配置文件的字符串字面量"
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 违规样本，用完即删。
+package vfs
+
+var c9ScratchResolv = "/etc/resolv.conf"
+EOF
+c9_expect_red "\"/etc/resolv.conf\" 字符串字面量"
+
+echo "  5e. 反向对照：加载非系统 DLL"
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 违规样本，用完即删。
+package vfs
+
+var c9ScratchProc = windows.NewLazySystemDLL("evil.dll").NewProc("DoEvil")
+EOF
+c9_expect_red "NewLazySystemDLL(\"evil.dll\") 非白名单 DLL"
+
+echo "  5f. 正向对照：系统 DLL 白名单必须放行（豁免要真的生效，不能是「全都红」）"
+echo "      一个只会判红的检查和一个只会判绿的检查同样没用；"
+echo "      下面三条证明 C9 划的是**线**，不是一刀切。"
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 正向样本，用完即删。
+package vfs
+
+var c9ScratchOK = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetDiskFreeSpaceW")
+EOF
+assert_rc pass "C9 · NewLazySystemDLL(\"kernel32.dll\") 属平台 ABI，必须放行" \
+    sh -c "$C9GATE"
+
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 正向样本，用完即删。
+package vfs
+
+import "net"
+
+func c9ScratchSocket(ifi *net.Interface) (*net.UDPConn, error) {
+	return net.ListenMulticastUDP("udp4", ifi, &net.UDPAddr{
+		IP:   net.IPv4(224, 0, 0, 251),
+		Port: 5353,
+	})
+}
+EOF
+assert_rc pass "C9 · UDP 组播套接字（C4 要求的 mDNS 做法）不得被误伤" \
+    sh -c "$C9GATE"
+
+cat > "$C9SCRATCH" <<'EOF'
+//go:build ignore
+
+// 由 test/ci/negative-verify.sh 临时生成的 C9 正向样本，用完即删。
+package vfs
+
+// 说明性注释：本项目禁止 unix.Mount、禁止 syscall.Chroot，
+// 也禁止读取 "/etc/resolv.conf" 与 "/proc/net/tcp"。
+// 这些词出现在注释里是完全正常的，不该把 CI 判红 ——
+// 否则大家只会去改注释而不是改代码。
+var c9ScratchDoc = 1
+EOF
+assert_rc pass "C9 · 注释里出现这些词不算违规（strip_comments 防假阳性）" \
+    sh -c "$C9GATE"
+
+echo "  5g. 清理并确认恢复绿（残留一个违规样本会让仓库 CI 从此变红）"
+rm "$C9SCRATCH"
+assert_rc pass "C9 · 移除样本后门禁恢复绿" sh -c "$C9GATE"
+# 只断言样本文件本身不在了 —— 不要用 `git status --porcelain` 判，
+# 那会把开发者自己在 internal/vfs/ 下的正常改动误判成残留。
+assert_rc pass "C9 · 样本文件确已删除，工作树无残留" sh -c "[ ! -e '$C9SCRATCH' ]"
 
 # ============================================================ 汇总
 say "汇总"
