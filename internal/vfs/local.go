@@ -432,14 +432,26 @@ func (l *LocalFS) applyMetadata(host string, a *Attr) {
 	}
 	if md, ok := l.meta.Get(filepath.ToSlash(rel)); ok {
 		a.UID, a.GID, a.Mode = md.UID, md.GID, md.Mode
-		return
+	} else {
+		// 没有记录：用配置里的数字标签兜底，让客户端看到一个稳定的属主。
+		a.UID, a.GID = l.cfg.UID, l.cfg.GID
 	}
-	// 没有记录：用配置里的数字标签兜底，让客户端看到一个稳定的属主。
-	a.UID, a.GID = l.cfg.UID, l.cfg.GID
 
 	// NTFS 没有 POSIX 权限位，attrFromFileInfo 在 Windows 上给不出 Mode。
 	// 留 0 会让 macOS/Linux 客户端看到一个「谁都不能读写」的对象，
 	// Time Machine 会直接判定备份目标不可用，所以必须兜一个合理默认值。
+	//
+	// ⚠️ 这段兜底必须对**两条路径**都生效，不能只挂在「没有记录」那一支。
+	// 旧实现命中记录后直接 return，于是「客户端只设过 UID」留下的
+	// {uid, gid, 0} 记录会让回读的 Mode 变成 0 —— 恰好就是上面这三行注释
+	// 描述的后果，而兜底逻辑当时够不着。
+	//
+	// 代价（有意为之）：Metadata.Mode 没有「未设置」标记，所以这里把
+	// **0 一律当成未设置**。客户端若真想把权限设成 000，会被兜回默认值。
+	// POSIX 权限在本项目里只是给客户端看的展示值（授权由 valid_users /
+	// read_only 决定，见 AGENTS.md §1.1），拿不到 000 不影响访问控制；
+	// 而「整个共享显示成 000」会直接废掉 Time Machine —— 两害相权取其轻。
+	// 真要忠实表达 000，得让 Metadata 带一个「Mode 已设置」的显式标记。
 	if a.Mode == 0 {
 		mode := l.cfg.FileMode
 		if a.FileAttributes&FileAttributeDirectory != 0 {
@@ -527,7 +539,10 @@ func (l *LocalFS) Rename(oldPath, newPath string, replace bool) error {
 		return nil
 	}
 
-	if _, err := os.Lstat(dst); err == nil {
+	if dstFI, err := os.Lstat(dst); err == nil {
+		if !sameObject && sameDirEntry(oldDir, newDir, src, dstFI) {
+			sameObject = true
+		}
 		if !sameObject {
 			if !replace {
 				return ErrExist
@@ -547,6 +562,36 @@ func (l *LocalFS) Rename(oldPath, newPath string, replace bool) error {
 	}
 	l.renameMetadata(src, dst)
 	return nil
+}
+
+// sameDirEntry 判断 dst 是不是 src **同一个目录项**的另一个写法。
+//
+// 为什么需要它：宿主文件系统可能对名字做等价折叠 —— NTFS/APFS 大小写不敏感，
+// APFS 还认 Unicode 规范化等价（é 的 NFC 与 NFD 两种写法）。于是
+// os.Lstat(dst) 会**成功**，但它命中的其实就是 src 自己。此时若照
+// 「目标已存在」处理，replace=true 会先 os.Remove(dst) —— 删掉的正是源文件，
+// **数据当场丢失**，紧接着 os.Rename 报 ENOENT。
+//
+// 上面 Rename 里那个 sameObject 只覆盖「大小写折叠」这一种成因，而且判据是
+// l.cfg.CaseInsensitive（本软件的配置项），不是宿主文件系统的真实行为 ——
+// 那个开关一旦变成用户可配的，这个洞立刻就能打到。这里改成问内核：
+// os.SameFile 在 Unix 上比 dev+ino，在 Windows 上比卷序列号 + 文件索引。
+//
+// 为什么还要求同一个父目录：SameFile 对**硬链接**也返回 true，而两个不同
+// 目录项的硬链接删掉一个不会丢数据，旧的「先删后改名」对它是正确的。
+// 不同目录下的两个名字不可能是同一个目录项，所以限定同父目录既堵住了
+// 数据丢失，又不改硬链接的既有行为。
+//
+// 残留的取舍（有意为之）：同一目录下互为硬链接的两个**不同**名字，
+// 现在会被判成同一对象而跳过删除，rename() 在 POSIX 上退化为 no-op，
+// 结果是两个名字都还在。这个角落极其罕见，且后果是「少删了一个名字」，
+// 不是丢数据 —— 与上面那条相比，取轻的。
+func sameDirEntry(oldDir, newDir, src string, dstFI os.FileInfo) bool {
+	if oldDir != newDir {
+		return false
+	}
+	srcFI, err := os.Lstat(src)
+	return err == nil && os.SameFile(srcFI, dstFI)
 }
 
 // StatFS 实现 FileSystem。
