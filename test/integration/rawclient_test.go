@@ -160,9 +160,24 @@ func (c *rawClient) negotiate(dialects []wire.Dialect, encrypt bool) error {
 		c.cipher = crypto.CipherAES128CCM // 3.0 / 3.0.2 固定 AES-128-CCM
 		if c.dialect == wire.SMB311 {
 			for _, cx := range nr2.Contexts {
-				if cx.Type == wire.ContextEncryptionCapabilities && len(cx.Data) >= 2 {
-					c.cipher = crypto.Cipher(binary.LittleEndian.Uint16(cx.Data))
+				if cx.Type != wire.ContextEncryptionCapabilities {
+					continue
 				}
+				// SMB2_ENCRYPTION_CAPABILITIES 载荷是
+				// CipherCount(2) || Ciphers[CipherCount](2 each)（MS-SMB2 §2.2.3.1.2）。
+				// 此前这里直接 Uint16(cx.Data)，取到的是 **CipherCount**（恒为 1）
+				// 而非算法 ID，于是客户端一律当成 AES-128-CCM(0x0001)，
+				// 服务端却按真正协商出的 AES-128-GCM(0x0002) 解密 —— 两侧
+				// 密钥相同、算法不同，表现为服务端「SMB3 解密失败」后直接断连。
+				ec, err := wire.ParseEncryptionCapabilities(cx.Data)
+				if err != nil {
+					return fmt.Errorf("解析 ENCRYPTION_CAPABILITIES: %w", err)
+				}
+				// MS-SMB2 §3.3.5.4：服务端必须只回一个算法。
+				if len(ec.Ciphers) != 1 {
+					return fmt.Errorf("服务端回了 %d 个加密算法，期望恰好 1 个", len(ec.Ciphers))
+				}
+				c.cipher = crypto.Cipher(ec.Ciphers[0])
 			}
 		}
 	}
@@ -445,11 +460,27 @@ func (c *rawClient) readMessageTimeout(d time.Duration) ([]byte, error) {
 }
 
 // updatePreauth 把一条消息滚进 3.1.1 preauth 哈希（SHA-512 链接）。
+//
+// MS-SMB2 §3.1.5.2 Updating Pre-Auth Integrity Hash Value：
+//
+//	"...the hash value is computed by hashing the concatenation of the
+//	 existing hash value and the message."
+//
+// 关键在于**初始值是 64 字节全零**（§3.2.5.2 / §3.3.5.4 里
+// Connection.PreauthIntegrityHashValue 被初始化为 0），而不是「空」。
+// 此前这里写的是 `if len(c.preauth) > 0 { h.Write(c.preauth) }`，
+// 于是第一次调用算的是 SHA512(msg) 而非 SHA512(zeros(64) || msg)，
+// 从第一条 NEGOTIATE 起就与服务端分叉，最终派生出的 SigningKey 不同，
+// 表现为「session setup 最终响应签名校验失败」。
+//
+// 这里刻意**不**复用 internal/smb/crypto.UpdatePreauthHash：测试客户端要
+// 保持独立实现，否则该原语一旦出错，两侧会同错同对而测不出来。
 func (c *rawClient) updatePreauth(msg []byte) {
-	h := sha512.New()
-	if len(c.preauth) > 0 {
-		h.Write(c.preauth)
+	if len(c.preauth) != sha512.Size {
+		c.preauth = make([]byte, sha512.Size) // 初始值：64 字节全零
 	}
+	h := sha512.New()
+	h.Write(c.preauth)
 	h.Write(msg)
 	c.preauth = h.Sum(nil)
 }
