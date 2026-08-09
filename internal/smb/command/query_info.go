@@ -1,6 +1,9 @@
 package command
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 	"github.com/finalappstore/stupidsamba/internal/vfs"
@@ -220,6 +223,9 @@ func queryFsInfo(ctx *Context, req *wire.QueryInfoRequest) ([]byte, error) {
 			Characteristics: wire.FileDeviceIsMounted,
 		}.Encode(), nil
 
+	case wire.FileFsObjectIDInformation:
+		return wire.FsObjectIDInfo{ObjectID: volumeObjectID(ctx, info)}.Encode(), nil
+
 	case wire.FileFsSectorSizeInformation:
 		return wire.FsSectorSizeInfo{
 			LogicalBytesPerSector:                                 info.BlockSize,
@@ -232,6 +238,38 @@ func queryFsInfo(ctx *Context, req *wire.QueryInfoRequest) ([]byte, error) {
 		ctx.Log.Debug("未实现的 fs info class", "class", req.FsClass())
 		return nil, status.InvalidInfoClass
 	}
+}
+
+// volumeObjectID 生成本共享的卷 object id（FileFsObjectIdInformation 的前 16 字节）。
+//
+// ⚠️ 规范与真实实现在这里是分叉的，选择依据是 AGENTS.md §9「以真实客户端/
+// 服务端行为为准」：
+//
+//   - MS-FSA §2.1.5.13.8 规定：对象存储不实现 object id 时回
+//     STATUS_INVALID_PARAMETER；卷支持但未设置 id 时回 STATUS_VOLUME_NOT_UPGRADED
+//     / STATUS_OBJECT_NAME_NOT_FOUND。
+//   - Samba 不走这条路：它在 `SMB_FS_OBJECTID_INFORMATION` 上**总是**回 64 字节，
+//     object id 由 `create_volume_objectid()` 现造（SambaWiki "UNIX Extensions"
+//     记录了这一行为与那 48 字节扩展信息）。绝大多数客户端是照着 Samba 的行为
+//     写的，所以我们也回成功。
+//
+// id 由卷序列号 + 共享名哈希而来，保证：同一共享重启后不变（客户端会缓存它
+// 做卷身份识别），不同共享互不相同。ExtendedInfo 保持全零 —— MS-FSCC §2.5.6
+// 明确「客户端不得解释其内容」，Samba 往里塞版本号是它自己的 UNIX 扩展协商
+// 手段，我们不是 Samba，不冒充。
+func volumeObjectID(ctx *Context, info *vfs.FSInfo) [16]byte {
+	h := sha256.New()
+	// 域分隔前缀，避免和别的哈希用途撞上。
+	h.Write([]byte("stupidsamba/volume-object-id\x00"))
+	var serial [4]byte
+	binary.LittleEndian.PutUint32(serial[:], info.VolumeSerial)
+	h.Write(serial[:])
+	h.Write([]byte{0})
+	h.Write([]byte(ctx.Tree.Share.Name))
+
+	var id [16]byte
+	copy(id[:], h.Sum(nil))
+	return id
 }
 
 // volumeSerial 返回本树所在卷的序列号，取不到时回 0。

@@ -79,8 +79,7 @@ func setFileInfo(ctx *Context, open *Open, req *wire.SetInfoRequest) error {
 		return setRename(ctx, open, req.Buffer)
 
 	case wire.FileLinkInformation:
-		// 硬链接：VFS 没有这个能力，明确回不支持而不是假装成功。
-		return status.NotSupported
+		return setLink(ctx, open, req.Buffer)
 
 	case wire.FilePositionInformation:
 		// SMB2 读写都带显式偏移，句柄没有隐式游标。
@@ -97,11 +96,20 @@ func setFileInfo(ctx *Context, open *Open, req *wire.SetInfoRequest) error {
 		return nil
 
 	case wire.FileShortNameInformation:
-		// 我们不维护 8.3 短名。
+		// 8.3 短名（MS-FSCC §2.4.40）。我们**故意**不做：短名要求服务端维护一张
+		// 长名↔短名映射并保证同目录内唯一，只有 NTFS 那种自带索引的文件系统才划算。
+		// 在 POSIX 上实现意味着每次创建文件都要扫目录，代价高且没有客户端真的依赖它
+		// （QUERY_INFO 的 FileAlternateNameInformation 我们回长名本身，见 query_info.go）。
+		// 回 NOT_SUPPORTED 是 Samba 在 `store dos attributes` 关闭时的同款行为。
 		return status.NotSupported
 
 	case wire.FileValidDataLengthInformation:
-		// 仅对非稀疏文件有意义，且需要 MANAGE_VOLUME 权限。
+		// ValidDataLength（MS-FSCC §2.4.45）是 NTFS 特有概念：EOF 之前、VDL 之后的
+		// 区间在盘上已分配但内容未定义，读回来由文件系统补零。设置它的唯一用途是
+		// 让应用跳过补零以提速，需要 SeManageVolumePrivilege。
+		// POSIX 没有这个概念 —— 我们的 Truncate 扩展出的区间读回来必然是零，
+		// 也就是 VDL 恒等于 EOF，无从设置。谎报成功会让客户端以为可以跳过写零，
+		// 从而读到未初始化数据，所以必须回 NOT_SUPPORTED。
 		return status.NotSupported
 
 	case wire.FileFullEaInformation:
@@ -320,6 +328,53 @@ func setRename(ctx *Context, open *Open, buf []byte) error {
 
 	// 句柄在改名后仍然有效，后续 QUERY_INFO 要能回新路径。
 	open.Path = dst
+	return nil
+}
+
+// setLink 处理 FileLinkInformation（MS-FSCC §2.4.21.2 / MS-FSA §2.1.5.15.6）：
+// 在目标路径创建一个指向本句柄所指文件的**硬链接**。
+//
+// 与 rename 的区别（容易记混）：rename 移动，link 增加一个名字，源路径依然存在，
+// 句柄依然指向原路径。因此这里**不需要** DELETE 权限，也**不能**改 open.Path。
+func setLink(ctx *Context, open *Open, buf []byte) error {
+	info, err := wire.ParseFileLinkInfo(buf)
+	if err != nil {
+		return status.InvalidParameter
+	}
+	if info.RootDirectory != 0 {
+		// SMB2 里 RootDirectory 必须为 0（与 rename 同）。
+		return status.InvalidParameter
+	}
+	if open.IsDir {
+		// POSIX 与 Windows 都不允许目录硬链接。
+		return status.FileIsADirectory
+	}
+
+	fs := ctx.Tree.FS()
+	if fs == nil {
+		return status.NetworkNameDeleted
+	}
+	hl, ok := fs.(vfs.HardLinker)
+	if !ok {
+		return status.NotSupported
+	}
+
+	dst, terr := renameTarget(info.FileName)
+	if terr != nil {
+		return status.ObjectPathSyntaxBad
+	}
+	if dst == "" {
+		return status.ObjectNameInvalid
+	}
+	if dst == open.Path {
+		// 链到自己身上：POSIX link(2) 会回 EEXIST，但语义上这是无操作，
+		// 直接成功更符合客户端预期。
+		return nil
+	}
+
+	if err := hl.Link(open.Path, dst, info.ReplaceIfExists); err != nil {
+		return status.FromVFSError(err)
+	}
 	return nil
 }
 
