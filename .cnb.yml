@@ -208,10 +208,7 @@ $:
   #     重跑流水线会把之前传上去的附件一起清掉，然后重新传，是自洽的。
   #   - 本流水线对**任何** tag 都会触发（tag_push 不支持按 tag 名过滤，
   #     `"v*": tag_push:` 是非法写法）。所以不要往仓库推非发布用途的 tag。
-  #
-  # preRelease 目前硬编码为 true：v0.1.0 系列一律按内测发布，由项目所有者
-  # 明确要求。等真要发第一个正式版时，改这一行（preRelease: false、
-  # latest: true），不要靠 tag 名猜 —— 猜错就是把内测包挂成正式版。
+  #   - 预发布/正式版**由 tag 名决定**，不再硬编码，见下面两个互斥 stage。
   tag_push:
     - runner:
         cpus: 4
@@ -261,9 +258,17 @@ $:
         # 所以它按 stupidsamba_${CNB_BRANCH}_linux_{amd64,arm64}.tar.gz 找得到。
         # 这也保证了镜像里的字节与用户下载的裸包**完全同一份**。
         #
-        # 不打 :latest。与上面 Release 的 preRelease:true/latest:false 保持一致：
-        # v0.x 一律按内测发布，:latest 要等第一个正式版再一起放开，
-        # 两处必须同时改，不要只改一边。
+        # 不打 :latest。原先的理由是「与下面 Release 的 preRelease:true/
+        # latest:false 保持一致」，而 Release 那边已经改成按 tag 名判渠道，
+        # 所以这条理由**现在不成立了**：正式版 tag 会拿到 latest 的 Release，
+        # 镜像却仍然没有 :latest，两边不再同步。
+        #
+        # 这里刻意先不改，因为它是一个独立的决定而不是本次改动的推论：
+        # 镜像的 :latest 一旦推上去，`docker pull <repo>` 不带 tag 的人立刻会
+        # 拿到它，影响面比 Release 页面上的一个标记大。docker-build.sh 已经支持
+        # `--latest`，接上只是在下面那行加一个条件参数，等发布渠道这套按 tag 名
+        # 判定的机制**跑过真实 tag 验证**之后再单独决定（跟踪：见 PR 描述）。
+        # 在那之前，不要把这段注释删掉当成「已经一致」。
         - name: 构建并推送多架构容器镜像
           script: |
             set -e
@@ -273,7 +278,40 @@ $:
             # 用 --password-stdin 而不是 -p：后者会把令牌写进进程命令行与 CI 日志。
             printf '%s' "$CNB_TOKEN" | docker login -u "$CNB_TOKEN_USER_NAME" --password-stdin "$CNB_DOCKER_REGISTRY"
             sh scripts/docker-build.sh --tag "$CNB_BRANCH" --push
+        # ------------------------------------------------------------------
+        # 发布渠道由 **tag 名里有没有连字符** 决定，不再硬编码：
+        #   v0.2.0        → 正式版（preRelease: false / latest: true）
+        #   v0.2.0-rc0    → 预发布（preRelease: true  / latest: false）
+        #   v0.1.0-test   → 预发布
+        # 规则直接沿用 SemVer：`1.0.0-rc.1` 里连字符之后那截就是 prerelease
+        # 标识，GitHub Releases / npm / cargo 都这么判，不是我们另发明的一套。
+        #
+        # 这推翻了本段原先那句「不要靠 tag 名猜 —— 猜错就是把内测包挂成正式版」。
+        # 那句话在**硬编码**的前提下成立：当时没有任何东西保证 tag 名与渠道一致，
+        # 全靠发版的人记得先来改这一行。改成按 tag 名判定之后，风险点从
+        # 「人忘了改配置」挪到「人打错 tag 名」—— 后者当场可见（tag 名就印在
+        # Release 标题上，推错了立刻看得出来），前者不可见（配置里的一行，
+        # 没人会在发版时去翻）。实际发生过的正是前者：v0.2.0 差点被发成预发布。
+        #
+        # 为什么是两个互斥 stage 而不是一个表达式：CNB 只对**插件任务**的
+        # `settings` 声明支持 `$VAR` 变量替换，**内置任务的 `options` 没有这条
+        # 声明**，而 git:release 是内置任务（`type:` + `options:`）。往 options
+        # 里塞 `$VAR` 是在赌一个没写进文档的行为，赌输的代价是发出一个渠道错误的
+        # Release。`if:`（脚本退出码为 0 才执行该 stage）是文档里的正式语法。
+        #
+        # 附带的可观测性：万一哪天 `if:` 语义变了，两个 stage 会**同时**出现在
+        # 构建日志里（而不是一个 success 一个 skipped），扫一眼就能发现。
+        - name: 创建 Release（正式版）
+          if: |
+            case "$CNB_BRANCH" in *-*) exit 1 ;; *) exit 0 ;; esac
+          type: git:release
+          options:
+            descriptionFromFile: CHANGELOG.md
+            preRelease: false
+            latest: true
         - name: 创建 Release（预发布）
+          if: |
+            case "$CNB_BRANCH" in *-*) exit 0 ;; *) exit 1 ;; esac
           type: git:release
           options:
             descriptionFromFile: CHANGELOG.md
