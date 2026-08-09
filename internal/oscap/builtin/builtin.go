@@ -18,8 +18,15 @@
 // # 旁路存储用 bbolt
 //
 // `go.etcd.io/bbolt`：纯 Go、MIT、无 CGO、单文件、事务安全，满足 C1/C2/C6 与 §4。
-// 本仓库在 internal/vfs/metadata_windows.go 已经用它承载 Windows 的 POSIX 元数据，
-// 这里复用同一个依赖，不引入新的第三方。**禁止**换成 mattn/go-sqlite3 这类需要 CGO 的方案。
+// 本仓库在 internal/meta（`//go:build windows || metabolt`）已经用它承载 Windows 的
+// POSIX 属主/权限位，这里复用同一个依赖，不引入新的第三方。
+// **禁止**换成 mattn/go-sqlite3 这类需要 CGO 的方案。
+//
+// 与 internal/meta 的关系：**只共用依赖，不共用库文件、不共用 bucket**。
+// 本包的库文件由 oscap.Options.MetadataPath 指定，bucket 名见 store.go
+// （xattr/holes/stream/fileid/btime/dosattr），与 internal/meta 的桶不重名。
+// 这一句是刻意写下的：本仓库出过「两套实现撞同一个库文件/同一个 bucket 而静默
+// 吐垃圾」的事故，将来若有人想把两者指向同一个 db，请先读这段。
 //
 // 一个必须写明的边界：bbolt 内部用 mmap + flock。严格说这比 C9 允许的
 // 「open/read/write/seek/stat/fsync」多要了一点东西。之所以判定可接受：
