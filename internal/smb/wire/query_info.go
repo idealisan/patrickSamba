@@ -480,7 +480,7 @@ func AppendStreamInfoChain(dst []byte, streams []FileStreamInfo) []byte {
 		nameBytes := EncodeUTF16LE(s.Name)
 
 		var f []byte
-		dst, f = grow(dst, streamInfoFixed)
+		dst, f = grow(dst, FileStreamInfoFixedSize)
 		// f[0:4] NextEntryOffset 由下一轮回填。
 		le.PutUint32(f[4:], uint32(len(nameBytes)))
 		le.PutUint64(f[8:], uint64(s.StreamSize))
@@ -495,9 +495,9 @@ func AppendStreamInfoChain(dst []byte, streams []FileStreamInfo) []byte {
 	return dst
 }
 
-// streamInfoFixed 是 FileStreamInformation 里 StreamName 之前的字节数：
+// FileStreamInfoFixedSize 是 FileStreamInformation 里 StreamName 之前的字节数：
 // NextEntryOffset(4) + StreamNameLength(4) + StreamSize(8) + StreamAllocationSize(8)。
-const streamInfoFixed = 24
+const FileStreamInfoFixedSize = 24
 
 // ParseStreamInfoChain 解析 FileStreamInformation 链（供测试与 Go 客户端使用）。
 func ParseStreamInfoChain(b []byte) ([]FileStreamInfo, error) {
@@ -507,7 +507,7 @@ func ParseStreamInfoChain(b []byte) ([]FileStreamInfo, error) {
 	var out []FileStreamInfo
 	pos := uint64(0)
 	for {
-		f, err := sliceAt(b, pos, streamInfoFixed)
+		f, err := sliceAt(b, pos, FileStreamInfoFixedSize)
 		if err != nil {
 			return nil, fmt.Errorf("FileStreamInformation[%d]: %w", len(out), err)
 		}
@@ -516,7 +516,7 @@ func ParseStreamInfoChain(b []byte) ([]FileStreamInfo, error) {
 			StreamSize:           int64(le.Uint64(f[8:])),
 			StreamAllocationSize: int64(le.Uint64(f[16:])),
 		}
-		s.Name, err = DecodeUTF16LEAt(b, pos+streamInfoFixed, uint64(le.Uint32(f[4:])))
+		s.Name, err = DecodeUTF16LEAt(b, pos+FileStreamInfoFixedSize, uint64(le.Uint32(f[4:])))
 		if err != nil {
 			return nil, fmt.Errorf("FileStreamInformation[%d] StreamName: %w", len(out), err)
 		}
@@ -525,7 +525,7 @@ func ParseStreamInfoChain(b []byte) ([]FileStreamInfo, error) {
 		if next == 0 {
 			return out, nil
 		}
-		if next < streamInfoFixed || pos+next > uint64(len(b)) {
+		if next < FileStreamInfoFixedSize || pos+next > uint64(len(b)) {
 			return nil, fmt.Errorf("%w: FileStreamInformation[%d] NextEntryOffset=%d 非法",
 				ErrMalformed, len(out)-1, next)
 		}

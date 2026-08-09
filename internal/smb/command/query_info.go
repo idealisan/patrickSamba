@@ -67,6 +67,10 @@ func handleQueryInfo(ctx *Context) error {
 
 	// 缓冲不足：MS-SMB2 §3.3.5.20 要求回 STATUS_INFO_LENGTH_MISMATCH
 	// 并在响应里带上所需长度（wire 层已按 Buffer 长度写好）。
+	//
+	// ⚠️ FileStreamInformation 是例外，已在 queryFileInfo 里按
+	// MS-FSA §2.1.5.12.29 单独处理（截断到整条 + STATUS_BUFFER_OVERFLOW），
+	// 走到这里时它一定已经装得下。
 	if uint32(len(buf)) > req.OutputBufferLength {
 		return status.InfoLengthMismatch
 	}
@@ -159,7 +163,7 @@ func queryFileInfo(ctx *Context, open *Open, req *wire.QueryInfoRequest) ([]byte
 		return wire.EncodeFileNameInfo(baseName(open.Path)), nil
 
 	case wire.FileStreamInformation:
-		return streamInfo(ctx, open)
+		return streamInfo(ctx, open, req.OutputBufferLength)
 
 	default:
 		ctx.Log.Debug("未实现的 file info class", "class", req.FileClass())
@@ -289,7 +293,9 @@ func volumeSerial(ctx *Context) uint64 {
 }
 
 // streamInfo 生成 FileStreamInformation 响应。
-func streamInfo(ctx *Context, open *Open) ([]byte, error) {
+// maxOut 是客户端给的 OutputBufferLength；装不下时按 MS-FSA §2.1.5.12.29
+// 截断到整数条并置 STATUS_BUFFER_OVERFLOW（见下方说明）。
+func streamInfo(ctx *Context, open *Open, maxOut uint32) ([]byte, error) {
 	fs := ctx.Tree.FS()
 	if fs == nil {
 		return nil, status.InvalidDeviceRequest
@@ -311,7 +317,52 @@ func streamInfo(ctx *Context, open *Open) ([]byte, error) {
 			StreamAllocationSize: s.Alloc,
 		})
 	}
-	return wire.AppendStreamInfoChain(nil, out), nil
+
+	buf := wire.AppendStreamInfoChain(nil, out)
+	if uint32(len(buf)) <= maxOut {
+		return buf, nil
+	}
+
+	// ---- 缓冲装不下 ----
+	//
+	// 这条路径以前是走不到的：流最多 3 条、名字都很短（"::$DATA" 之类）。
+	// 自从 VFS 支持通用 named stream（xattr user.DosStream.*），流名可长达
+	// 234 字节（UTF-16 上线是它的两倍），一个文件上的流数量也不再有上限，
+	// 于是它变成了常规路径。
+	//
+	// MS-FSA §2.1.5.12.29 的规定与其它信息类**不同**，两条都要照做：
+	//   - OutputBufferSize 连一条定长部分都放不下 → STATUS_INFO_LENGTH_MISMATCH；
+	//   - 某一条放不下 → STATUS_BUFFER_OVERFLOW，**已经写进去的照常返回**。
+	//
+	// 关键在于不能沿用通用分支的 STATUS_INFO_LENGTH_MISMATCH：那是错误级状态，
+	// 客户端会认为「这个文件查不了流」而彻底放弃；BUFFER_OVERFLOW 是警告级
+	// （0x80000005），响应体照常携带，客户端据此加大缓冲重试。对 Finder 来说
+	// 这是「能看到 Apple 元数据」与「完全看不到」的区别。
+	if maxOut < wire.FileStreamInfoFixedSize {
+		return nil, status.InfoLengthMismatch
+	}
+
+	// 截断必须按**整条**切：直接截字节会留下一条半截记录，
+	// 且最后一条的 NextEntryOffset 会指向缓冲区外。重新编码前缀最稳妥
+	// （流的条数是个位数量级，重编的代价可以忽略）。
+	fit := 0
+	for n := 1; n <= len(out); n++ {
+		if uint32(len(wire.AppendStreamInfoChain(nil, out[:n]))) > maxOut {
+			break
+		}
+		fit = n
+	}
+	if fit == 0 {
+		// 定长部分放得下、但第一条的名字放不下。仍按 BUFFER_OVERFLOW 处理：
+		// 规范要求的是「元素放不下就 overflow」，不是 INFO_LENGTH_MISMATCH。
+		ctx.Status = status.BufferOverflow
+		return nil, nil
+	}
+
+	ctx.Log.Debug("FileStreamInformation 输出截断",
+		"path", open.Path, "total", len(out), "returned", fit, "max_out", maxOut)
+	ctx.Status = status.BufferOverflow
+	return wire.AppendStreamInfoChain(nil, out[:fit]), nil
 }
 
 // basicInfo 把 VFS 属性翻译成 FileBasicInformation。
