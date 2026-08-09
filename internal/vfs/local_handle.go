@@ -494,8 +494,12 @@ func (h *localHandle) entryAttr(name string) (*Attr, error) {
 // ---------------------------------------------------------------- 其他
 
 // Xattr 实现 Handle。
+//
+// 保留 error 返回值是因为它是跨模块契约（fs.go 的 Handle 接口），但这一侧
+// 已经不会失败了：能力在构造 LocalFS 时就选定，宿主没有扩展属性时由
+// builtin 适配器兜住，不再是「本平台不支持」。
 func (h *localHandle) Xattr() (XattrAccessor, error) {
-	return newXattrAccessor(h.host, h.f)
+	return h.fs.xattrAt(h.host, h.f), nil
 }
 
 // Close 实现 Handle。

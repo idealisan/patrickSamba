@@ -11,9 +11,10 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 // openGeneric 打开一个通用流。
@@ -107,51 +108,9 @@ func TestGenericStreamRoundTrip(t *testing.T) {
 	}
 }
 
-// TestGenericStreamSambaOnDiskFormat 钉住与 Samba 的二进制兼容。
-//
-// 落盘格式必须是 xattr 名 user.DosStream.<名>:$DATA、值为
-// <数据><1 字节 marker=0>。写错了不会有任何测试失败，但用户在
-// Samba 与 stupidSamba 之间切换时流会凭空消失。
-func TestGenericStreamSambaOnDiskFormat(t *testing.T) {
-	fs := newTestFS(t, false)
-	requireXattr(t, fs)
-	writeFile(t, fs, "f", "x")
-
-	const stream = "myattr"
-	payload := []byte("VALUE")
-	h := openGeneric(t, fs, "f", stream, OpenAlways)
-	if _, err := h.WriteAt(payload, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// 直接从宿主机读原始 xattr，绕过我们自己的封装。
-	x, err := newXattrAccessor(filepath.Join(fs.Root(), "f"), nil)
-	if err != nil {
-		t.Skipf("宿主机不支持 xattr: %v", err)
-	}
-	raw, err := x.Get("DosStream." + stream + ":$DATA")
-	if err != nil {
-		t.Fatalf("Samba 格式的 xattr 名读不到（落盘名字不对？）: %v", err)
-	}
-	wantRaw := append(append([]byte{}, payload...), 0x00)
-	if !bytes.Equal(raw, wantRaw) {
-		t.Errorf("落盘值 = % x；期望 % x（数据 + 1 字节 marker=0）", raw, wantRaw)
-	}
-
-	// 反过来：Samba 写的 marker!=0（多 xattr 续存）我们读不全，
-	// 必须如实报 ErrNotSupported 而不是把截断的内容交出去。
-	if err := x.Set("DosStream.multi:$DATA", []byte("frag\x01")); err != nil {
-		t.Skipf("写探针 xattr 失败: %v", err)
-	}
-	if _, _, err := fs.Open(&OpenRequest{
-		Path: "f", Stream: "multi", Flags: OpenRead, Disposition: OpenExisting,
-	}); !errors.Is(err, ErrNotSupported) {
-		t.Errorf("多 xattr 续存流应报 ErrNotSupported，得到 %v", err)
-	}
-}
+// TestGenericStreamSambaOnDiskFormat 已移到 oscap_seam_unix_test.go：
+// 它断言的是**宿主机磁盘上**的字节，必须用原始系统调用去看，
+// 而那只在 linux/darwin 上成立。
 
 // TestGenericStreamNameLimits 覆盖流名的长度与字符校验。
 func TestGenericStreamNameLimits(t *testing.T) {
@@ -325,30 +284,49 @@ func TestStreamGoneWithFile(t *testing.T) {
 	}
 }
 
-// TestGenericStreamDegradesWithoutXattr 覆盖宿主机不支持 xattr 的降级。
+// TestGenericStreamWithoutHostXattr 覆盖「宿主机没有扩展属性」。
 //
-// 不能 panic，也不能假装成功。Streams() 应当照常返回主数据流。
-func TestGenericStreamDegradesWithoutXattr(t *testing.T) {
-	fs := newTestFS(t, false)
+// # 这条用例的语义变了，变化本身就是本次改动的成果
+//
+// 它原本叫 TestGenericStreamDegradesWithoutXattr，断言的是**降级**：
+// 宿主不支持 xattr 时开流返回 ErrNotSupported。而且它开头就写着
+// 「支持的话这条用例没什么可测的」然后 t.Skip —— 也就是说在**所有**
+// 有 xattr 的开发机与 CI 上（即全部），它从头到尾一行断言都没执行过。
+// 这正是 AGENTS.md 反复点名的那种「看起来有覆盖、其实从未运行」的用例。
+//
+// 接上 oscap 之后不存在这条降级路径了：宿主没有扩展属性时由 builtin
+// 适配器用旁路存储承载同一份语义，命名流**照常可用**。于是这条用例
+// 改成用 `filesystem_mode: portable` 把那个环境**造出来**（而不是等它
+// 恰好发生），断言功能完好，且不再 skip。
+//
+// 「portable 下确实没碰宿主 xattr」由 oscap_seam_unix_test.go 用原始
+// 系统调用证伪，这里只管功能。
+func TestGenericStreamWithoutHostXattr(t *testing.T) {
+	fs := newModeFS(t, oscap.ModePortable)
 	writeFile(t, fs, "f", "x")
 
-	// 探测宿主机到底支不支持；支持的话这条用例没什么可测的。
-	x, err := newXattrAccessor(filepath.Join(fs.Root(), "f"), nil)
-	if err == nil {
-		if err = x.Set("DosStream.probe:$DATA", []byte{0}); err == nil {
-			_ = x.Remove("DosStream.probe:$DATA")
-			t.Skip("宿主机支持 xattr，降级路径无从触发")
-		}
+	if got := fs.caps.Matrix().Kind(oscap.CapNamedStream); got != oscap.KindBuiltin {
+		t.Fatalf("portable 档命名流应由 builtin 提供，实际 %v（矩阵没生效，本用例测的不是它以为的东西）", got)
 	}
 
-	// 走到这里说明宿主机确实不支持。
 	got := streamNames(t, fs, "f")
 	if _, ok := got[DefaultStreamName]; !ok {
-		t.Errorf("不支持 xattr 时仍应报告主数据流，得到 %v", got)
+		t.Errorf("应报告主数据流，得到 %v", got)
 	}
-	if _, _, err := fs.Open(&OpenRequest{
+
+	h, _, err := fs.Open(&OpenRequest{
 		Path: "f", Stream: "s", Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
-	}); !errors.Is(err, ErrNotSupported) {
-		t.Errorf("不支持 xattr 时开流 = %v；期望 ErrNotSupported", err)
+	})
+	if err != nil {
+		t.Fatalf("portable 档开命名流失败（builtin 没兜住）: %v", err)
+	}
+	if _, err := h.WriteAt([]byte("payload"), 0); err != nil {
+		t.Fatalf("写命名流: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if size, ok := streamNames(t, fs, "f")[StreamName("s")]; !ok || size != int64(len("payload")) {
+		t.Errorf("portable 档写完应能枚举到流 s（size=7），得到 size=%d ok=%v", size, ok)
 	}
 }

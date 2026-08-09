@@ -284,7 +284,7 @@ done
 
 | 字段 | 含义 | 默认值 |
 |---|---|---|
-| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `native` / `portable`，**大小写敏感**。⚠️ **v0.2.0 里这三个取值跑起来行为完全一样**——校验是真的（填错会启动报错），但抽象层还没接进数据路径，见[已知限制](#notes)第 7 条 | `auto` |
+| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `native` / `portable`，**大小写敏感**。⚠️ **6 项里只有扩展属性与命名流已接进数据路径**，这两项三档行为确实不同，另外四项三档仍然等价；且 **`native` 档在 linux / darwin / windows 上都会启动失败**（每个平台各有至少一项能力被硬编码为不支持），见[已知限制](#notes)第 7 条 | `auto` |
 
 ### `server`
 
@@ -522,20 +522,33 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
    （约束客户端别申请独占 oplock，语义上不是虚假宣告）。对普通文件共享几乎无影响；
    对 Time Machine 的影响是客户端退化为不缓存，见[上](#timemachine)。
 
-7. **`filesystem_mode` 在 v0.2.0 是个「已建成但未接线」的开关**：配置里可以填
-   `auto` / `native` / `portable`，填错会启动报错（校验是真的），但**三个取值跑起来
-   行为完全一样**。六项 OS 能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 /
-   DOS 属性）的抽象接口与两套适配器都已合入并有 CI 覆盖，只是数据路径还没改为经由它们取能力。
-   自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `1`
-   —— 只有接口包被链进二进制，两个适配器一个都不在里面。
-   **实际含义**：在 FAT32/exFAT 外置盘、`nouser_xattr` 挂载、只读根这类不支持扩展属性的
-   宿主上，设成 `portable` **并不会**让元数据落到自带存储里，它们仍会静默丢失。
-   同理，`native` 也**不会**如它自己的报错文案所说「不支持则启动报错」——
-   实测 2026-08-09 18:35 在 Linux 上填 `native` 正常启动、无任何告警
-   （反向对照：填 `Native` 会 rc=1 报非法取值，证明这个探针有鉴别力）。
-   本版本的接线范围**以真正合入 `main` 的内容为准**（不做版本承诺，也不预告）；
-   在你手上这一版里，判据就是上面那条 `go list -deps` 命令 —— 它算什么就是什么。
+<!-- BEGIN-OSCAP-WIRING-STATUS-README：本条与 CHANGELOG 的同名块、configs/example.yaml 的
+     同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
+     别只改 CHANGELOG 那一处。
+     全部落点一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
+7. **`filesystem_mode` 只对 6 项 OS 能力里的 2 项生效**：配置里可以填
+   `auto` / `native` / `portable`，填错会启动报错（校验是真的）。
+   **已接线的两项是扩展属性（xattr）与命名流**，对它们三档行为**确实不同**：
+   `portable` 一个扩展属性都不往宿主上写（数据落自带存储），`auto` 在支持的宿主上走原生。
+   自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `3`
+   —— `internal/oscap`、`oscap/native`、`oscap/builtin` 都被链进了二进制（接线前是 `1`）。
+   **仍未接线的四项**：稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性。对这四项三个取值
+   跑起来行为完全一样，在 FAT32/exFAT 外置盘、`nouser_xattr` 挂载、只读根这类宿主上
+   照旧静默丢失。**准确口径是「6 项接了 2 项」，不是「这个开关已经生效了」。**
+
+   ⚠️ **`native` 接线后在 linux / darwin / windows 三个平台上都会恒定启动失败**，
+   与文件系统无关。这是接线带来的**行为变化**（接线前它是 no-op 所以能正常启动），不是回归：
+   `native` 的契约是「有一项不支持就报错、不降级」，而**每个平台都有至少一项能力被源码
+   硬编码为不支持**——linux/darwin 的 `dos_attributes`、darwin 还有 `sparse_file`、
+   **windows 的 `xattr`**（`internal/oscap/probe_windows.go:24` 无条件 `return false`，
+   因为不拿 NTFS ADS 冒充 xattr 语义），三家相乘即没有任何平台能让 `native` 起来。
+   实测 2026-08-09 19:04（Linux/amd64）：`native` → 进程 `rc=1`，报
+   「…要求全部能力走原生实现，但 "<共享路径>" 所在的文件系统不支持: dos_attributes」；
+   同一份配置改 `portable` / `auto` 均正常启动。**那句报错的归因是错的**——真相是
+   本平台压根没有这一项的原生实现，换个文件系统一样失败；文案修正排在 v0.2.0 之后。
+   想尽量走原生就用 `auto`，它本来就逐项优先选原生。
    详见 [`CHANGELOG.md`](CHANGELOG.md) v0.2.0 段的 `OSCAP-WIRING-STATUS` 块。
+<!-- END-OSCAP-WIRING-STATUS-README -->
 
 ---
 

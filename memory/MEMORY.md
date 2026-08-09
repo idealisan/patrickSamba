@@ -14,7 +14,7 @@
 - [验收判据必须可证伪](feedback_falsifiable_assertions.md) — 加密曾用「能读到内容」判定而漏掉明文旁路；探针要有反向对照，失败用例不许 skip
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
-- [CNB PR API + null 陷阱 + 判合并三条命令的分工](reference_cnb_pr_api.md) — 合并 PUT、更新 PATCH、merge_style、commit_title 必填、都要 Accept；null=「不回答」不是「否」（merged/latest）；squash 下判合并只能比内容
+- [CNB PR API + `#N` 歧义 + null 陷阱 + 判合并三条命令](reference_cnb_pr_api.md) — 裸写 `#N` 会撞 TaskList/PR 两套编号且照样返回 200；null=「不回答」不是「否」；squash 下判合并只能比内容
 - [不要把失败用例搬到 build tag 后面来止血](feedback_no_hiding_failing_tests.md) — 根因已有人在修时用例应留在默认路径裸奔；加 tag 藏起来和删除是同一类动作
 - [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 七个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 后的代码从未编译/go build 不编译 _test.go
 - [durable handle 的四条设计约束](project_durable_handle_design.md) — Persistent 全局唯一（含哨兵不变量）、加锁次序铁律、不起常驻回收 goroutine；第 4 条是刻意推迟到 v0.2.1+ 的欠账
@@ -35,4 +35,4 @@
 - [在陈旧 main 上 rebase 会造出「已合并提交」的重复 SHA](project_rebase_onto_stale_main.md) — rebase 前先查祖先关系；队友分支可能正基于被你重写掉的旧 SHA
 - [别人正在写文件时的保命提交：rescue ref 手法](project_rescue_ref_inflight.md) — 独立 GIT_INDEX_FILE + commit-tree 推 refs/rescue/*，不碰对方 index/HEAD 且零流水线；ls-remote 才查得到
 - [CNB Release API 与 tag_push 发布链路实测](reference_cnb_release_api.md) — 判最新版看 is_latest（latest 恒 null）；git:release 的 options 不吃变量，分渠道要两个互斥 stage + if:；整条发布 0.16~0.19 核时，付得起真跑
-- [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 谎报未完成/队友转述的实测其实在别的分支/已知问题清单最易腐烂/注释里「见 X」而 X 不存在；附 A~D 证据强度分档
+- [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 七种形态：谎报未完成/实测在别的分支/已知问题腐烂/「见 X」X 不存在/合入前没重跑/排除法只做一半/引用用节号

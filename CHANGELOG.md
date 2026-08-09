@@ -191,13 +191,15 @@
   监听照常拉起（退出 0）。文档此前写作「会被忽略」是被读成「随便填」，
   现已在「配置」段与 README 共享表写明 non-Windows 上的唯一出口是那条 WARN。
 
-### 内部：OS 能力抽象（**六项能力的两套适配器都已建成，但一处都还没接进数据路径**）
+### 内部：OS 能力抽象（**六项能力的两套适配器都已建成，其中 2 项已接进数据路径**）
 
 > **一句话结论**：port 层 + native 适配器 + builtin 适配器 + portable 模式 CI 门禁
-> 四块**全部已在 `main`**，测试是真跑的、门禁是有牙的；但
-> **`internal/vfs` / `internal/server` / `cmd/` 里没有任何一处调用它们**，
-> 所以本版本二进制在这一块的运行行为与 v0.1.0 **逐字节等同**。
-> 「代码建成」和「行为生效」在这里是两件事，下面分开写，判据附在每条后面。
+> 四块**全部已在 `main`**，测试是真跑的、门禁是有牙的；
+> **扩展属性与命名流两项已由 PR #159 接进 `internal/vfs` 的真实数据路径**，
+> 其余四项在 `internal/vfs` / `internal/server` / `cmd/` 里仍无调用点，
+> 对这四项而言本版本的运行行为与 v0.1.0 **逐字节等同**。
+> 「代码建成」和「行为生效」在这里仍是两件事，下面分开写，判据附在每条后面；
+> 接线后的准确口径以下方 `BEGIN-OSCAP-WIRING-STATUS` 块为单一真相。
 
 **已建成（可复算）**：
 
@@ -230,41 +232,76 @@
   设计上它是**全局策略**而非逐共享设置——表达的是「这台机器上我们信不信任宿主能力」；
   各共享的落点由探测逐个决定，同一次运行里 ext4 目录可走 native、exFAT 目录落 builtin。
 
-<!-- BEGIN-OSCAP-WIRING-STATUS：oscap-wire 的接线 PR 一合入 main，整段替换本块，不要散改别处 -->
-**尚未接线（本版本的实际行为边界；本块截至 2026-08-09 18:35 CST 为当下事实，接线 PR 合入后整段替换）**：
+<!-- BEGIN-OSCAP-WIRING-STATUS：oscap-wire 的接线 PR 一合入 main，整段替换本块，不要散改别处。
+     ⚠️ 同类块**共四处**（本处 + README.md 已知限制第 7 条 + configs/example.yaml 的
+     filesystem_mode 段 + AGENTS.md §1.2「已建成 ≠ 已生效」），四处讲的是同一件事，
+     接线后**四处都要改**，只改这里会在另外三处留下过期陈述。
+     一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/'
+     该 grep 的命中共**三类**，只有第一类要改：
+       ① 活断言 —— 成对的 BEGIN/END 标记（就是上面那四处），**整段替换正文**
+       ② 范例引用 —— 只有孤零零一行 BEGIN，且被引在代码围栏里当写法样例，**不要动**：
+          · docs/status-v0.2.0.md（PM 进度板）
+          · memory/feedback_falsifiable_assertions.md
+       ③ 正文交叉引用 —— **不含 BEGIN/END**，只在句子里提块名，例如 README.md:545
+          「详见 CHANGELOG.md v0.2.0 段的 OSCAP-WIRING-STATUS 块」。
+          正文不用改，但**块一旦改名或删除必须同步**，否则就退化成「见 X 而 X 不存在」。
+     （初版只写了①②两类，漏了③。漏的原因很典型：③ 不含 BEGIN 关键字，
+       按「有没有 BEGIN」去分类就永远看不见它，而 grep 照样会把它捞出来。）
+     （初版写「三处」，漏了 AGENTS.md —— 漏的那处恰好是 oscap-wire 点名要改的。
+       所以「一套 N 处」这个数字本身也要核，别照抄。） -->
+**已接线 2 项 / 共 6 项**（接线由 PR #159 落地）。
+下面三条判据在**合入前最后一次 rebase 之后**原样复算过：2026-08-09 20:46 CST，
+分别得 **3 / 9 / 1→0**，与正文写的数字一致。**读者不必信这个时间戳，命令可原样粘贴复跑**——
+写时间只是为了让「数字对不上」时能判断是代码变了还是断言从一开始就错了：
 
-- ⚠️ **整个 oscap 子系统没有任何产品调用点**，因此
-  **`filesystem_mode` 填 `auto` / `native` / `portable` 跑起来行为完全一样**。
-  上面那段「全局策略 / 逐共享探测」描述的是**设计**，不是 v0.2.0 的运行时事实。
-  四条互相独立的判据：
-  1. `go list -f '{{.ImportPath}} {{.Imports}}' ./... | grep oscap` —— 全仓只有
-     `internal/config` import 了 `internal/oscap`，**没有任何包** import
-     `oscap/native` 或 `oscap/builtin`。
-  2. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **1**（只有 port 包，被 config
-     为了 `ParseMode` 拉进来）—— 也就是说两个适配器**根本没被链进发布二进制**。
-  3. `grep -rn 'oscap\.Open\|oscap\.New\|SelectMatrix\|ProbeNative\|native\.New\|builtin\.New' --include='*.go' . | grep -v '^./internal/oscap/'`
-     —— 包外唯一命中是 `internal/config/config.go:25` 的一句**注释**，零个真实调用。
-  4. `FilesystemMode` 在产品代码里只出现在 `internal/config/defaults.go:48-49`（填默认值）
-     与 `internal/config/validate.go:238-245`（校验取值），**没有运行期消费者**。
-- ⚠️ **真实数据路径仍走 v0.1.0 那套自己的实现**，与 oscap 并存但互不相干：
-  例如 xattr 在数据路径上是 `internal/vfs/xattr_unix.go`，而 `internal/oscap/native/xattr_posix.go`
-  是另一份、当前无人调用。将来把 vfs 改为经由 port 取能力时**必须一并拆掉旧的那份**，
-  否则会重演本版本 `internal/meta` 与 `internal/vfs/metadata_windows.go` 的双实现撞车（见下节 R11）。
-- ⚠️ **`native` 档不兑现它自己报错文案里的承诺**。配置校验失败时打印的可选值说明写着
-  「native=强制原生、不支持则启动报错」，但既然没有消费方，这个报错**不会发生**：
-  实测 2026-08-09 18:35（Linux/amd64，`origin/main` 基线构建），`filesystem_mode: native`
-  正常启动、无任何告警（`timeout 3` 杀掉，rc=124）；反向对照填 `Native`（大写）
-  rc=1 报「非法取值」，说明这个探针有鉴别力、不是恒真。
-  **顺带一条接线后才会显现的事实**（写在这里免得日后被当成回归）：POSIX 平台对
-  `dos_attributes` 的探测恒为 `false`（`internal/oscap/probe_linux.go` /
-  `probe_darwin.go` 的 `CapDOSAttributes` 无条件 `return false`，因为 POSIX 没有存放
-  DOS 属性位的地方；macOS 上 `sparse_file` 目前同样恒 `false`），
-  而 `native` 档的契约是「有一项不支持就报错、不降级」——两者相乘意味着
-  **一旦接线，`native` 在 Linux/macOS 上会恒定启动失败，它实际只对 Windows 有意义**。
-- ⚠️ `configs/example.yaml` 对 `filesystem_mode` 的注释此前是按**设计意图**写的，
-  没提它当前无运行期效果，读者照着改会以为生效。**本版本已在该段补上「实际行为」
-  三条**（无消费方 + `go list -deps` 复算命令、`native` 不报错的实测、接线后 POSIX
-  上 `native` 必失败），两处口径现已一致。
+- ✅ **oscap 已进入真实数据路径**，`filesystem_mode` 对已接线的那两项**真的有运行期效果**。
+  三条互相独立、可一行复算的判据：
+  1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（接线前是 1）——
+     `internal/oscap`、`oscap/native`、`oscap/builtin` 三个包**都真被链进发布二进制**。
+     这是最硬的一条：链接依赖是编译器算出来的事实，测试可以写得很漂亮却测不到真实路径，
+     而这个数字伪造不了。
+  2. 包外真实调用点由 **1 → 9**（接线前唯一那处还是 `internal/config/validate.go`
+     为了 `ParseMode` 而引，属于校验字符串，不是使用能力）。原样可粘贴：
+     `grep -rn 'oscap\.Open\|oscap\.ParseMode\|native\.New\|builtin\.New\|caps\.Xattr()\|caps\.Streams()' --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'`
+  3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` 的**活调用清零**（9 → 0），
+     `internal/vfs/xattr_unix.go`(-211) 与 `xattr_other.go`(-23) **已整文件删除**。
+     注意裸跑 `grep -rn 'newXattrAccessor\|readMetaXattrFast' --include='*.go' .` 得到的是
+     **1** —— 那唯一一处是 `internal/vfs/oscap_xattr.go:131` 的注释，讲「旧签名那个 error
+     返回值为什么没了」，不是调用；要复算出 0 得再接 `| grep -v '^[^:]*:[0-9]*://'`。
+     判据写到能原样粘贴为止，否则读者跑出 1 只会以为本块在撒谎。
+- ✅ **已接的两项**：`CapXattr`（A 组 6 处调用点）与 `CapNamedStream`（B 组 4 处）。
+  B 组走 `Streams()` 而不是 `Xattr()`，是因为 `oscap/native/posix.go` 的
+  `reservedStreamPrefix="DosStream."` 会拒掉 `DosStream.<name>:$DATA` 这种键。
+- ⚠️ **仍未接线的四项**：`CapSparse` / `CapStableFileID` / `CapCreationTime` /
+  `CapDOSAttributes`。对这四项而言，`filesystem_mode` **依然没有运行期效果**。
+  不要把本条读成「oscap 已接线」——**是 2/6，不是 6/6**。
+- ⚠️ **行为变更，显式配置 `native` 的用户会受影响**：接线前 `native` 是 no-op 所以能
+  正常启动；接线后它在 **linux / darwin / windows 三个平台上都会恒定启动失败，与文件
+  系统无关**（探测代码不看任何文件系统，是无条件 `return false`）。**真二进制 + `-config`
+  成对黑盒对照**（2026-08-09 19:42 CST，同一份配置只改 `filesystem_mode` 一个字段）：
+
+  | 二进制 | `native` | `auto` | `portable` |
+  |---|---|---|---|
+  | main `762e335`（未接线） | 启动成功 | 成功 | 成功 |
+  | 本版 `37f0c0f`（已接线） | **启动失败** | 成功 | 成功 |
+
+  上排三格全绿 = 接线前三档行为完全一样（排除「探针恒真」的假阳性）；下排 `native` 那格
+  进程**直接退出**，日志里没有「SMB 服务已监听」那行，报：
+
+  ```
+  stupidsamba: shares[0] "s": oscap: filesystem_mode: native 要求全部能力走原生实现，
+  但 "…" 所在的文件系统不支持: dos_attributes
+  ```
+
+  根因是每个平台都有至少一项能力被源码**硬编码**为不支持（linux/darwin 的
+  `dos_attributes`、darwin 还有 `sparse_file`、windows 的 `xattr` ——
+  `internal/oscap/probe_windows.go:24` 无条件 `return false`），而 `native` 的契约是
+  「有一项不支持就报错、不降级」，三家相乘即没有任何平台可用。**默认值是 `auto`**
+  （`internal/oscap/mode.go:30` `DefaultMode = ModeAuto`），所以没有显式写 `native` 的
+  用户不受影响；撞上的人改用 `auto`（逐项降级）或 `portable`（全部 builtin）。
+- ⚠️ **当前报错文案的归因是错的**：它说「所在的**文件系统**不支持 dos_attributes」，
+  而真相是**本平台压根没有 native 实现**，换任何文件系统都无效。照这句话去换盘是白折腾。
+  修复归属 oscap-wire，排在 v0.2.0 之后（改它要动 `oscap.UnsupportedError` 的结构）。
 <!-- END-OSCAP-WIRING-STATUS -->
 
 ### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
@@ -297,13 +334,26 @@
   **降的是验收要求，不是功能**：Apple 扩展代码全部保留、单测与协议级用例继续跑。
   反过来说，这条也意味着**该定级短期内不会有新证据**——不要因为版本号往前走
   就推断它变可靠了。
-- **`filesystem_mode` 三档目前等价**（接线状态见上节 `BEGIN-OSCAP-WIRING-STATUS` 块，
-  那是单一真相块；本行不再重复判据）：port、`native/`、`builtin/`、portable CI 门禁
-  **四块都已建成并有测试**，但**没有一处产品代码调用它们**，两个适配器根本没被链进发布二进制。
-  选 `auto` / `native` / `portable` 跑起来行为完全一样。**唯一缺的是接线**
-  （把 `internal/vfs` / `internal/server` 改为经由 port 取能力）—— 此事无版本承诺，
-  以真正合入 `main` 的那一版为准。在接线之前不要根据这个开关下任何部署结论，
-  尤其**不要因为「native 适配器已经写好了」就以为设成 `native` 会走原生路径**。
+- **`filesystem_mode` 只对已接线的两项生效，另外四项仍然等价**
+  （接线状态见上节 `BEGIN-OSCAP-WIRING-STATUS` 块，那是单一真相块；本行不再重复判据）：
+  `CapXattr` 与 `CapNamedStream` 已接进 `internal/vfs` 的真实数据路径，改这个开关**会**
+  改变这两项的行为；而 `CapSparse` / `CapStableFileID` / `CapCreationTime` /
+  `CapDOSAttributes` 四项**尚无产品调用点**，对它们而言三档跑起来仍旧完全一样。
+  也就是说，**「设成 `portable` 就整机不碰宿主特性」这个结论目前还不成立**——
+  只有那两项真的换了实现。剩余四项无版本承诺，以真正合入 `main` 的那一版为准。
+- **D-native（待决）：接线落地后 `native` 档在任何平台都启动不了。**
+  **先说清适用范围**：本条描述的是**接线之后**的行为，而接线已由 PR #159 在本版本落地 ——
+  也就是说它**现在就成立**，不再是「将要发生」。（写这条时接线尚未合入，当时 `native`
+  仍然启动成功，即上节表格上排三格全绿；那一排现在只剩「接线前」的历史对照价值。）
+  默认值是 `auto`，**没有显式写 `native` 的用户不受影响**，所以它不是普遍性缺陷；
+  登记在这里是因为撞上的人除了那句报错没有任何别的提示，而那句报错的归因还是错的。
+  根因、逐平台出处与可复算判据见上节 `BEGIN-OSCAP-WIRING-STATUS` 块（单一真相，不在此重复）；
+  一句话是：`native` 要求六项全走原生，而 linux / darwin / windows **各自都有**至少一项被
+  硬编码成不支持。**待决的是取舍，不是事实**——三个方向都改动了合同，需要有人拍板：
+  (a) 维持现状，把 `native` 明确记为「保留档位，当前无可用平台」，文档不再宣称它可用于排障；
+  (b) 放宽为「只对**已接线**的能力强制 native」，代价是 `native` 不再等于「六项全原生」；
+  (c) 补齐缺的那几项 native 实现（darwin `F_PUNCHHOLE`、DOS 属性的原生承载），代价最大。
+  **在拍板之前，任何文档都不要写「`native` 用于测试和排障」**——那句话接线后即成假话。
 - ~~**6 个带 `!linux && !darwin && !windows` 约束的文件从未被任何一关编译过**~~
   —— **已修复，本条不再是已知问题**（`e664a47`：`vfs: 判据抽成纯函数并补自身反向对照
   + check-test-compile 补 freebsd 编译盲区`）。留下记录是因为它的**形态**值得记住：
@@ -317,16 +367,37 @@
   （判据：`git show origin/main:test/ci/check-test-compile.sh | grep 'for t in'`
   → 末尾含 `freebsd/amd64`；且该处注释写明「故意多出来的一档，不在 C7 支持矩阵里，
   别当成手滑删掉」）。
-  ⚠️ **但这一档目前没有反向对照**：`test/ci/check-test-compile.sh:113` 的注释写着
-  「负向对照见 `test/ci/negative-verify.sh` 的 freebsd 段」，而那个文件里
-  **一处 `freebsd` 都没有**（判据：`git show origin/main:test/ci/negative-verify.sh
-  | grep -c freebsd` → **0**，实测 2026-08-09 18:59 CST）。也就是说：这一档若哪天
-  被人从平台列表里删掉、或被 `continue` 提前跳过，**没有任何一关会变红**——
-  按本仓库自己的标准（「一个从来没红过的门禁，和没有门禁是一回事」），
-  它现在只是「跑了」，还谈不上「有牙」。
-  本条不改脚本（那是 vfs-deflake 的文件），只如实登记：这是本仓库「写了但从未被验证过」
-  的**第 10 例**，且形态与前 9 例不同——前 9 例是**代码**没被执行，这一例是
-  **注释里引用了一个不存在的实体**，读者会据此以为反向对照已经存在而不再去补。
+  反向对照也已补齐（`08cfa27` / PR #160，19:08:59 CST），且是**三向**的：
+  `test/ci/negative-verify.sh` 第 6 节往 `internal/oscap/native/native_other.go`
+  注入一个类型错误，验 **6a** 干净树全绿、**6b** 新门禁必须变红**且报错点名
+  `not an int`**（排除「因别的原因红」的假阳性）、**6c** 只用旧四平台编译同一份故障
+  **变回绿**——最后这一条正是「洞确实存在过」的证据。整节无 skip 门控，默认路径直跑。
+  判据（按稳定锚点定位，不用节号也不用计数）：
+
+  ```sh
+  grep -n 'ANCHOR: freebsd-fallback-files' test/ci/negative-verify.sh   # rc=0 即该节在位
+  sh test/ci/negative-verify.sh                                          # 20:19 CST 实跑：40 通过 / 0 失败
+  ```
+
+  > **⚠️ 这里原本写的是「`grep -c -i freebsd …` → 8」，20:21 CST 复算时发现它在本 PR 自己
+  > 的分支上已经变成 **11** —— 因为**我在同一个 PR 里给那节加了锚点注释，注释里又提了
+  > 三次 freebsd**。也就是说：**我亲手把自己写的判据数改掉了，而且是在同一个 PR 内。**
+  > 这是同一形态今天的第三次复发，前两次分别隔了 90 秒和几十分钟，这次间隔是**零** ——
+  > 断言与破坏它的改动躺在同一个 diff 里。
+  > 教训因此再收紧一层：**判据不要绑在「会随任何编辑漂移的计数」上。**
+  > 计数型判据（`grep -c`、行数、文件数）只适合一次性核对，不适合写进长期文档；
+  > 长期文档要绑**稳定锚点**或**命令的退出码**，它们不会因为有人多写一行注释就变。
+  ⚠️ **本条曾在 `main` 上短暂写反，留下记录当教训**：`84e5d71`（19:10:29）里这段原文写的是
+  「这一档目前没有反向对照…`grep -c freebsd` → **0**，实测 18:59 CST」，
+  而补丁 `08cfa27` 在 **19:08:59** 就已合入——**比我的文档落地早 90 秒**。
+  也就是说那句断言**在进入 `main` 的那一刻就已经是假的**，尽管它带了判据、带了时间戳、
+  当时也确实实测过。教训不是「要写可证伪的断言」（那条已经做到了），而是新的一条：
+  **可证伪断言必须在合入前重跑一次，写作时刻的真不等于合入时刻的真**——
+  尤其当你登记的正是「某人应该去修的缺口」时，那个人很可能就在这几分钟里修好了。
+  形态上它属于本仓库「写了但从未被验证过」清单的**第 10 例**（前 9 例是**代码**没被执行，
+  这一例是**注释里引用了一个不存在的实体**：`check-test-compile.sh:113` 当时指向的
+  `negative-verify.sh` freebsd 段尚不存在，读者会据此以为对照已有而不再去补）——
+  该形态已修复，但**它派生出的「断言时效性」问题在本条身上真实复发了一次**，故一并留档。
 - **非 Windows 平台仍无元数据旁路兜底**：`internal/vfs/metadata_other.go` 直接
   返回 nil。宿主文件系统不支持 xattr 时（FAT32/exFAT 外置盘、`nouser_xattr` 挂载、
   只读根）这些元数据会**静默丢失**且不报错。这是 v0.3.0 builtin 完整化的第一优先级。

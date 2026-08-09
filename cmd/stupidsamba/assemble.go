@@ -17,6 +17,7 @@ import (
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
 	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 	"github.com/finalappstore/stupidsamba/internal/smb/command"
 	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
@@ -100,11 +101,25 @@ func buildAuth(cfg *config.Config) (auth.Provider, error) {
 func buildShares(cfg *config.Config) ([]*command.Share, error) {
 	out := make([]*command.Share, 0, len(cfg.Shares)+1)
 
+	// filesystem_mode 是全局策略，在这里解析一次。
+	//
+	// 配置校验层（internal/config/validate.go）已经用同一个 ParseMode 拦过非法值，
+	// 这里再解析一次是因为**校验结果没有被带下来** —— 校验层只回答"合不合法"，
+	// 不产出 oscap.Mode。重复解析而不是让校验层返回，是为了不让 config 包
+	// 在类型上依赖 oscap 的枚举（它现在只依赖一个校验函数）。
+	mode, err := oscap.ParseMode(cfg.FilesystemMode)
+	if err != nil {
+		return nil, err
+	}
+
 	for i := range cfg.Shares {
 		s := &cfg.Shares[i]
 		fs, err := vfs.NewLocalFS(vfs.LocalConfig{
 			Root:     s.Path,
 			ReadOnly: s.ReadOnly,
+			// 逐共享探测：同一次运行里 /srv/ext4 可以走 native、
+			// /mnt/exfat 落到 builtin（oscap.SelectMatrix 按共享根目录探测）。
+			FilesystemMode: mode,
 			// SMB 语义要求大小写不敏感查找：Windows 客户端经常用与磁盘上
 			// 不同的大小写打开文件（MS-SMB2 §3.3.5.9）。
 			CaseInsensitive: true,

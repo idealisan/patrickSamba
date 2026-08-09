@@ -1,11 +1,31 @@
 ---
 name: CNB PR API 的调用方式 + null 陷阱 + 判「合并会带来什么/合没合/SHA 在不在」三条命令的分工
-description: cnb.cool 创建/更新/合并 PR 的写法（merge 用 PUT、更新用 PATCH 否则 404、参数名 merge_style、commit_title 必填、都要 Accept: application/json）；CNB 的 null 陷阱（PR 的 merged 与 Release 的 latest 恒为 null，null 表示「不回答」不是「否」）；判定改动是否进主干时两点 diff 会造出「大规模删除」幻觉、三点 diff 与祖先判定在 squash 下双双假阴性，最终判据只有内容
+description: cnb.cool 创建/更新/合并 PR 的写法（merge 用 PUT、更新用 PATCH 否则 404、参数名 merge_style、commit_title 必填、都要 Accept: application/json）；裸写 #N 有歧义（TaskList 任务 ID 与 PR 号两套编号空间在小号段撞车，查到的是无关对象且返回 200）；CNB 的 null 陷阱（PR 的 merged 与 Release 的 latest 恒为 null，null 表示「不回答」不是「否」）；判定改动是否进主干时两点 diff 会造出「大规模删除」幻觉、三点 diff 与祖先判定在 squash 下双双假阴性，最终判据只有内容
 type: reference
 ---
 
 仓库托管在 CNB（cnb.cool），PR 走 REST API。环境变量 `$CNB_TOKEN`、`$CNB_REPO_SLUG`
 （值 `finalappstore/stupidSamba`）容器里已有，**token 不要打印、不要落盘**。
+
+## ⚠️ 先看这条：裸写 `#N` 是有歧义的，本项目有两套编号空间
+
+**TaskList 的任务 ID 和 CNB 的 PR 号各自从 1 开始，在小号段重叠。**
+写消息时一律带前缀：**`task #20`** / **`PR #171`**，不许裸写 `#20`。
+
+实例（2026-08-09 19:56）：docs-honesty 写「我建了 #20 接管 fix-forward」，指的是
+TaskList 里的 `task #20`（pending，「#159 合入后核验四处可替换块」）。pm 按引用纪律去查
+`PR #20`，查到的是一个**真实存在但完全无关**的已关闭 PR（「server: durable handle v1/v2…」，
+author=OCI）。pm 据此判定「编号错了」并拦下，往返两封消息才澄清。
+
+**这个坑比「指向不存在的东西」更阴**：编号撞车时 API **正常返回 200**，你拿到一个语义自洽、
+读起来也像那么回事的对象，没有任何一处报错——属于「成功回显 ≠ 事情真的发生」的变体，
+这次是**查到了，但查的不是你要的那个**。
+
+**而且它会随时间自己隐身**：等 PR 号涨过当前最大任务号，同一句 `#20` 就再也不会被误解，
+坑消失但纪律没建立，下次在新一轮编号重叠时复发，且更难反应过来。所以前缀要**一直**写，
+不是「等号段重叠时才写」。
+
+判据：看到别人写的裸 `#N` 且 N 较小时，**两边都查一遍**再下结论，不要只查 PR 就断言对方错。
 
 创建 PR（`POST`）：
 
@@ -46,6 +66,29 @@ cnb pulls patch-pull --repo finalappstore/stupidSamba --number 35 \
 查 CI 失败日志：`cnb pulls get-ci-logs --sn <构建号>`（构建号从 `scripts/ci-status.sh`
 打印的 buildLogUrl 尾段取）。它会直接列出每个 stage 的成功/失败/skipped 与失败处日志，
 比翻网页快，也比 build/logs 接口好用（后者拿不到 stage 级明细）。
+
+## ⚠️ `build/logs` 的 pipeline 计数字段：`totalCount` = 定义数，不是执行数
+
+`GET /-/build/logs?sourceRef=<ref>` 返回体在 `data` 键下（**不是顶层 list**，直接
+`json.load()[i]` 会 `AttributeError: 'str' object has no attribute 'get'`）。每条记录有三个计数：
+
+| 字段 | 含义 | 实测（2026-08-09） |
+|---|---|---|
+| `pipelineTotalCount` | `.cnb.yml` 里**定义**了几条 pipeline | push 与 pull_request **都是 1** |
+| `pipelineSuccessCount` | 真正**执行并通过**的 | push=**0**，pull_request=**1** |
+| `pipelineFailCount` | 执行并失败的 | 都是 0 |
+
+**判「有没有真的跑门禁」只能看执行数 `success+fail`，不能看 `totalCount`。**
+被 `ifModify` 跳过的 pipeline **仍计入 total**（它被定义了），但 success/fail 都是 0。
+所以 `total=1 且 success=0` 的含义是「定义了门禁但本次没执行」，**不是「有一条门禁跑了」**。
+
+这正是「报绿但什么都没跑」的数据层原相：`totalCount` 看着有 1 条，让人以为「有覆盖」，
+实际执行数是 0。任何用 build/logs 判「这次改动被门禁验过没有」的脚本/夹具，
+**判据必须是 `success+fail>=1`，用 `totalCount` 会永远为真（total 恒 1），验不出这个坑**。
+
+同源：同一个 SHA 的 `push` 与 `pull_request` 两条记录执行数可以相反（push 因增量是文档被跳过、
+PR 比 main 全量跑）。判「能不能合」取 **pull_request** 那条，见 ci-trigger 的
+`reference_cnb_push_pr_diff_baseline.md`。
 
 **会直接失败的坑**（不是 GitHub 那套，别照 GitHub 的记忆写）：
 

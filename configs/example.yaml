@@ -33,29 +33,47 @@
 # 拿不准就留着 auto。取值**大小写敏感**，写成 Auto / PORTABLE 会启动报错
 #（本项目一律不静默纠正配置，免得你以为设的是 A、服务在按 B 跑）。
 #
-# ⚠️ 上面写的是**设计语义**，下面是**你手上这一版的实际行为**，两者目前不一致：
+# BEGIN-OSCAP-WIRING-STATUS-YAML：本段与 CHANGELOG.md、README.md、AGENTS.md §1.2 的
+# 同名块是**一套四处**，接线 PR 合入后四处都要改。全部落点一次找齐：
+#     grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/'
 #
-#   1) 本开关**尚无运行期消费方**，三档跑起来行为完全一样。
-#      抽象接口与两套适配器都已合入并有 CI 覆盖，但数据路径还没改为经由它们取能力。
+# ⚠️ 上面写的是**设计语义**，下面是**你手上这一版的实际边界**（2026-08-09，PR #159）。
+# 这一段上一版写的是「本开关尚无运行期消费方、三档行为完全一样」，那个说法**已作废**：
+#
+#   1) 本开关目前**只对 6 项能力里的 2 项**真正有效：**扩展属性（xattr）与命名流**。
+#      对这两项三档行为确实不同：portable 一个扩展属性都不往宿主上写（数据进旁路存储），
+#      auto 在支持 xattr 的宿主上真的走原生。
 #      自行复算（编译器给的依赖闭包，比 grep 硬）：
 #          go list -deps ./cmd/stupidsamba | grep -c oscap
-#      结果为 1 就表示只有接口包被链进二进制，native/ 与 builtin/ 都不在里面。
-#      本版本的接线范围以真正合入 main 的内容为准，此处不做预告。
+#      现在是 **3**（internal/oscap + oscap/native + oscap/builtin 全被链进二进制）；
+#      接线前是 1，即两个适配器压根不在发布二进制里。
 #
-#   2) `native` 目前**不会**兑现它自己报错文案里的「不支持则启动报错」。
-#      实测 2026-08-09 18:35（Linux）：填 native 正常启动、无任何告警；
-#      反向对照填 Native（大写）rc=1 报非法取值，说明探针有鉴别力，不是恒真。
+#   2) 其余四项（稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）**仍无运行期消费方**，
+#      对它们三档跑起来行为完全一样，数据路径仍走各自那份旧实现。
+#      也就是说准确口径是「6 项接了 2 项」，不是「这个开关已经生效了」。
 #
-#   3) 接线之后，`native` 在 **Linux/macOS 上会恒定启动失败**，它实际只对 Windows 有意义。
-#      这不是 bug 而是两条设计相乘的必然结果：native 档的契约是「有一项不支持就报错、
-#      不降级」，而 POSIX 平台对 dos_attributes 的探测**恒为 false**
-#      （internal/oscap/probe_linux.go / probe_darwin.go 里 CapDOSAttributes 无条件返回
-#      false —— POSIX 根本没有存放 DOS 属性位的地方；macOS 上 sparse_file 目前同样恒 false）。
-#      所以**不要**把 native 当成「Linux 上钉死走原生路径」的手段，那条路不存在；
+#   3) `native` 接线后在 **linux / darwin / windows 三个平台上都会恒定启动失败**，
+#      与文件系统无关。这不是 bug 而是两条设计相乘的必然结果：native 档的契约是
+#      「有一项不支持就报错、不降级」，而**每个平台都有至少一项能力被源码硬编码为不支持**：
+#      linux/darwin 的 dos_attributes、darwin 还有 sparse_file、**windows 的 xattr**
+#      （probe_windows.go:24 无条件 return false，不拿 NTFS ADS 冒充 xattr）——
+#      三家相乘，没有任何一个平台能让 native 起来。
+#      所以**不要**把 native 当成「钉死走原生路径」的手段，那条路在任何平台都不存在；
 #      用 auto 即可，它本来就会逐项优先选原生。
+#      实测 2026-08-09 19:04（Linux/amd64）：填 native → 进程 rc=1，报
+#      「filesystem_mode: native 要求全部能力走原生实现，但 "<共享路径>" 所在的
+#      文件系统不支持: dos_attributes」；同一份配置改 portable / auto 均正常启动。
+#      ⚠️ 那句报错的**归因是错的**：它说「所在的文件系统不支持」，真相是**本平台压根
+#      没有这一项的原生实现**，换个文件系统一样失败。归因文案的修正排在 v0.2.0 之后。
+#      ⚠️ 本条上一版写的是「native 只对 Windows 有意义」，那是错的 —— 当时只查了 POSIX
+#      两家就外推第三家。形态与教训见 docs/v020-honesty-audit.md 里的锚点
+#      `ANCHOR: half-done-elimination`（按锚点名引用，不用节号）。
 #
-# 想确认某一项到底落在 native 还是 builtin：目前**没有**任何启动日志会打印这个能力矩阵
-#（全仓搜不到相关日志点），只能读代码或跑 internal/oscap 的测试。别去日志里找。
+# 想确认某一项到底落在 native 还是 builtin：**没有**任何启动日志会打印这个能力矩阵
+#（全仓搜不到相关日志点），别去日志里找。程序内可以问
+# vfs.LocalFS.CapabilityMatrix()，它报的是该共享**实际**在用哪一侧 ——
+# 注意这跟「配置里填了什么」是两回事，后者证明不了任何事。
+# END-OSCAP-WIRING-STATUS-YAML
 filesystem_mode: auto
 
 server:

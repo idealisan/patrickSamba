@@ -178,35 +178,56 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
 | builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
 | portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
-| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ❌ **无**（截至 2026-08-09 18:35 CST 的当下事实；`CapXattr` 接线 PR 合入 `main` 后此格改写）。全仓唯一引用 oscap 的产品代码是 `internal/config/validate.go`，且只用于 `oscap.ParseMode` 校验配置字符串。见下方「已建成 ≠ 已生效」 |
+| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **部分有**（截至 2026-08-09 19:10 CST）。PR #159 把 `CapXattr`（6 处）与 `CapNamedStream`（4 处）接进了 `internal/vfs` 的真实数据路径，`cmd/stupidsamba` 的装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**（接线前 1）。**但六项能力只接了两项**，`CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 仍无消费方。见下方「已建成 ≠ 已生效」 |
 
 上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
 2026-08-09 的一轮文档审计核实：**双适配器与 portable CI 门禁已于 v0.2.0 期间全部合入**，
 上一版这里写的「开发中 / 未完成」已过期，故就地订正。
 
-**⚠️ 已建成 ≠ 已生效（v0.2.0 的实际边界，落笔前务必知道）**：
-六项能力的两套适配器都造好了、都有测试、portable 门禁也在 CI 里真跑，
-但**整个 oscap 子系统至今没有任何产品调用点**，
-所以 `filesystem_mode` 三个取值在 v0.2.0 运行期**行为完全一样**。
-四条互相独立的判据（2026-08-09 18:07~18:15 CST 实测，可自行复算）：
+<!-- BEGIN-OSCAP-WIRING-STATUS-AGENTS：本段与 CHANGELOG.md、README.md、configs/example.yaml
+     的同名块是**一套四处**，接线 PR 合入后四处都要改，只改一处会在另外三处留下过期陈述。
+     一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
+**⚠️ 已建成 ≠ 已生效：v0.2.0 接了 6 项里的 2 项（落笔前务必知道）**：
+六项能力的两套适配器都造好了、都有测试、portable 门禁也在 CI 里真跑。
+**PR #159 之前**，整个 oscap 子系统没有任何产品调用点，`filesystem_mode` 三个取值
+运行期行为完全一样；**现在这句话只对剩下的四项成立**。
 
-1. `go list -f '{{.ImportPath}} {{.Imports}}' ./... | grep oscap` —— 全仓只有
-   `internal/config` import 了 `internal/oscap`（为了 `ParseMode`），
-   **没有任何包** import `oscap/native` 或 `oscap/builtin`。
-2. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **1** —— 两个适配器
-   **根本没被链进发布二进制**。
-3. `grep -rn 'oscap\.Open\|oscap\.New\|SelectMatrix\|ProbeNative\|native\.New\|builtin\.New' --include='*.go' . | grep -v '^./internal/oscap/'`
-   —— 包外唯一命中是 `internal/config/config.go:25` 的一句**注释**，零个真实调用。
-4. `FilesystemMode` 在产品代码里只出现在 `internal/config/defaults.go:48-49`（填默认值）
-   与 `internal/config/validate.go:238-245`（校验取值），**没有运行期消费者**。
+现状（2026-08-09 19:10 CST 实测，四条判据可自行复算）：
 
-真实数据路径仍走各自那份旧实现，与 oscap 并存但互不相干（例如 xattr 在数据路径上是
-`internal/vfs/xattr_unix.go`，`internal/oscap/native/xattr_posix.go` 是另一份、无人调用）。
-**接线时必须一并拆掉旧的那份**，否则会重演 `internal/meta` 与
+1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（接线前 1）——
+   `internal/oscap`、`oscap/native`、`oscap/builtin` **都已链进发布二进制**。
+   这是最硬的一条：链接依赖由编译器算出，测试写得再漂亮也可能没走真实路径，这个数字不会骗人。
+2. 包外真实调用点 **1 → 9**。判据要给到能原样粘贴执行的程度，否则读者数出来对不上
+   就只能猜谁错了（本条初稿写的是 8，就是漏了 `oscap_xattr.go` 里两个 factory 各算一处）：
+
+   ```sh
+   grep -rn 'oscap\.Open\|oscap\.ParseMode\|native\.New\|builtin\.New\|caps\.Xattr()\|caps\.Streams()' \
+     --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'
+   ```
+
+   接线前唯一那处是 `internal/config/validate.go` 的 `oscap.ParseMode`，那是校验配置
+   字符串，**不是使用能力**——「有人 import」和「有人用」是两回事，
+   这一条当初就是这么被误读的。
+3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` **活调用 9 → 0**，
+   `internal/vfs/xattr_unix.go`、`xattr_other.go` **已整文件删除**（R11 双写消除）。
+   注意裸跑 `grep -rn 'newXattrAccessor\|readMetaXattrFast' --include='*.go' .` 会得到
+   **1**，那一处是 `internal/vfs/oscap_xattr.go:131` 的注释（讲旧签名的 error 返回值
+   为什么没了），不是调用；要得到 0 得再接一段 `| grep -v '^[^:]*:[0-9]*://'`。
+4. `FilesystemMode` 由 `cmd/stupidsamba` 装配层**逐共享**下传给 `NewLocalFS`，
+   不再只是被校验一下就丢掉——**这一步才是让配置项真正有反应的那一环**。
+
+**但只接了 `CapXattr` 与 `CapNamedStream` 两项。** `CapSparse`、`CapStableFileID`、
+`CapCreationTime`、`CapDOSAttributes` 四项仍无产品调用点，对它们而言
+`filesystem_mode` 依旧没有运行期效果。**不要把本节读成「oscap 已接线」——是 2/6。**
+
+接线时必须一并拆掉旧的那份实现（本次已对 xattr 做到），否则会重演 `internal/meta` 与
 `internal/vfs/metadata_windows.go` 的双实现撞车（风险 R11）。
 
-顺带一条给写文档的人：`configs/example.yaml:21-35` 对 `filesystem_mode` 的注释是**按设计意图**
-写的（「逐项探测宿主支持情况」），没有提示它当前无运行期效果。改动那里之前先读本段。
+顺带一条给写文档的人：`configs/example.yaml` 里 `filesystem_mode` 上方那段注释的**前半截**
+是**按设计意图**写的（「逐项探测宿主支持情况」）；后半截才是实际行为，已用
+`BEGIN-OSCAP-WIRING-STATUS-YAML` 标记圈出。改动那里之前先读本段。
+（此处**故意不写行号**：行号会随上下文增删而腐烂，用标记名 grep 才是稳定的定位方式。）
+<!-- END-OSCAP-WIRING-STATUS-AGENTS -->
 
 **前置要求（portable 必须在 CI 里真跑）—— 已满足，原文保留作为判据说明**：
 `portable` 模式必须**在 CI 里真跑一遍**，不能只是配置项里多一个取值。
