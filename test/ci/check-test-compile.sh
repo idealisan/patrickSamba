@@ -41,7 +41,7 @@ export PATH
 
 # 本仓库用到的全部 build tag。新增 tag 时必须同步加到这里，
 # 否则新 tag 下的文件又会变成没人编译的死角。
-TAGS=integration,smoke
+TAGS=integration,smoke,qadefect
 
 # ------------------------------------------------------- 0. tag 清单自检
 #
