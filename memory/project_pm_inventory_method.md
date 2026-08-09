@@ -312,3 +312,109 @@ git ls-remote origin 'refs/rescue/*'             # 保命用的 rescue ref，前
 
 顺带：误报的代价不比漏报小 —— 它让 team-lead 去处置一个已经解决的问题，
 而真正的敞口（`oscap-wire` 的在途文件）反而被稀释在同一条消息里。
+
+## ⚠️ 「净化分支」是一次静默删除：重建后必须对旧 head 做全量去向核对
+
+把一条脏分支（混了 merge 提交、别人的内容、跑偏的记忆文件）重建成干净分支的标准手法是
+**从 `origin/main` 新开一条，只 cherry-pick 自己那几笔**。这一步的语义是
+**「白名单保留」**，也就是**没被点名的东西一律消失**，且不留任何痕迹 ——
+`git status` 干净、编译通过、测试全绿、PR diff 变漂亮，**没有一个信号会提示你删过东西**。
+
+**Why**：2026-08-09 `oscap-wire` 净化 PR #159（`37f0c0f` → `6309e0c`）时，
+预期删掉的是两处 merge 噪声，实际连带删掉了 `memory/project_port_wiring_acceptance.md`
+（4528 字节，自己刚写的接线验收判据）和它在 `MEMORY.md` 里的索引行。
+**1 小时 40 分钟无人发现**，连本人的记忆工作副本里也一并没了 ——
+它当时唯一的存身之处是净化前顺手推的 `refs/rescue/oscap-wire-pr159-precleanup`。
+若当初省掉那个 rescue ref，这份记忆就随净化永久蒸发，而且**没有任何人会收到通知**。
+
+**How to apply**：净化/重建分支固定三步，第 3 步不许省——
+
+```sh
+git push origin "旧head:refs/rescue/<角色>-precleanup"      # 1. 旧 head 先上远端
+# 2. 从 origin/main 新开分支，cherry-pick 自己的提交
+git diff --name-only <旧head> <新head>                       # 3. 逐个文件判「该不该消失」
+```
+
+第 3 步的输出会同时包含「本来就该没有的（别人的内容/merge 噪声）」和
+「误伤（自己的产物）」，**两者在 diff 里长得一模一样，只能逐条人工判归属**。
+判归属的快捷判据：`git log --oneline <旧head> -- <该文件>` 看最后一笔是谁写的。
+
+**母题**：这与本文件「数量减少 ≠ 成果丢失」是同一枚硬币的反面 ——
+那条讲**不要**把搬迁误判成删除，这条讲**不要**把真删除当成清理成功。
+两条共用同一个动作：**别看聚合信号（diff 变干净了/计数掉了），去做逐项去向核对。**
+
+## 「推了」和「排进队列了」是三层，每层都会漏一批
+
+盘点交付物不能只看 PR 列表。三层各有漏网形态，都真实发生过：
+
+| 层 | 漏网形态 | 判据 | 实例 |
+|---|---|---|---|
+| 1 | 只在磁盘，没推 | 各 worktree `git log --oneline @{u}..HEAD` 有输出 | 见上文 qa-e2e / tm-handle |
+| 2 | 推了，**没开 PR** | 远端有分支，PR 列表里查不到 | `docs-honesty/memory-buffer`（oscap-wire 抓到）、`ci/vscode-patch-hook`（f47da5c，只改 .cnb.yml +22 行） |
+| 3 | 有 PR，但**不在发布序列里** | PR open 却没人排它 | 上面两条被发现后才补进队列 |
+
+扫第 2 层（推了但没 PR）：
+
+```sh
+git fetch -q origin
+for b in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v HEAD); do
+  n=$(git rev-list --count origin/main..$b 2>/dev/null)
+  [ "${n:-0}" -gt 0 ] && echo "$b  +$n"
+done
+```
+已合的分支 count 为 0，不会误报；输出逐条对 PR 列表，对不上的就是孤儿分支。
+
+### 孤儿分支的耦合风险比漏合本身更贵
+
+合一条被遗忘的分支时，**它可能推翻文档里某句当前为真的话**。
+实例：`ci/vscode-patch-hook` 把 `patch-codebuddy.sh` 挂进 `.cnb.yml`，
+而 AGENTS.md §10.3 第 12 条正写着「挂接还没进 main，所以开工第一件事仍需手工跑一次」，
+并附可复算判据 `grep -c patch-codebuddy .cnb.yml → 0`（实查确为 0，该句当前为真）。
+**合入当天那句话就变成假的。**
+所以孤儿分支进队列时必须连带问一句：**「它会让哪句已写下的话失效？」**
+失效的那句要**同 PR** 改掉，否则就是块外腐烂。
+
+### squash 时代判「是否已合」只有两条能用
+
+CNB 自 2026-08-09 17:17 起默认 squash，于是：
+`is-ancestor <分支tip> origin/main` **恒 rc=1**（假红），
+`git log | grep 'Merge pull request'` **恒有命中**（假绿）。两条都废了。
+
+```sh
+# 权威：CNB API 的 is_merged（注意 state=closed 不等于合了，可能是关闭）
+curl -s -H "Authorization: Bearer $CNB_TOKEN" \
+  "https://api.cnb.cool/<owner>/<repo>/-/pulls/<N>" | grep -o '"is_merged":[a-z]*'
+# 最硬：拿该分支独有的文件做逐字节比对
+git diff --quiet origin/main origin/<分支> -- <该分支独有的文件> && echo 已合
+```
+实例：`#152` 的 `is-ancestor` = rc=1（看着没合），而
+`git diff --quiet ... -- scripts/env/patch-codebuddy.sh` = SAME、API `is_merged=True` —— 早就合了。
+
+### 自我更正：分支扫描证明不了「没有 PR」
+
+我用上面那段扫描发现 `ci/vscode-patch-hook` 领先 main，就向全队宣布它是「没有 PR 的孤儿分支」。
+**错。它是 PR #166（open）。**
+分支扫描只能证明「分支存在且领先 main」，**证明不了「没有 PR」** —— 后者必须查 PR 端点。
+用**不完整的方法**下**完整的结论**，是本文件反复讲的同一个错误，这次是我自己犯的。
+
+正确判据：扫出来的分支逐条查 PR，查不到才是孤儿。
+```sh
+curl -s -H "Authorization: Bearer $CNB_TOKEN" \
+  "https://api.cnb.cool/<owner>/<repo>/-/pulls?state=open&page_size=100" | grep -o '"ref":"refs/heads/[^"]*"'
+```
+（该列表端点与单 PR 端点对同一 PR 的 `mergeable_state` 给过相反答案，**关键判定用单 PR 端点**；
+列表端点用来做「有没有 PR」这种存在性判断是够的。）
+
+### 两点 diff 幻觉的第三种形态：误报**删除**
+
+前两种是误报「改动」和误报「合并瓶颈」，第三种最唬人：
+`git diff <A> <B>` 显示 B **删除了 6 个文件、-255 行**，实际上一个都没删 ——
+那些文件是 A 后来新增的，B 只是**落后**。
+
+判据（不要用两点 diff 判删除）：
+```sh
+git merge-tree --write-tree <A> <B> >/dev/null 2>&1; echo $?   # 只取 rc
+git ls-tree --name-only <结果树> <路径>                        # 逐个查文件还在不在
+```
+实测：rc=1（只有 `MEMORY.md` 一处内容冲突），5 个「被删」的文件在合并结果树里**全部健在**。
+**看到「删除/数量减少」先做三方模拟，别照着两点 diff 报警。**

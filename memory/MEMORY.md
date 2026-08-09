@@ -6,7 +6,7 @@
 - [团队改用独立工作目录 + 分支 + PR](feedback_branch_pr_workflow.md) — 每人一个 git worktree 才根治干扰；分支只隔离历史不隔离文件；禁止直推 main
 - [开发环境固有限制与重启恢复步骤](project_environment_constraints.md) — Go 不在 PATH、mount.cifs 因非初始 user namespace 永远跑不了（与 capability 无关）、pkill -f 自杀坑、worktree 里 .git 是文件（save.sh 因此 100% 推不出去）
 - [四类隐形 bug 的排查模式](project_bug_patterns.md) — 死字段/被架空的逻辑/示例配置跑不起来/安全要求有第二个出口；附 worktree 负向实验法
-- [共享工作树里的写入纪律](feedback_shared_worktree_write_discipline.md) — Write 前必须 Read，曾整个覆盖队友已完成的 lock.go；附归属判断与 pkill 名字截断坑
+- [共享工作树里的写入纪律](feedback_shared_worktree_write_discipline.md) — Write 前必须 Read（曾覆盖队友的 lock.go）；一人一树后新形态＝别人在你树里跑 rebase，诊断看 reflog 的 rebase (start)
 - [Samba 权威源码的在线取用方式](reference_samba_source.md) — 容器能联网 curl gitlab raw；Apple 扩展只有 Samba 源码是权威，附关键文件清单与已改名的坑
 - [共享工作树里验证自己代码的三个技巧](project_test_verification_tricks.md) — go test -overlay 绕开队友红灯与做变异测试；smbclient 会规范化 .. 验不出路径穿越
 - [macOS SMB 客户端两个反直觉行为](reference_macos_smb_quirks.md) — 流名冒号是 U+F022（非裸冒号、非 U+F03A）；xattr 当 ADS 发；目录上三种流三种待遇
@@ -14,14 +14,14 @@
 - [验收判据必须可证伪](feedback_falsifiable_assertions.md) — 加密曾用「能读到内容」判定而漏掉明文旁路；探针要有反向对照，失败用例不许 skip
 - [smbclient 4.22 做加密验证的三个坑](reference_smbclient_quirks.md) — --client-protection 合法值；它总宣告 CAP_ENCRYPTION；NOT_SUPPORTED 与 ACCESS_DENIED 别混为一谈
 - [验证策略开关要同时测「允许」与「拒绝」两条路径](feedback_verify_policy_switch_both_paths.md) — 只测默认路径是假阳性（encryption_required 假阳性教训）；拒绝路径也要跑，否则「实测通过」是误导
-- [CNB PR API + `#N` 歧义 + null 陷阱 + 判合并三条命令](reference_cnb_pr_api.md) — 裸写 `#N` 会撞 TaskList/PR 两套编号且照样返回 200；null=「不回答」不是「否」；squash 下判合并只能比内容
+- [CNB PR API + `#N` 歧义 + null 陷阱 + 判合并三条命令](reference_cnb_pr_api.md) — 裸写 `#N` 会撞 TaskList/PR 两套编号且照样返回 200；null=「不回答」不是「否」；squash 下判合并只能比内容；is-ancestor 的 rc=1 兼指「squash」与「还没合」
 - [不要把失败用例搬到 build tag 后面来止血](feedback_no_hiding_failing_tests.md) — 根因已有人在修时用例应留在默认路径裸奔；加 tag 藏起来和删除是同一类动作
-- [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 七个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 后的代码从未编译/go build 不编译 _test.go
+- [「成功回显」不等于事情真的发生了](project_silent_success_failures.md) — 十四个同形态事故：推错 refspec/孤儿提交/CI 从未跑完/变异计数器读 0/校验没接线/build tag 从未编译/go build 不编译 _test.go/CLI 未知子命令退 0/skip 不上传播/英文正则 grep 中文输出/squash 与真合并同标题/两态判据套三态现实/merge-tree 冲突仍吐合法树/merge 零冲突却静默删旧侧内容
 - [durable handle 的四条设计约束](project_durable_handle_design.md) — Persistent 全局唯一（含哨兵不变量）、加锁次序铁律、不起常驻回收 goroutine；第 4 条是刻意推迟到 v0.2.1+ 的欠账
 - [配置里的路径字段按「运行平台」判定绝对性](project_config_path_platform_semantics.md) — example.yaml 在 Windows 上仍跑不起来；metadata_path 同源 bug 已由 PR #18 修掉（跳过+平台形参+平台化判定）
 - [查 CNB 流水线状态的正确姿势与「假红」陷阱](reference_cnb_ci_status.md) — 没有 statuses API 用 /-/build/logs?sourceRef=；push 与 pull_request 事件跑不同 .cnb.yml，结论可相反
 - [发布物形态：裸包 + Docker 镜像双轨](project_release_docker_image.md) — v0.2.0 起每版都要出多架构镜像，不是二选一；NAS 用户只用容器
-- [PM 盘点法：扫全部 worktree 找只存在于磁盘上的成果](project_pm_inventory_method.md) — 分支存在≠推上去了；附扫描脚本、合并祖先要筛掉、「数量减少≠成果丢失」必须做去向核对
+- [PM 盘点法：扫全部 worktree 找只存在于磁盘上的成果](project_pm_inventory_method.md) — 分支存在≠推上去了；附扫描脚本、合并祖先要筛掉、「数量减少≠成果丢失」与「净化分支＝静默删除」都要做去向核对
 - [metadata 存储双实现冲突的定夺](project_metadata_store_consolidation.md) — vfs 与 internal/meta 撞同一文件/bucket 静默吐垃圾；定夺由 internal/meta 单一化（posix2 桶+迁移），并暴露 -tags metabolt 的 CI 假绿洞
 - [git worktree remove --force 会静默删未提交工作](feedback_worktree_remove_force.md) — 删工作树前先 git status；绝不带脏状态 --force 删，否则未 git add 的工作永久丢失
 - [新增 build tag 的 PR 会当场打红全仓](project_build_tag_registry.md) — check-test-compile.sh 有未知 tag 守卫，新 tag 必须同 PR 登记进 TAGS
@@ -32,7 +32,19 @@
 - [Time Machine 真机验收在 v0.2.0 降为可选](project_timemachine_optional.md) — 2026-08-09 所有者决定；代码保留，但文档不许宣称「支持 TM」，未验收就如实写「尚未验收」
 - [CI 额度每月 160 核心小时，必须抠门](feedback_ci_quota_frugality.md) — 单条流水线 ≈0.14 核时；本地门禁跑完再 push，commit≠push，探针用 overlay 别开分支
 - [墙钟耗时不能当 CI 判据](project_timing_criteria_flaky.md) — 微秒级比值在共享 runner 必假红；改数事件次数；附 GOGC=5 复现配方与 overlay 配对对照
-- [在陈旧 main 上 rebase 会造出「已合并提交」的重复 SHA](project_rebase_onto_stale_main.md) — rebase 前先查祖先关系；队友分支可能正基于被你重写掉的旧 SHA
-- [别人正在写文件时的保命提交：rescue ref 手法](project_rescue_ref_inflight.md) — 独立 GIT_INDEX_FILE + commit-tree 推 refs/rescue/*，不碰对方 index/HEAD 且零流水线；ls-remote 才查得到
+- [rebase/squash 的四张面孔（含 squash 是冲突放大器）](project_rebase_onto_stale_main.md) — 先查祖先关系；squash 合上游会把下游打成大片冲突（用 `--onto`）；合并方式每次都要现查，标题分不出 squash 与真合并
+- [别人正在写文件时的保命提交：rescue ref 手法](project_rescue_ref_inflight.md) — 独立 GIT_INDEX_FILE + commit-tree 推 refs/rescue/*，零流水线；更新 ref 必用 --force-with-lease；把 N 个快照并进一个 PR 别用 git merge，用「逐文件双向 comm 判超集 + 条目级核对索引 + 五项体检」
 - [CNB Release API 与 tag_push 发布链路实测](reference_cnb_release_api.md) — 判最新版看 is_latest（latest 恒 null）；git:release 的 options 不吃变量，分渠道要两个互斥 stage + if:；整条发布 0.16~0.19 核时，付得起真跑
-- [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 七种形态：谎报未完成/实测在别的分支/已知问题腐烂/「见 X」X 不存在/合入前没重跑/排除法只做一半/引用用节号
+- [文档不诚实有两个方向，反向那个更隐蔽](project_doc_honesty_two_directions.md) — 八种形态：谎报未完成/实测在别的分支/已知问题腐烂/「见 X」X 不存在/合入前没重跑/排除法只做一半/引用用节号/可替换块外腐烂
+- [给「已建成但没人调用」的抽象层接线时的验收判据](project_port_wiring_acceptance.md) — go list -deps 计数是最硬判据；宿主探针缺一侧＝平凡通过；范围按调用点切不按能力数切
+- [冻结判据要 triple：tip 相等 + 0 未推 + 工作树 0 脏](feedback_freeze_triple_check.md) — 只查 tip 和未推数会漏掉未提交改动（误报 frozen）；还原用 git checkout HEAD --（禁用 git restore）
+- [文档诚实：标记块清单≠完备改动清单，假话常藏块外](feedback_doc_block_outside_rot.md) — grep 标记块捞不到块外假话；改完按语义关键词全库扫一遍（README:287/CHANGELOG:194 实例）；与 doc_honesty 第 8 条互为「通则/形态清单」，已去重掉第三份草稿
+- [会变的陈述圈成可替换块，由推翻它的 PR 负责替换](feedback_replaceable_fact_block.md) — BEGIN/END 标记 + 可复算判据 + 事实截止时间；放块的 PR 必须先合
+- [squash 合入后不 rebase 继续写＝下个 PR 必 add/add 冲突](project_squash_followup_conflicts.md) — 指纹是「冲突（添加/添加）」；三类文件三种解法，别一律 --ours
+- [CNB 开发环境寿命无上限、按闲置回收；只有 /workspace 会备份](reference_cnb_workspace_lifetime.md) — /work/* 在 overlay 上回收即没；rescue ref 推送零流水线
+- [观测到第二执行者在同一 agent 工作树行动（未造成损害）](project_second_executor_observed.md) — 措辞按「已观测到的危险」记，不要安未经证实的因果
+- [判据设计：先内容门确认「发生了」，再判「以什么形态发生」](feedback_content_gate_before_shape.md) — 单一 rc 同时覆盖「没发生」与「以另一形态发生」就不能判形态；is-ancestor 判 squash 是活例，长期门禁用它会永久假红；姊妹条：merge-tree 非 0 也兼指「命令写错」，批量扫描要配正向对照
+- [zsh 里 `for x in $var` 不按换行分词，校验循环会 0 次比对却报「全部通过」](feedback_zsh_wordsplit_zero_iterations.md) — 审计器必须自报比对次数，0 次即判红
+- [内容门的覆盖面 = 探针的位置](feedback_content_gate_probe_placement.md) — 多部件 PR 只探一处会得出半真的「已合」；#152 脚本合了但 .cnb.yml 挂接没合，差点据此删掉仍有效的提示
+- [合并同源文档前先用 numstat 判「哪侧是超集」](feedback_superset_direction_numstat.md) — 只有「x 加 / 0 删」那侧可整份取；「冲突数少」不等于「取哪侧都行」
+- [同名 agent 双实例：共写一份日志，日志分不出作者](project_same_name_agent_twin_instances.md) — sessionId=1、进程=1 也可能有两个你；判据是日志内两条时间线交错
