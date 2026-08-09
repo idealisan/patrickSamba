@@ -173,23 +173,66 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 
 | 部件 | 位置 | 状态 |
 |---|---|---|
-| port 层（6 接口 + 逐能力矩阵 + 三态 Mode + 平台探测） | `internal/oscap/*.go` | 已在 main（PR #123），31 个单测 |
-| `filesystem_mode` 三态配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126），取值判定委托 `oscap.ParseMode` 保持单一真源 |
-| native 适配器 | `internal/oscap/native/` | 开发中（分支 `oscap/native`） |
-| builtin 适配器 | `internal/oscap/builtin/` | 开发中（分支 `oscap/builtin`，bbolt 旁路存储） |
-| portable 模式 CI 门禁 | `test/ci/` | **未完成**，见下方前置要求 |
+| port 层（6 接口 + 逐能力矩阵 + 三态 Mode + 平台探测） | `internal/oscap/*.go` | 已在 main（PR #123，`6413e1d`），31 PASS / 0 SKIP |
+| `filesystem_mode` 三态配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126，`212d6f9`），取值判定委托 `oscap.ParseMode` 保持单一真源 |
+| native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
+| builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
+| portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
+| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ❌ **无**（截至 2026-08-09 18:35 CST 的当下事实；`CapXattr` 接线 PR 合入 `main` 后此格改写）。全仓唯一引用 oscap 的产品代码是 `internal/config/validate.go`，且只用于 `oscap.ParseMode` 校验配置字符串。见下方「已建成 ≠ 已生效」 |
 
 上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
-但**双适配器与 CI 门禁尚未完工**，在它们合入之前，
-`filesystem_mode` 三个取值在运行期的实际差异仍然有限 —— 别把「配置项存在」当成「能力矩阵已生效」。
+2026-08-09 的一轮文档审计核实：**双适配器与 portable CI 门禁已于 v0.2.0 期间全部合入**，
+上一版这里写的「开发中 / 未完成」已过期，故就地订正。
 
-**落地时的前置要求（尚未满足，仍然有效）**：
+**⚠️ 已建成 ≠ 已生效（v0.2.0 的实际边界，落笔前务必知道）**：
+六项能力的两套适配器都造好了、都有测试、portable 门禁也在 CI 里真跑，
+但**整个 oscap 子系统至今没有任何产品调用点**，
+所以 `filesystem_mode` 三个取值在 v0.2.0 运行期**行为完全一样**。
+四条互相独立的判据（2026-08-09 18:07~18:15 CST 实测，可自行复算）：
+
+1. `go list -f '{{.ImportPath}} {{.Imports}}' ./... | grep oscap` —— 全仓只有
+   `internal/config` import 了 `internal/oscap`（为了 `ParseMode`），
+   **没有任何包** import `oscap/native` 或 `oscap/builtin`。
+2. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **1** —— 两个适配器
+   **根本没被链进发布二进制**。
+3. `grep -rn 'oscap\.Open\|oscap\.New\|SelectMatrix\|ProbeNative\|native\.New\|builtin\.New' --include='*.go' . | grep -v '^./internal/oscap/'`
+   —— 包外唯一命中是 `internal/config/config.go:25` 的一句**注释**，零个真实调用。
+4. `FilesystemMode` 在产品代码里只出现在 `internal/config/defaults.go:48-49`（填默认值）
+   与 `internal/config/validate.go:238-245`（校验取值），**没有运行期消费者**。
+
+真实数据路径仍走各自那份旧实现，与 oscap 并存但互不相干（例如 xattr 在数据路径上是
+`internal/vfs/xattr_unix.go`，`internal/oscap/native/xattr_posix.go` 是另一份、无人调用）。
+**接线时必须一并拆掉旧的那份**，否则会重演 `internal/meta` 与
+`internal/vfs/metadata_windows.go` 的双实现撞车（风险 R11）。
+
+顺带一条给写文档的人：`configs/example.yaml:21-35` 对 `filesystem_mode` 的注释是**按设计意图**
+写的（「逐项探测宿主支持情况」），没有提示它当前无运行期效果。改动那里之前先读本段。
+
+**前置要求（portable 必须在 CI 里真跑）—— 已满足，原文保留作为判据说明**：
 `portable` 模式必须**在 CI 里真跑一遍**，不能只是配置项里多一个取值。
 理由：builtin 是「将来移植到未知系统」的唯一底座，而一条在 CI 里从未被执行过的路径，
 到需要它的那天一定是坏的 —— 那时既没有原始作者在场，也没有可对照的正确行为。
 **没有 CI 覆盖的 builtin 就是一份薛定谔的实现**，写了等于没写。
 本仓库已有同型前科：挂在特定 build tag 下的代码，默认 CI 一行都不会编译执行，
 直到有人专门补一关才被真正看见（`test/ci/check-test-compile.sh` 的注释里记了两例）。
+
+现由 `test/ci/portable-mode.sh` 满足。**它自带反向对照，这才是它算数的原因**：
+四个变异体分别模拟「portable 偷偷调 native factory」「用例被改名导致门禁空转」
+「子测试全 SKIP 但父测试仍 PASS」「子测试整体不执行且不留 SKIP 痕迹」，
+**4/4 都让门禁变红，且红在四个不同的判据上**（业务断言 / 用例清单 / SKIP 计数 /
+结果行下界）。后两个变异体值得单独记住：它们是「报绿但什么都没跑」的两种形态，
+只统计 FAIL 数的门禁对它们完全无感。
+
+**⚠️ 同型缺口仍在，不要以为门禁已经没有死角**：
+`test/ci/check-test-compile.sh:104` 的平台列表是
+`linux/amd64 linux/arm64 darwin/arm64 windows/amd64`，**没有一个满足
+`!linux && !darwin && !windows`**，于是本仓库 6 个带该约束的文件
+（`internal/oscap/native/native_other.go`、`internal/oscap/probe_other.go`、
+`internal/vfs/attr_other.go`、`internal/vfs/sparse_other.go`、`internal/vfs/sys_other.go`、
+`internal/oscap/probe_helper_other_test.go`）**从进仓库起一行都没被编译过**。
+手工补跑 `GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet -tags <全部已注册 tag> ./...` → rc=0，
+说明它们**当前**能编译；但 CI 不看，就随时会在无人察觉时坏掉。
+修法是往那份平台列表末尾**追加**一项 `freebsd/amd64`（照 §7.1 的共享文件规矩，只追加、不重排）。
 
 **门禁**：C9 由 `scripts/check-constraints.sh` 的 C9 段做机器校验（扫描禁用符号与 import），
 配 `test/ci/negative-verify.sh` 做**反向对照**（故意塞一段违规代码，确认门禁真的会红）。
@@ -308,7 +351,8 @@ internal/auth            SPNEGO / NTLM / 账户后端（接口化）
     ↓
 internal/vfs             可写虚拟文件系统抽象（接口 + 本地磁盘实现）
     ↓
-internal/oscap           OS 能力抽象（port + 双适配器，见 §1.2 C9 / §5 P7；port 层已落地）
+internal/oscap           OS 能力抽象（port + 双适配器，见 §1.2 C9 / §5 P7；
+                         三层都已落地，但**尚未被 vfs/server 调用**，见 §1.2「已建成 ≠ 已生效」）
       ├── native/        借助 OS 能力：xattr / 稀疏文件 / NTFS ADS / 平台 stat 扩展
       └── builtin/       只用「普通文件 + 套接字」自实现同一份语义
     ↓
@@ -346,7 +390,10 @@ internal/mdns            进程内 mDNS/DNS-SD responder（与 SMB 层无耦合�
   而不是「Windows 特例」。
 
   > **当前缺口（v0.3.0 待补，不要以为已经做完了）**：
-  > `internal/vfs/metadata_other.go:8-10` 在非 Windows 平台直接 `return nil, nil` ——
+  > 2026-08-09 复核仍然成立，只是原因变了一半 —— `internal/oscap/builtin` 现在**有**
+  > 完整的六项旁路实现，但**数据路径压根不调用它**（见 §1.2「已建成 ≠ 已生效」的四条判据），
+  > 所以对使用者而言缺口一点没变小。
+  > `internal/vfs/metadata_other.go:8-10` 在非 Windows 平台仍直接 `return nil, nil` ——
   > 也就是说**非 Windows 上根本没有旁路兜底**。这在旧的「Linux/macOS 原生能力足够」
   > 假设下成立，但在 C9 下不成立：宿主文件系统不支持 xattr 的场景是真实存在的
   > （FAT32/exFAT 外置盘、部分 NAS 导出、`nouser_xattr` 挂载、只读根），
