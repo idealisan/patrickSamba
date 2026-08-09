@@ -37,22 +37,68 @@ export PATH=/usr/local/go/bin:$PATH
 export CGO_ENABLED=0
 
 # ---------------------------------------------------------------- 1. 编译校验
+#
+# 用 go vet 而不是 go build，有两个原因：
+#   1. `go build` **根本不编译 _test.go**。测试文件里写错类型/少个括号照样"绿"，
+#      提交推送之后才在 CI 或别人机器上炸掉。go vet 会连测试文件一起编译。
+#   2. vet 不落任何产物，不会像 `go build` 那样把 main 包的二进制吐在仓库根，
+#      被别人的 `git add -A` 裹挟进提交。
+#
+# -tags：本仓库用到 integration / smoke 两个 build tag（test/integration、
+# internal/mdns/responder_integration_test.go、cmd/stupidsamba/shutdown_smoke_test.go）。
+# 不带 tag 时这些文件被整体排除，等于没校验；而仓库里没有 `//go:build !integration`
+# 这类反向约束，所以"带上 tag 编译的文件集合"是"不带 tag"的超集，跑一遍就够。
+# 将来若真出现反向约束，这里要改成带 tag / 不带 tag 各跑一遍。
+VET_TAGS=integration,smoke
 
-# -o /dev/null：只做编译校验，不落产物。
-# 不加的话，只要路径里有 main 包（例如 test/capture），go build 会把二进制
-# 直接吐在仓库根，5 个 agent 共用一个工作树，很容易被别人的 `git add -A` 带进提交。
 if [ "$#" -eq 0 ]; then
-    echo ">>> go build ./...  (整树)"
-    go build -o /dev/null ./...
+    echo ">>> go vet -tags=$VET_TAGS ./...  (整树)"
+    go vet -tags="$VET_TAGS" ./...
     ADD_ARGS="-A"
 else
-    for p in "$@"; do
-        # 只对含 .go 文件的目录做编译校验；configs/ 这类纯资源目录直接跳过
-        if [ -d "$REPO/$p" ] && [ -n "$(find "$REPO/$p" -name '*.go' -print -quit)" ]; then
-            echo ">>> go build ./$p/..."
-            go build -o /dev/null "./$p/..."
-        fi
-    done
+    # 把传入的路径（文件或目录）归约成所属的**包目录**再校验。
+    #
+    # 这里以前写的是 `[ -d "$REPO/$p" ]` 成立才校验，可 AGENTS.md 约定各 agent
+    # 传的大多是**文件**路径，于是校验被整个跳过 —— 制造过多次"假绿"提交。
+    PATTERNS=$(
+        for p in "$@"; do
+            p=${p#./}
+            if [ -d "$REPO/$p" ]; then
+                d=$p
+            else
+                # 文件路径；文件已被删除时 dirname 依然给得出所属目录
+                d=$(dirname "$p")
+            fi
+            if [ "$d" = "." ]; then
+                # 仓库根：只校验根包自身，别退化成整树 vet
+                ls "$REPO"/*.go >/dev/null 2>&1 && echo "."
+                continue
+            fi
+            # 目录可能随文件一起被删了
+            [ -d "$REPO/$d" ] || continue
+            echo "./$d/..."
+        done | sort -u
+    )
+
+    # 用 go list 把 pattern 展开成真实存在的包，再交给 vet。这一步不能省：
+    #   - configs/ 这类纯资源目录压根没有包；
+    #   - scripts/clients/gosmb2 是**独立 module**（自带 go.mod），
+    #     主 module 的 `./scripts/...` 同样匹配不到它。
+    # 而 `go vet` 收到匹配不到包的 pattern 会直接报错退出，set -e 下就把提交
+    # 拦在门外了。go list 遇到这种 pattern 只在 stderr 警告一句，不失败。
+    VET_PKGS=""
+    if [ -n "$PATTERNS" ]; then
+        # shellcheck disable=SC2086
+        VET_PKGS=$(go list -tags="$VET_TAGS" $PATTERNS 2>/dev/null || true)
+    fi
+
+    if [ -n "$VET_PKGS" ]; then
+        echo ">>> go vet -tags=$VET_TAGS $(echo "$VET_PKGS" | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        go vet -tags="$VET_TAGS" $VET_PKGS
+    else
+        echo ">>> 传入路径下没有 Go 包，跳过编译校验"
+    fi
     ADD_ARGS="$*"
 fi
 
