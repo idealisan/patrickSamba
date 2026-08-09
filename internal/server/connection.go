@@ -268,6 +268,10 @@ func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
 		}
 		msg := seg[:segLen]
 
+		// rollback 是拼接本条响应**之前**的缓冲长度。CANCEL 这类不产生
+		// 响应的消息要连同下面补的对齐字节一起回滚（MS-SMB2 §3.3.5.16）。
+		rollback := len(out)
+
 		// 拼接上一条响应：先补 8 字节对齐，再回填它的 NextCommand。
 		if len(msgs) > 0 {
 			out = pad8(out)
@@ -276,13 +280,24 @@ func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
 		}
 
 		ctx := c.processMessage(hdr, msg, chain, out)
-		out = ctx.Out
-		msgs = append(msgs, respMsg{
-			start:       ctx.MsgStart(),
-			signKey:     ctx.SignKey,
-			hashConn:    ctx.HashResponseConn,
-			hashSession: ctx.HashResponseSession,
-		})
+		if ctx.Suppressed() {
+			// 本条消息不产生任何响应字节。除了丢弃它自己的响应头
+			// （Context.discard 已做），还要把刚补的对齐填充和上一条的
+			// NextCommand 回滚 —— 否则上一条会声称"后面还有消息"，
+			// 客户端解析到帧尾之外。
+			out = out[:rollback]
+			if len(msgs) > 0 {
+				setNextCommand(out, msgs[len(msgs)-1].start, 0)
+			}
+		} else {
+			out = ctx.Out
+			msgs = append(msgs, respMsg{
+				start:       ctx.MsgStart(),
+				signKey:     ctx.SignKey,
+				hashConn:    ctx.HashResponseConn,
+				hashSession: ctx.HashResponseSession,
+			})
+		}
 
 		if hdr.NextCommand == 0 {
 			break
@@ -335,9 +350,16 @@ func (c *Connection) processMessage(hdr wire.Header, msg []byte,
 
 	// —— credit 记账（protocol-notes §12）——
 	// 任何响应都至少授予 1 个 credit，否则客户端会停止发送并挂死。
-	c.credits.SetMultiCredit(c.state.SupportsMultiCredit())
-	charge := c.credits.Charge(hdr.CreditCharge)
-	ctx.SetCredits(c.credits.Grant(charge, hdr.Credits))
+	//
+	// 不产生响应的命令（CANCEL）**必须跳过记账**：credit 是靠响应头的
+	// CreditGranted 还给客户端的，收不到响应就拿不回 credit。在这里扣减
+	// 会让服务端与客户端的水位永久错位，最终把客户端饿死。
+	// MS-SMB2 §3.3.5.16 也明确 CANCEL 不消耗 credit。
+	if !command.NoResponse(hdr.Command) {
+		c.credits.SetMultiCredit(c.state.SupportsMultiCredit())
+		charge := c.credits.Charge(hdr.CreditCharge)
+		ctx.SetCredits(c.credits.Grant(charge, hdr.Credits))
+	}
 
 	// 会话/树定位与签名校验都在 command.Dispatch 内完成
 	// （它需要在同一处决定响应是否签名）。
