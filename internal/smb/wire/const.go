@@ -489,23 +489,34 @@ const (
 	ReopenQueryDirFlag QueryDirectoryFlags = 0x10 // SMB2_REOPEN
 )
 
-// Create Context 名（MS-SMB2 §2.2.13.2）。均为 4 字节 ASCII，
-// 除 DH2Q/DH2C/AAPL 外都能在 §2.2.13.2 找到定义。
+// Create Context 名（MS-SMB2 §2.2.13.2 请求侧 / §2.2.14.2 响应侧）。
+//
+// 规范把这些名字写成十六进制并注明「defined to be in network byte order」，
+// 即 0x44483251 按**大端**展开就是 'D' 'H' '2' 'Q'。因此这里的 Go 字符串
+// 字面量与线上字节序完全一致，无需再做字节序转换。
+//
+// ⚠️ 本注释曾经写着「DH2Q/DH2C 不在 §2.2.13.2 里」——**那是错的**，已核对
+// 规范原文的 Name 取值表，DH2Q(0x44483251)/DH2C(0x44483243) 都在表内。
+// 真正不在 MS 规范里的只有 AAPL 一个。
+//
+// 另有三个 16 字节 GUID 形式的名字（SMB2_CREATE_APP_INSTANCE_ID /
+// _VERSION、SVHDX_OPEN_DEVICE_CONTEXT），本项目不实现，故不定义。
 const (
-	CreateContextExtA = "ExtA" // SMB2_CREATE_EA_BUFFER
-	CreateContextSecD = "SecD" // SMB2_CREATE_SD_BUFFER
-	CreateContextDHnQ = "DHnQ" // SMB2_CREATE_DURABLE_HANDLE_REQUEST
-	CreateContextDHnC = "DHnC" // SMB2_CREATE_DURABLE_HANDLE_RECONNECT
-	CreateContextAlSi = "AlSi" // SMB2_CREATE_ALLOCATION_SIZE
-	CreateContextMxAc = "MxAc" // SMB2_CREATE_QUERY_MAXIMAL_ACCESS_REQUEST
-	CreateContextTWrp = "TWrp" // SMB2_CREATE_TIMEWARP_TOKEN
-	CreateContextQFid = "QFid" // SMB2_CREATE_QUERY_ON_DISK_ID
-	CreateContextRqLs = "RqLs" // SMB2_CREATE_REQUEST_LEASE
-	CreateContextDH2Q = "DH2Q" // SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2
-	CreateContextDH2C = "DH2C" // SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2
+	CreateContextExtA = "ExtA" // 0x45787441 SMB2_CREATE_EA_BUFFER
+	CreateContextSecD = "SecD" // 0x53656344 SMB2_CREATE_SD_BUFFER
+	CreateContextDHnQ = "DHnQ" // 0x44486E51 SMB2_CREATE_DURABLE_HANDLE_REQUEST / _RESPONSE
+	CreateContextDHnC = "DHnC" // 0x44486E43 SMB2_CREATE_DURABLE_HANDLE_RECONNECT
+	CreateContextAlSi = "AlSi" // 0x416C5369 SMB2_CREATE_ALLOCATION_SIZE
+	CreateContextMxAc = "MxAc" // 0x4D784163 SMB2_CREATE_QUERY_MAXIMAL_ACCESS_REQUEST / _RESPONSE
+	CreateContextTWrp = "TWrp" // 0x54577270 SMB2_CREATE_TIMEWARP_TOKEN
+	CreateContextQFid = "QFid" // 0x51466964 SMB2_CREATE_QUERY_ON_DISK_ID
+	// CreateContextRqLs 同时是 SMB2_CREATE_REQUEST_LEASE、_LEASE_V2 与
+	// 响应侧 SMB2_CREATE_RESPONSE_LEASE、_LEASE_V2 —— 四者**共用同一个名字**，
+	// v1/v2 靠 DataLength(32 vs 52) 区分（§2.2.13.2 / §2.2.14.2 原文如此）。
+	CreateContextRqLs = "RqLs" // 0x52714C73
+	CreateContextDH2Q = "DH2Q" // 0x44483251 SMB2_CREATE_DURABLE_HANDLE_REQUEST_V2 / _RESPONSE_V2
+	CreateContextDH2C = "DH2C" // 0x44483243 SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2
 	CreateContextAAPL = "AAPL" // Apple SMB2 扩展（非 MS 规范，见 Samba vfs_fruit）
-	// SMB2_CREATE_APP_INSTANCE_ID / VERSION 的名字是 16 字节 GUID 形式，
-	// 本项目不实现，故不定义。
 )
 
 // hex4 把 uint16 格式化为 4 位大写十六进制，避免 String() 依赖 fmt。
