@@ -41,13 +41,23 @@
   于是裸包那五项自检（CGO 关没关、`-trimpath` 生效没、GOOS/GOARCH 对不对、
   版本号有没有真注入、`ldd` 静态链接）自动覆盖到镜像。若改成在 Dockerfile 里
   `RUN go build`，镜像里的二进制反而会成为整个发布物中唯一没被自检过的东西。
-- 镜像**未推送**至远端仓库：最终 tag 与镜像推送由 team-lead 在全部 PR 合入、
-  CI 全绿后执行。本地已构建并验证 manifest 含 amd64 + arm64 两架构。
+- 镜像**尚未推送**至远端制品库。目标地址
+  `docker.cnb.cool/finalappstore/stupidsamba:<版本>`（**私密仓库，拉取前必须先
+  `docker login docker.cnb.cool -u cnb -p <访问令牌>`**，用户名是固定字面量 `cnb`）。
+  本地已构建并核验：`docker create --platform` 解析探针确认 manifest 含
+  `linux/amd64` + `linux/arm64`；把二进制从镜像两个架构分别抠出来看 ELF `e_machine`
+  分别是 `0x003e`(x86-64) 与 `0x00b7`(AArch64)，构建信息 `CGO_ENABLED=0`；
+  两份 sha256 与 `dist/` 裸包里解出来的二进制**逐位相同**（`81c242c16b3852a6…` /
+  `d2fbdf7b7c79064f…`），即镜像与裸包确系同一份字节。
 - 端到端镜像验证脚本 [`scripts/verify-image.sh`](scripts/verify-image.sh)：用
-  `smbclient` + `impacket` 对容器做 8 项可证伪校验（启动、静态可执行、读写往返、
-  共享不存在被拒的反向对照、数据落到命名卷、guest 警告、mDNS 关闭）。
-  **已实测：8/8 通过**（2026-08-09 本机 docker 27+/buildx v0.35 实跑），
-  并做过变异对照——把内置配置的共享路径改成不存在的目录重打镜像，脚本如期报红。
+  `smbclient` + `impacket` 对容器做 8 项可证伪校验（启动、`scratch` 中静态可执行、
+  smbclient 读写往返、共享不存在被拒的反向对照、数据确实落到命名卷、impacket 独立
+  客户端栈往返、guest 警告、mDNS 关闭）。
+  **已实测：8/8 通过、0 skip**（2026-08-09 17:00 CST，docker 29.6.2 / buildx v0.35.0
+  实跑，smbclient 与 impacket 均在场；协商到的方言 `0x300`）。
+  并做过**变异对照**：把内置配置的共享路径改成 `/nonexistent-share-dir` 重打镜像，
+  同一脚本退出码 1 并打出「配置校验失败: shares[0].path: 共享 "public" 的目录不存在」，
+  正常镜像退出码 0 —— 证明这 8 个 PASS 有鉴别力，不是恒真。
 - `scripts/docker-build.sh` 的多架构自检**不再在本地构建时跳过**：改用
   `docker create --platform` 做解析探针，并以一个未构建的架构（`linux/s390x`）
   做反向对照。此前本地路径直接打印「跳过 manifest 核对」，等于「多架构」在推送前
@@ -60,9 +70,15 @@
   （独立 git worktree + 独立分支 + PR）。v0.2.0 起全员适用。
 - 新增 `scripts/devenv.sh`：开发环境削峰配置（编译串行锁、`GOFLAGS=-p=1`、
   git 重打包内存上限、`gobuild` / `gocheck` / `gocross` 快捷命令）。
-- CI 新增**测试代码编译门禁**：对所有 build tag × 全平台组合执行 `go build ./...`，
-  确保 `//go:build integration` 等被隔离的测试代码也真实可编译（此前它们从未被编译校验过）。
+- CI 新增**测试代码编译门禁** [`test/ci/check-test-compile.sh`](test/ci/check-test-compile.sh)：
+  对所有 build tag × 四个目标平台的组合执行 **`go vet`**（不是 `go build`），
+  确保 `//go:build integration` 等被隔离的测试代码也真实通过类型检查
+  （此前它们从未被编译校验过）。
+  **刻意用 `go vet` 而非 `go build`**：后者根本不编译 `_test.go`，正是本门禁要堵的
+  第二个洞——只跑 `go build` 时，写坏的测试文件在四平台交叉编译那关也照样绿。
   门禁自带**负向验证**（故意写坏一处应当失败），避免门禁本身形同虚设。
+  新增 build tag 必须同步登记进该脚本的 `TAGS=`，否则带该 tag 的文件没有任何一关会编译它
+  （脚本自己会检查这件事并报错）。
 - 修复 `scripts/save.sh` 的 `git push` refspec（**影响使用者，请注意**）：v0.1.0 时期在
   非 `main` 分支的 worktree 里跑 `save.sh` 会**静默把提交推丢**——脚本写死
   `git push -q origin main`，而各 worktree 共享同一份 `.git`，`main` 解析到的是
