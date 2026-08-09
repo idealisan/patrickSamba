@@ -12,4 +12,10 @@ func platformAllocatedRanges(_ *os.File, off, end int64) ([]Range, error) {
 	return wholeRange(off, end), nil
 }
 
-func platformSetSparse(*os.File, bool) error { return nil }
+// 语义与 POSIX 一致，理由见 sparse_unix.go 的 platformSetSparse。
+func platformSetSparse(_ *os.File, v bool) error {
+	if !v {
+		return ErrNotSupported
+	}
+	return nil
+}

@@ -14,3 +14,10 @@ import "os"
 func newXattrAccessor(string, *os.File) (XattrAccessor, error) {
 	return nil, ErrNotSupported
 }
+
+// readMetaXattrFast 在没有 POSIX 扩展属性的平台上无从谈起。
+// 调用方（appleInfoAt）把这个错误当成「该对象没有 FinderInfo」处理，
+// 与 newXattrAccessor 返回 ErrNotSupported 时的既有行为一致。
+func readMetaXattrFast(string, []byte) ([]byte, error) {
+	return nil, ErrNotSupported
+}

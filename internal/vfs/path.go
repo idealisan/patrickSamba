@@ -162,7 +162,19 @@ func CleanPath(p string) (string, error) {
 	return strings.Join(comps, "/"), nil
 }
 
-// ValidateComponent 校验单个路径分量的合法性。
+// ValidateComponent 校验单个路径分量的**字符层面**合法性：
+// 非空、不超长、无控制字符、无 SMB 非法字符、不是 Windows 保留设备名。
+//
+// ⚠️ **它不是防路径穿越的屏障。** 本函数**故意放行 "." 与 ".."** ——
+// 它的唯一调用方 SplitPath 在 switch 里先行处理了那两个分量
+// （见上方 :139~:145），轮不到这里。
+//
+// 因此「拿到一个来自客户端的名字 → ValidateComponent → filepath.Join」
+// 这个模式**是有洞的**：`Join(dir, "..")` 直接就是父目录。
+// 按名字寻址请改用本包的 validateChildName（optional.go），
+// 或者干脆走 Resolver.Resolve 那条完整路径。
+//
+// 这不是假设：AppleInfoAt 的第一版就是这么写的，被自己的用例逼出来。
 func ValidateComponent(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: 空的路径分量", ErrInvalidPath)

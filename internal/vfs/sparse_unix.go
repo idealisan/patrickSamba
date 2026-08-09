@@ -100,6 +100,24 @@ func unsupportedSeek(err error) bool {
 		errors.Is(err, syscall.ENOSYS)
 }
 
-// platformSetSparse：POSIX 上文件天然稀疏，没有「标记为稀疏」这个动作。
-// 返回 nil 而不是 ErrNotSupported —— 见 SparseFile.SetSparse 的说明。
-func platformSetSparse(*os.File, bool) error { return nil }
+// platformSetSparse 在 POSIX 上是**不对称**的，这是有意的：
+//
+//	SetSparse(true)   无操作返回 nil —— POSIX 文件天然可稀疏，
+//	                  客户端要的效果本来就成立。
+//	SetSparse(false)  返回 ErrNotSupported —— 我们**真的做不到**。
+//
+// 为什么 false 不能也谎称成功：本项目的 FILE_ATTRIBUTE_SPARSE_FILE
+// 不是存下来的标志位，而是在 attr.go:103 由 `Alloc < Size` 现算的。
+// 若这里假装取消成功，客户端回头查属性会**照样看到 SPARSE 位**
+// （洞还在），得到一个自相矛盾的视图。如实报不支持，客户端至少知道
+// 这个文件的稀疏性关不掉。
+//
+// 真要取消稀疏就得把所有洞填零，那会让一个 8 MiB 的 Time Machine band
+// 从占几 KiB 变成占满 8 MiB —— 正是 .sparsebundle 要避免的事，
+// 绝不能作为一个 FSCTL 的副作用悄悄发生。
+func platformSetSparse(_ *os.File, v bool) error {
+	if !v {
+		return ErrNotSupported
+	}
+	return nil
+}
