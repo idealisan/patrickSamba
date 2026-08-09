@@ -65,18 +65,10 @@ auth:
     - name: alice
       # 明文口令与 nt_hash 二选一。用明文会有一条启动 WARN。
       password: "changeme"
-      # uid/gid 是**预留字段，当前版本没有任何效果**，可以整行删掉。
-      # 它们会被解析并带进认证身份，但没有任何代码消费：客户端看到的文件属主
-      # 在 Linux/macOS 上来自宿主文件系统的真实 stat，与这里填什么无关。
-      # 保留字段是为了将来接上属主映射；无论如何都不做系统用户解析。
-      uid: 1000
-      gid: 1000
     - name: bob
       # nt_hash = MD4(UTF-16LE(口令))，32 位十六进制。推荐用它避免口令落盘。
       # 下面这个是空口令的 hash，换成你自己的。
       nt_hash: "31d6cfe0d16ae931b73c59d7e0c089c0"
-      uid: 1001
-      gid: 1001
 
 # 共享目录列表 —— 支持共享多个目录。
 shares:
@@ -112,12 +104,9 @@ shares:
     comment: "Time Machine"
     # 宣告为 Time Machine 目标（进 mDNS 的 _adisk._tcp）。不能同时是只读。
     time_machine: true
-    # time_machine_max_size 目前**不起任何作用**，设了会有一条启动 WARN。
-    # _adisk 的 TXT 词汇表里没有经过验证的容量键，macOS 是按 SMB 上报的
-    # 卷容量判断备份磁盘大小的 —— 要限制体积请用下面的 quota_bytes。
-    # time_machine_max_size: 0
     # 向所有 SMB 客户端上报的卷容量上限（字节）。0 = 不限（按宿主真实剩余上报）。
-    # 主要影响 Time Machine：不设的话 TM 会一直写到把卷吃满。
+    # 这是限制 Time Machine 备份体积的**唯一**有效手段：macOS 就是照着 SMB
+    # 上报的卷容量决定备份磁盘有多大的。不设的话 TM 会一直写到把卷吃满。
     # 这不是强制配额，只改上报的数字，不阻止本地写入。低于 1 GiB 会有 WARN。
     # 例：2 TiB = 2199023255552
     quota_bytes: 2199023255552
