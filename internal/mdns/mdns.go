@@ -45,10 +45,12 @@ func New(cfg config.MDNS, port int, shares []config.Share) (*Responder, error) {
 	}
 
 	return &Responder{
-		rs:         rs,
-		ifaceNames: cfg.Interfaces,
-		log:        slog.Default(),
-		conflictCh: make(chan struct{}, 1),
+		rs:          rs,
+		ifaceNames:  cfg.Interfaces,
+		log:         slog.Default(),
+		conflictCh:  make(chan struct{}, 1),
+		readdressCh: make(chan struct{}, 1),
+		known:       newKnownAnswerStash(),
 	}, nil
 }
 
