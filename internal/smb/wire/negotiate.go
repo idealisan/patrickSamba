@@ -35,7 +35,26 @@ const (
 	ContextTransportCapabilities        NegotiateContextType = 0x0006 // SMB2_TRANSPORT_CAPABILITIES
 	ContextRDMATransformCapabilities    NegotiateContextType = 0x0007 // SMB2_RDMA_TRANSFORM_CAPABILITIES
 	ContextSigningCapabilities          NegotiateContextType = 0x0008 // SMB2_SIGNING_CAPABILITIES
+
+	// ContextPosixExtensions 不在 MS-SMB2 里，是 **Samba 自己扩展**的
+	// SMB2_POSIX_EXTENSIONS_AVAILABLE。真实 smbclient 4.22 的 3.1.1
+	// NEGOTIATE 请求里就带着它（抓包为证：
+	// testdata/capture/negotiate-smb311/001-c2s-NEGOTIATE.bin 偏移 232，
+	// 是那条请求的第 5 条 context）。
+	//
+	// Data 是 16 字节的能力 GUID，见 PosixExtensionsGUID。
+	// 本项目不实现 POSIX 扩展，**必须原样忽略**（不识别的 context 一律忽略，
+	// 不能因此让协商失败）—— 登记这个常量只是为了日志可读与测试断言。
+	ContextPosixExtensions NegotiateContextType = 0x0100
 )
+
+// PosixExtensionsGUID 是 Samba SMB2_POSIX_EXTENSIONS_AVAILABLE 的能力 GUID
+// （大端书写的 93AD2550-9CB4-11E7-B423-83DE968BCD7C，线上就是这 16 个字节的
+// 原始顺序，不做 GUID 的字段级字节序转换）。取自真实抓包，见上方文件。
+var PosixExtensionsGUID = [16]byte{
+	0x93, 0xAD, 0x25, 0x50, 0x9C, 0xB4, 0x11, 0xE7,
+	0xB4, 0x23, 0x83, 0xDE, 0x96, 0x8B, 0xCD, 0x7C,
+}
 
 // MS-SMB2 §2.2.3.1.1 — HashAlgorithms，目前规范只定义了一个。
 const HashAlgorithmSHA512 uint16 = 0x0001 // SHA-512

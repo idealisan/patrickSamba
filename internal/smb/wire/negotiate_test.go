@@ -20,7 +20,11 @@ func dummyHeader(cmd Command) []byte {
 //	PREAUTH  ：8 头 + 4 + 2(算法) + 32(盐) = 46 → 112+46 = 158 → 补 2 到 160
 //	ENCRYPTION：8 头 + 2 + 2*2 = 14 → 160+14 = 174（最后一条不补）
 //
-// TODO: 待真实抓包验证（当前按规范表格构造，字段值取自 §2.2.3.1.1/§2.2.3.1.2）。
+// 布局已用真实抓包核对：testdata/capture/negotiate-smb311/001-c2s-NEGOTIATE.bin
+// （smbclient 4.22）里前两条 context 的起点同样是 112 与 160，PREAUTH 的
+// DataLength 同样是 38、SaltLength 同样是 32。真实请求比这里多 3 条
+// （SIGNING_CAPABILITIES / NETNAME / Samba 的 0x0100），见
+// TestCaptureNegotiate311Contexts。
 func goldenNegotiateRequest311() []byte {
 	b := dummyHeader(CommandNegotiate)
 	body := []byte{
@@ -304,5 +308,205 @@ func TestCompressionAndNetnameContext(t *testing.T) {
 	name, err := ParseNetnameContext(EncodeUTF16LE("SERVER01"))
 	if err != nil || name != "SERVER01" {
 		t.Errorf("netname = %q, err = %v", name, err)
+	}
+}
+
+// TestCaptureNegotiate311Contexts 用真实 smbclient / smbd 的 3.1.1 抓包
+// 逐条核对 negotiate context 的解析（AGENTS.md §3「关键路径要有抓包比对」）。
+//
+// 这条测试比自造 golden 值钱的地方：真实请求里有一条 **规范里没有** 的
+// context（Samba 的 0x0100 SMB2_POSIX_EXTENSIONS_AVAILABLE）。
+// 未知类型必须被原样保留、不能让整条 NEGOTIATE 解析失败 —— 否则
+// smbclient 连不上，而且这种失败在日志里看起来像「客户端报文损坏」。
+func TestCaptureNegotiate311Contexts(t *testing.T) {
+	req := readCaptureFrame(t, "negotiate-smb311", "001-c2s-NEGOTIATE.bin")
+	r, err := ParseNegotiateRequest(req)
+	if err != nil {
+		t.Fatalf("真实 3.1.1 NEGOTIATE 请求解析失败: %v", err)
+	}
+	if !r.HasDialect(SMB311) {
+		t.Fatal("请求应包含 3.1.1")
+	}
+	wantTypes := []NegotiateContextType{
+		ContextPreauthIntegrityCapabilities,
+		ContextEncryptionCapabilities,
+		ContextSigningCapabilities,
+		ContextNetnameNegotiateContextID,
+		ContextPosixExtensions,
+	}
+	if len(r.Contexts) != len(wantTypes) {
+		t.Fatalf("context 数 = %d, 期望 %d: %+v", len(r.Contexts), len(wantTypes), r.Contexts)
+	}
+	for i, want := range wantTypes {
+		if r.Contexts[i].Type != want {
+			t.Errorf("Contexts[%d].Type = %#04x, 期望 %#04x", i, r.Contexts[i].Type, want)
+		}
+	}
+
+	pre, err := ParsePreauthIntegrityCapabilities(r.Contexts[0].Data)
+	if err != nil {
+		t.Fatalf("PREAUTH: %v", err)
+	}
+	if len(pre.HashAlgorithms) != 1 || pre.HashAlgorithms[0] != HashAlgorithmSHA512 {
+		t.Errorf("HashAlgorithms = %v, 期望 [SHA-512]", pre.HashAlgorithms)
+	}
+	if len(pre.Salt) != 32 {
+		t.Errorf("SaltLength = %d, 期望 32（Windows/Samba 都用 32）", len(pre.Salt))
+	}
+
+	enc, err := ParseEncryptionCapabilities(r.Contexts[1].Data)
+	if err != nil {
+		t.Fatalf("ENCRYPTION: %v", err)
+	}
+	// smbclient 4.22 按 GCM 优先的顺序报 4 个算法。
+	want := []uint16{CipherAES128GCM, CipherAES128CCM, CipherAES256GCM, CipherAES256CCM}
+	if len(enc.Ciphers) != len(want) {
+		t.Fatalf("Ciphers = %v, 期望 %v", enc.Ciphers, want)
+	}
+	for i := range want {
+		if enc.Ciphers[i] != want[i] {
+			t.Errorf("Ciphers[%d] = %#04x, 期望 %#04x", i, enc.Ciphers[i], want[i])
+		}
+	}
+
+	sign, err := ParseSigningCapabilities(r.Contexts[2].Data)
+	if err != nil {
+		t.Fatalf("SIGNING: %v", err)
+	}
+	wantSign := []uint16{SigningAlgorithmAESGMAC, SigningAlgorithmAESCMAC, SigningAlgorithmHMACSHA256}
+	if len(sign.SigningAlgorithms) != len(wantSign) {
+		t.Fatalf("SigningAlgorithms = %v, 期望 %v", sign.SigningAlgorithms, wantSign)
+	}
+	for i := range wantSign {
+		if sign.SigningAlgorithms[i] != wantSign[i] {
+			t.Errorf("SigningAlgorithms[%d] = %#04x, 期望 %#04x", i, sign.SigningAlgorithms[i], wantSign[i])
+		}
+	}
+
+	if name, err := ParseNetnameContext(r.Contexts[3].Data); err != nil || name != "127.0.0.1" {
+		t.Errorf("netname = %q, err = %v", name, err)
+	}
+
+	// Samba 的 POSIX 扩展 context：16 字节能力 GUID，我们只认不用。
+	if got := r.Contexts[4].Data; !bytes.Equal(got, PosixExtensionsGUID[:]) {
+		t.Errorf("POSIX 扩展 GUID = % X, 期望 % X", got, PosixExtensionsGUID[:])
+	}
+
+	// —— 服务端响应侧：真实 smbd 回了哪些 context ——
+	resp := readCaptureFrame(t, "negotiate-smb311", "002-s2c-NEGOTIATE.bin")
+	sr, err := ParseNegotiateResponse(resp)
+	if err != nil {
+		t.Fatalf("真实 3.1.1 NEGOTIATE 响应解析失败: %v", err)
+	}
+	if sr.DialectRevision != SMB311 {
+		t.Fatalf("DialectRevision = %#04x", sr.DialectRevision)
+	}
+	if len(sr.Contexts) != 3 {
+		t.Fatalf("响应 context 数 = %d, 期望 3", len(sr.Contexts))
+	}
+	// MS-SMB2 §3.3.5.4：响应里的 CipherCount / SigningAlgorithmCount 必须是 1。
+	rEnc, err := ParseEncryptionCapabilities(sr.Contexts[1].Data)
+	if err != nil || len(rEnc.Ciphers) != 1 || rEnc.Ciphers[0] != CipherAES128GCM {
+		t.Errorf("响应 Ciphers = %v, err = %v, 期望 [AES-128-GCM]", rEnc, err)
+	}
+	rSign, err := ParseSigningCapabilities(sr.Contexts[2].Data)
+	if err != nil || len(rSign.SigningAlgorithms) != 1 ||
+		rSign.SigningAlgorithms[0] != SigningAlgorithmAESGMAC {
+		t.Errorf("响应 SigningAlgorithms = %v, err = %v, 期望 [AES-GMAC]", rSign, err)
+	}
+}
+
+// TestNegotiateContextCountLies 覆盖「计数字段撒谎」的各种姿势。
+// 全部必须返回 error，一个 panic 都不许有 —— 这些字段完全由网络对端控制。
+func TestNegotiateContextCountLies(t *testing.T) {
+	// NegotiateContextCount 声称远多于实际。
+	msg := goldenNegotiateRequest311()
+	le.PutUint16(msg[HeaderSize+32:], 0xFFFF)
+	if _, err := ParseNegotiateRequest(msg); err == nil {
+		t.Error("越界的 NegotiateContextCount 应报错")
+	}
+
+	// NegotiateContextOffset 指到消息之外。
+	msg = goldenNegotiateRequest311()
+	le.PutUint32(msg[HeaderSize+28:], 0xFFFFFF00)
+	if _, err := ParseNegotiateRequest(msg); err == nil {
+		t.Error("越界的 NegotiateContextOffset 应报错")
+	}
+
+	// DialectCount 声称远多于实际。
+	msg = goldenNegotiateRequest311()
+	le.PutUint16(msg[HeaderSize+2:], 0xFFFF)
+	if _, err := ParseNegotiateRequest(msg); err == nil {
+		t.Error("越界的 DialectCount 应报错")
+	}
+}
+
+// TestNegotiateContextPayloadLies 覆盖各 context 载荷内部的计数字段撒谎。
+func TestNegotiateContextPayloadLies(t *testing.T) {
+	// PREAUTH：HashAlgorithmCount 撒谎。
+	pre, err := (&PreauthIntegrityCapabilities{
+		HashAlgorithms: []uint16{HashAlgorithmSHA512},
+		Salt:           bytes.Repeat([]byte{7}, 32),
+	}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParsePreauthIntegrityCapabilities(pre); err != nil {
+		t.Fatalf("正常载荷应能解析: %v", err)
+	}
+	bad := append([]byte(nil), pre...)
+	le.PutUint16(bad[0:], 0xFFFF) // HashAlgorithmCount
+	if _, err := ParsePreauthIntegrityCapabilities(bad); err == nil {
+		t.Error("越界的 HashAlgorithmCount 应报错")
+	}
+	bad = append([]byte(nil), pre...)
+	le.PutUint16(bad[2:], 0xFFFF) // SaltLength
+	if _, err := ParsePreauthIntegrityCapabilities(bad); err == nil {
+		t.Error("越界的 SaltLength 应报错")
+	}
+	// 截断到任意长度都不许 panic。
+	for n := 0; n < len(pre); n++ {
+		if _, err := ParsePreauthIntegrityCapabilities(pre[:n]); err == nil {
+			t.Fatalf("PREAUTH 截断到 %d 应报错", n)
+		}
+	}
+
+	// ENCRYPTION / SIGNING：Count 撒谎。
+	enc, err := (&EncryptionCapabilities{Ciphers: []uint16{CipherAES128GCM}}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	le.PutUint16(enc[0:], 0xFFFF)
+	if _, err := ParseEncryptionCapabilities(enc); err == nil {
+		t.Error("越界的 CipherCount 应报错")
+	}
+	sign, err := (&SigningCapabilities{SigningAlgorithms: []uint16{SigningAlgorithmAESCMAC}}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	le.PutUint16(sign[0:], 0xFFFF)
+	if _, err := ParseSigningCapabilities(sign); err == nil {
+		t.Error("越界的 SigningAlgorithmCount 应报错")
+	}
+
+	// COMPRESSION：CompressionAlgorithmCount 撒谎。
+	comp, err := (&CompressionCapabilities{CompressionAlgorithms: []uint16{CompressionLZ77}}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	le.PutUint16(comp[0:], 0xFFFF)
+	if _, err := ParseCompressionCapabilities(comp); err == nil {
+		t.Error("越界的 CompressionAlgorithmCount 应报错")
+	}
+
+	// Count = 0 是**合法**的报文形态，wire 层必须解析成功、交由策略层拒绝
+	// （MS-SMB2 §3.3.5.4：SigningAlgorithmCount == 0 → STATUS_INVALID_PARAMETER，
+	// 那是 command 层的判断，不是编解码错误）。
+	if s, err := ParseSigningCapabilities([]byte{0x00, 0x00}); err != nil || len(s.SigningAlgorithms) != 0 {
+		t.Errorf("SigningAlgorithmCount=0 应解析为空表, 得到 %+v, %v", s, err)
+	}
+	if p, err := ParsePreauthIntegrityCapabilities([]byte{0x00, 0x00, 0x00, 0x00}); err != nil ||
+		len(p.HashAlgorithms) != 0 || len(p.Salt) != 0 {
+		t.Errorf("空 PREAUTH 应解析为空, 得到 %+v, %v", p, err)
 	}
 }
