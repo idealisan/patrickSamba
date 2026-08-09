@@ -294,10 +294,14 @@ func (s *Session) RemoveTree(id uint32) status.Status {
 
 // ---- 句柄表 ----
 
-// AddOpen 登记一个新打开的句柄并分配 FileId。
+// AddOpen 登记一个新打开的句柄并分配 FileId（MS-SMB2 §2.2.14.1）。
 //
-// Persistent 与 Volatile 都用同一个单调递增值：我们不支持 durable handle，
-// 因此 Persistent 只需在会话内唯一即可（MS-SMB2 §2.2.14.1）。
+// 两半的作用域**不同**，不要再把它们合成一个值：
+//
+//   - Volatile 只在本会话的句柄表里查，用会话内计数器即可；
+//   - Persistent 是 GlobalOpenTable 的索引（§3.3.1.10），作用域是整个
+//     服务端。durable handle v1 重连时客户端带回的就是它，所以它必须
+//     全进程唯一 —— 详见 durable.go 的 newPersistentID。
 func (s *Session) AddOpen(o *Open) status.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -311,7 +315,7 @@ func (s *Session) AddOpen(o *Open) status.Status {
 
 	s.nextVolatile++
 	o.Volatile = s.nextVolatile
-	o.Persistent = s.nextVolatile
+	o.Persistent = newPersistentID()
 	o.Session = s
 	s.opens[o.Volatile] = o
 	return status.Success

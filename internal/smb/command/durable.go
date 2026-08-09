@@ -3,6 +3,7 @@ package command
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
@@ -145,10 +146,36 @@ func (r *durableTable) detachLocked(open *Open) {
 	d.key = ""
 }
 
+// nextPersistentID 是 FileId.Persistent 的**全进程**分配器。
+//
+// MS-SMB2 §3.3.1.10：服务端把每个 Open 挂进 GlobalOpenTable，索引是
+// Open.FileId 的 Persistent 部分，作用域是**整个服务端**，不是单个会话。
+// 原实现把它设成 Session 内的计数器（session.go 的 AddOpen），于是每条
+// 连接的第一个句柄 Persistent 都是 1。
+//
+// 这对 durable handle 是致命的：v1 重连（DHnC，§2.2.13.2.3）客户端带回来的
+// 就是这个 Persistent 值，服务端只能拿它当登记表键。两个会话撞在同一个键上
+// 时，后登记的会顶掉先登记的，重连时服务端把**另一个文件的句柄**交回去 ——
+// 一条跨会话的数据泄漏路径，身份校验拦不住（同一用户开两条连接完全正常）。
+//
+// 修法只能是让 Persistent 本身全进程唯一：键必须能从客户端带回的值反推，
+// 所以不存在「另起一个内部唯一键」的选项。
+//
+// 从 1 开始（Add 先加后返），0 保留作「未分配」。uint64 单调递增，
+// 每秒分配一百万个也要 58 万年才回绕，不考虑复用。
+var nextPersistentID atomic.Uint64
+
+// newPersistentID 分配一个全进程唯一的 FileId.Persistent。
+func newPersistentID() uint64 { return nextPersistentID.Add(1) }
+
 // durableKey 计算登记表键。
 //
 //	v1：persistent FileId（DHnC 重连时客户端带回的就是它）
 //	v2：CreateGuid（不透明 16 字节，逐字节比较，绝不当 UUID 解析）
+//
+// v1 的唯一性完全由 newPersistentID 的全局单调性保证；v2 的键是**客户端
+// 自己给的** CreateGuid，服务端管不住，恶意客户端可以故意重复 —— 那一侧
+// 靠 register() 的占位检查兜底。
 func durableKey(v2 bool, guid [16]byte, persist uint64) string {
 	if !v2 {
 		return "v1:" + fmt.Sprintf("%d", persist)

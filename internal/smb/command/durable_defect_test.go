@@ -20,84 +20,14 @@ import (
 // 每修好一个缺陷，就把对应用例挪进 durable_qa_test.go（去掉 tag），
 // 从此作为回归保护。**不要靠删除用例来「修复」失败。**
 
-// --- 缺陷 1：v1 登记表键跨会话碰撞，重连会拿到别人的文件 ---
-
-// TestQADefectV1KeyCollisionReturnsWrongFile
+// --- 已修复并移出本文件的缺陷（用例已转为回归保护，勿在此重建）---
 //
-// Session.AddOpen 把 Persistent 设成**会话内**计数器，两个会话的首个句柄
-// Persistent 都是 1；durableKey 的 v1 分支只用 Persistent 做键，于是两个
-// 不同文件的 durable 句柄共用键 "v1:1"，后登记的静默覆盖先登记的。
-//
-// 判据：alice 用 a.txt 的 FileId 重连，若拿回的 Open.Path 是 b.txt，
-// 就证明服务端把**另一个文件的句柄**交给了客户端。
-// 身份校验拦不住这个——同一个用户开两条连接是完全正常的场景。
-func TestQADefectV1KeyCollisionReturnsWrongFile(t *testing.T) {
-	resetDurable()
-	defaultDurableTimeout = 30 * time.Second
+//	v1 键跨会话碰撞     → durable_qa_test.go TestQADurableV1KeyNoCrossSessionCollision
+//	remove 误删他人登记 → durable_qa_test.go TestQADurableRemoveChecksEntryOwnership
+//	超时回收不关句柄    → durable_qa_test.go TestQADurableExpiredEntryClosesHandle
+//	驱逐先于鉴权        → durable_qa_test.go TestQADurableEvictionRequiresAuthorization
 
-	conn := NewConn(&Settings{}, "test", "test")
-	ctx1, s1, tree1 := qaSession(t, conn, 1, "alice", "share")
-	ctx2, s2, tree2 := qaSession(t, conn, 2, "alice", "share")
-
-	o1 := qaAddOpen(t, s1, tree1, "a.txt", &fakeHandle{})
-	grantDurable(t, ctx1, o1, dhqReq(wire.OplockLevelBatch))
-
-	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
-	grantDurable(t, ctx2, o2, dhqReq(wire.OplockLevelBatch))
-
-	if len(durableRegistry.entries) != 2 {
-		t.Errorf("两个不同文件的 durable 句柄应各占一条登记，实得 %d 条（键碰撞）",
-			len(durableRegistry.entries))
-	}
-
-	// s1 断连 —— 注意 disconnect 命中的其实是 o2 的记录。
-	s1.Close()
-
-	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
-		Persistent: o1.Persistent, Volatile: o1.Volatile}}
-	got, st := durableRegistry.reconnect(s1, tree1, intent)
-	if st != status.Success {
-		t.Fatalf("重连本应成功（同一用户、同一 share、未超时），实得 %v", st)
-	}
-	if got.Path != "a.txt" {
-		t.Errorf("用 a.txt 的 FileId 重连，却拿回 %q 的句柄 —— 交叉句柄泄漏", got.Path)
-	}
-	if got == o2 {
-		t.Error("拿回的是另一个会话仍在使用中的句柄 o2")
-	}
-}
-
-// TestQADefectRemoveDeletesForeignEntry
-//
-// durableTable.remove 只按 open.Durable.key 删除，**不校验表里那条记录是否
-// 真的属于这个 open**。碰上键碰撞时，A 的 CLOSE 会把 B 的登记删掉，
-// B 之后再也无法重连（静默失效，日志里什么都看不到）。
-func TestQADefectRemoveDeletesForeignEntry(t *testing.T) {
-	resetDurable()
-	defaultDurableTimeout = 30 * time.Second
-
-	conn := NewConn(&Settings{}, "test", "test")
-	ctx1, s1, tree1 := qaSession(t, conn, 1, "alice", "share")
-	ctx2, s2, tree2 := qaSession(t, conn, 2, "alice", "share")
-
-	o1 := qaAddOpen(t, s1, tree1, "a.txt", &fakeHandle{})
-	grantDurable(t, ctx1, o1, dhqReq(wire.OplockLevelBatch))
-	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
-	grantDurable(t, ctx2, o2, dhqReq(wire.OplockLevelBatch))
-
-	// B 先断连进入等待重连态（真实时序：掉线的那条连接先走）。
-	durableRegistry.disconnect(o2)
-	// A 随后在自己那条连接上显式 CLOSE —— 它按键删除，删掉的是 B 的记录。
-	o1.close()
-
-	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
-		Persistent: o2.Persistent, Volatile: o2.Volatile}}
-	if _, st := durableRegistry.reconnect(s2, tree2, intent); st != status.Success {
-		t.Errorf("A 的 CLOSE 摧毁了 B 的 durable 登记：B 重连得到 %v", st)
-	}
-}
-
-// --- 缺陷 2 的残留：无任何后续流量时，最后一批过期项不会被回收 ---
+// --- 残留：无任何后续流量时，最后一批过期项不会被回收 ---
 
 // TestQADefectExpiryHappensWithoutReconnect —— **已知残留，团队已裁决接受**。
 //

@@ -65,14 +65,16 @@ func qaAddOpen(t *testing.T, s *Session, tree *Tree, path string, h vfs.Handle) 
 // 1. Persistent FileId 的实际取值域（v1 登记表键的地基）
 // ---------------------------------------------------------------------------
 
-// TestQAPersistentIDIsPerSessionCounter 记录一个事实：Session.AddOpen 把
-// Persistent 设成**会话内**单调计数器，因此不同会话的第一个句柄
-// Persistent 都是 1。durableKey 对 v1 只用 Persistent 做键，这个事实决定了
-// v1 登记表键在跨会话时会碰撞（见 durable_defect_test.go）。
+// TestQAPersistentIDIsGloballyUnique 钉死 v1 登记表键的地基：
+// Session.AddOpen 分配的 Persistent 必须**全进程唯一**，不是会话内唯一。
 //
-// 本用例不判断对错，只把地基钉死：将来若有人把 Persistent 改成全局唯一，
-// 这条会变红，提醒他去看 durableKey。
-func TestQAPersistentIDIsPerSessionCounter(t *testing.T) {
+// 历史：这条原来叫 TestQAPersistentIDIsPerSessionCounter，断言的是相反的
+// 事实（两个会话的首个句柄 Persistent 都是 1），作为「缺陷仍在」的地基探针。
+// Persistent 改成全局分配后它按设计变红，于是翻转成现在这条正向回归。
+//
+// 判据可证伪：把 session.go 的 `o.Persistent = newPersistentID()` 改回
+// `= s.nextVolatile`，本用例立刻变红。
+func TestQAPersistentIDIsGloballyUnique(t *testing.T) {
 	resetDurable()
 	conn := NewConn(&Settings{}, "test", "test")
 	_, s1, tree1 := qaSession(t, conn, 1, "alice", "share")
@@ -81,14 +83,29 @@ func TestQAPersistentIDIsPerSessionCounter(t *testing.T) {
 	o1 := qaAddOpen(t, s1, tree1, "a.txt", &fakeHandle{})
 	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
 
-	if o1.Persistent != o2.Persistent {
-		t.Fatalf("前提已改变：两个会话的首个句柄 Persistent 不再相同（%d vs %d）；"+
-			"请重新评估 durableKey 的 v1 分支", o1.Persistent, o2.Persistent)
+	// Volatile 仍是会话内计数器 —— 它只在本会话句柄表里查，撞了也没关系。
+	// 这一条同时说明「两者不再是同一个值」是有意为之，不是笔误。
+	if o1.Volatile != o2.Volatile {
+		t.Errorf("Volatile 应仍是会话内计数器（两个新会话的首个句柄都该是 1），实得 %d / %d",
+			o1.Volatile, o2.Volatile)
 	}
-	if k1, k2 := durableKey(false, [16]byte{}, o1.Persistent), durableKey(false, [16]byte{}, o2.Persistent); k1 != k2 {
-		t.Fatalf("durableKey 已不再碰撞（%q vs %q）", k1, k2)
+	if o1.Persistent == o2.Persistent {
+		t.Fatalf("两个会话的句柄拿到相同的 Persistent(%d) —— v1 durable 键必然碰撞",
+			o1.Persistent)
 	}
-	t.Logf("v1 登记表键在两个会话上相同：%q", durableKey(false, [16]byte{}, o1.Persistent))
+	if k1, k2 := durableKey(false, [16]byte{}, o1.Persistent), durableKey(false, [16]byte{}, o2.Persistent); k1 == k2 {
+		t.Fatalf("durableKey 仍在碰撞：%q", k1)
+	}
+
+	// 规模化对照：单会话内连开 200 个句柄，Persistent 不许重复。
+	seen := map[uint64]bool{o1.Persistent: true, o2.Persistent: true}
+	for i := 0; i < 200; i++ {
+		o := qaAddOpen(t, s1, tree1, "f.txt", &fakeHandle{})
+		if seen[o.Persistent] {
+			t.Fatalf("第 %d 个句柄的 Persistent(%d) 与之前重复", i, o.Persistent)
+		}
+		seen[o.Persistent] = true
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +297,123 @@ func TestQADurableReconnectRebindsTree(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 超时回收必须真的关闭底层句柄（原 durable_defect_test.go，已修，转回归）
+// 6. v1 键不再跨会话碰撞（原 durable_defect_test.go，已修，转回归）
+// ---------------------------------------------------------------------------
+
+// TestQADurableV1KeyNoCrossSessionCollision
+//
+// 原缺陷：Persistent 是会话内计数器，两个会话的首个句柄都是 1；durableKey
+// 的 v1 分支只用 Persistent 做键，于是两个不同文件的 durable 句柄共用键
+// "v1:1"，后登记的静默覆盖先登记的。客户端用 a.txt 的 FileId 重连，服务端
+// 把 b.txt 的句柄交回去 —— 跨会话交叉句柄泄漏，身份校验拦不住（同一用户
+// 开两条连接完全正常）。
+//
+// 判据可证伪：把 session.go 的 Persistent 改回会话内计数器，
+// 登记表会只剩 1 条，且重连拿回的 Path 变成 "b.txt"。
+func TestQADurableV1KeyNoCrossSessionCollision(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = 30 * time.Second
+
+	conn := NewConn(&Settings{}, "test", "test")
+	ctx1, s1, tree1 := qaSession(t, conn, 1, "alice", "share")
+	ctx2, s2, tree2 := qaSession(t, conn, 2, "alice", "share")
+
+	o1 := qaAddOpen(t, s1, tree1, "a.txt", &fakeHandle{})
+	grantDurable(t, ctx1, o1, dhqReq(wire.OplockLevelBatch))
+	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
+	grantDurable(t, ctx2, o2, dhqReq(wire.OplockLevelBatch))
+
+	if n := len(durableRegistry.entries); n != 2 {
+		t.Fatalf("两个不同文件的 durable 句柄应各占一条登记，实得 %d 条（键碰撞）", n)
+	}
+
+	s1.Close() // 只有 s1 掉线；s2/o2 仍在正常使用
+
+	// 真实重连时序：新连接、新会话、新树，同一个用户。
+	conn3 := NewConn(&Settings{}, "test", "test")
+	_, s3, tree3 := qaSession(t, conn3, 1, "alice", "share")
+
+	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
+		Persistent: o1.Persistent, Volatile: o1.Volatile}}
+	got, st := durableRegistry.reconnect(s3, tree3, intent)
+	if st != status.Success {
+		t.Fatalf("重连本应成功（同一用户、同一 share、未超时），实得 %v", st)
+	}
+	if got.Path != "a.txt" {
+		t.Errorf("用 a.txt 的 FileId 重连，却拿回 %q 的句柄 —— 交叉句柄泄漏", got.Path)
+	}
+	if got == o2 {
+		t.Error("拿回的是另一个会话仍在使用中的句柄 o2")
+	}
+	// o2 的登记必须原封不动：它那条连接根本没断。
+	if o2.Durable == nil || o2.Durable.key == "" {
+		t.Error("o2 的登记被 o1 的重连顺手清掉了")
+	}
+}
+
+// TestQADurableRemoveChecksEntryOwnership
+//
+// 原缺陷：durableTable.remove 只按 open.Durable.key 删除，**不校验表里那条
+// 记录是否真的属于这个 open**。当年靠 v1 键碰撞就能触发：A 的 CLOSE 会把
+// B 的登记删掉，B 从此再也无法重连（静默失效，日志里什么都看不到）。
+//
+// v1 键全局唯一之后这条路走不通了，但守卫本身**不能撤** —— v2 的键是客户端
+// 自己给的 CreateGuid，服务端管不住重复。这里直接对着 detachLocked 的归属
+// 检查做白盒验证：手工把 o2 的 key 指向 o1 的登记（模拟任何未来会重新引入
+// 键碰撞的改动），o1 的记录必须活下来。
+//
+// 判据可证伪：把 detachLocked 里的 `e.open == open` 去掉，本用例立刻变红。
+func TestQADurableRemoveChecksEntryOwnership(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = 30 * time.Second
+
+	conn := NewConn(&Settings{}, "test", "test")
+	ctx1, s1, tree1 := qaSession(t, conn, 1, "alice", "share")
+	ctx2, s2, tree2 := qaSession(t, conn, 2, "alice", "share")
+
+	o1 := qaAddOpen(t, s1, tree1, "a.txt", &fakeHandle{})
+	grantDurable(t, ctx1, o1, dhqReq(wire.OplockLevelBatch))
+	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
+	grantDurable(t, ctx2, o2, dhqReq(wire.OplockLevelBatch))
+
+	// 前提检查写成 nil 安全的：键一旦重新碰撞，register() 会拒绝给 o2 授予，
+	// o2.Durable 直接是 nil。裸取字段会 panic，把「前提不成立」伪装成崩溃。
+	if o1.Durable == nil || o2.Durable == nil {
+		t.Fatalf("前提被破坏：两个句柄都该拿到 durable 授予，实得 o1=%v o2=%v",
+			o1.Durable != nil, o2.Durable != nil)
+	}
+	o1Key := o1.Durable.key
+	if o1Key == "" || o1Key == o2.Durable.key {
+		t.Fatalf("前提被破坏：o1.key=%q o2.key=%q", o1Key, o2.Durable.key)
+	}
+
+	// o1 掉线进等待重连态。
+	durableRegistry.disconnect(o1)
+
+	// 制造「o2 的 key 指向 o1 那条记录」的状态，然后让 o2 走显式 CLOSE。
+	o2.Durable.key = o1Key
+	o2.close()
+
+	if _, ok := durableRegistry.entries[o1Key]; !ok {
+		t.Fatal("o2 的 CLOSE 删掉了 o1 的登记 —— remove 没做归属校验")
+	}
+
+	// 而且 o1 必须真的还能重连回来。
+	conn3 := NewConn(&Settings{}, "test", "test")
+	_, s3, tree3 := qaSession(t, conn3, 1, "alice", "share")
+	intent := &wire.DurableIntent{ReconnectV1: &wire.FileID{
+		Persistent: o1.Persistent, Volatile: o1.Volatile}}
+	got, st := durableRegistry.reconnect(s3, tree3, intent)
+	if st != status.Success {
+		t.Fatalf("o1 重连失败：%v", st)
+	}
+	if got != o1 {
+		t.Errorf("重连拿回的不是 o1（Path=%q）", got.Path)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7. 超时回收必须真的关闭底层句柄（原 durable_defect_test.go，已修，转回归）
 // ---------------------------------------------------------------------------
 
 // TestQADurableExpiredEntryClosesHandle
@@ -360,7 +493,7 @@ func TestQADurableExpiredEntriesReclaimedByNewRegistrations(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. 驱逐必须发生在鉴权之后（原 durable_defect_test.go，已修，转回归）
+// 8. 驱逐必须发生在鉴权之后（原 durable_defect_test.go，已修，转回归）
 // ---------------------------------------------------------------------------
 
 // TestQADurableEvictionRequiresAuthorization
