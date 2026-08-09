@@ -46,7 +46,14 @@ export PATH
 # 它的存在同时带来反向约束 `!metabolt`（noop.go），与 `!windows` 同理——
 # 脚本对平台类反向约束本来就放行（见下方 KNOWN），这里把 metabolt 也纳入，
 # 让 `!metabolt` 走同一套「已知反向约束、不报错」的处理。
-TAGS=integration,smoke,metabolt
+# `qadefect` 是 qa-proto 的「缺陷复现」用例 tag（PR #29 引入）：只进本脚本的
+# union 编译那一关（go vet 侧），**不要**进 gate_test 的实际运行——那批用例在
+# 缺陷修好前是故意失败的，跑起来会把 CI 打红。gate_test 跑的是不带 tag 的
+# `go test ./...`，天然碰不到它们。
+# 新增任何带 build tag 的源文件时，必须同步登记到这里，否则本脚本会红——
+# 这是刻意的：不登记 = 那些文件没有任何一关会编译它们（假绿）。
+# 已因此红过两次：metabolt（#26）、qadefect（#29）。
+TAGS=integration,smoke,metabolt,qadefect
 
 # ------------------------------------------------------- 0. tag 清单自检
 #
