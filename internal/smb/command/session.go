@@ -2,6 +2,7 @@ package command
 
 import (
 	"sync"
+	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/auth"
 	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
@@ -266,38 +267,41 @@ func (s *Session) RemoveTree(id uint32) status.Status {
 	}
 	delete(s.trees, id)
 
-	// 摘出属于该树的句柄：持久句柄要搬进 waiting 表（不断开底层文件），
-	// 其余锁外关闭（Close 可能阻塞在 IO 上）。disconnect 会取 durableRegistry
-	// 的锁，必须在释放 s.mu 之后再调用，避免与 reconnect（r.mu→s.mu）形成
-	// 加锁顺序反转导致死锁。
-	var doomed, durable []*Open
+	// 摘出属于该树的句柄，**全部在锁外处理**：持久句柄搬进 waiting 表
+	// （不断开底层文件），其余关闭（Close 可能阻塞在 IO 上）。
+	//
+	// 两件事都不能在 s.mu 内做：disconnect 与 Invalidated 的读取都要取
+	// durableRegistry.mu，而 reconnect 侧存在 r.mu→s.mu 的先后关系，在
+	// s.mu 内取 r.mu 就是加锁顺序反转。所以这里只摘不判，判定挪到锁外。
+	var candidates []*Open
 	for vid, o := range s.opens {
 		if o.Tree == t {
 			delete(s.opens, vid)
-			if o.Durable != nil && o.Durable.Granted && !o.Durable.Invalidated {
-				durable = append(durable, o)
-			} else {
-				doomed = append(doomed, o)
-			}
+			candidates = append(candidates, o)
 		}
 	}
 	s.mu.Unlock()
 
-	for _, o := range durable {
-		durableRegistry.disconnect(o)
-	}
-	for _, o := range doomed {
-		o.close()
+	for _, o := range candidates {
+		// disconnect 返回 false = 不是持久句柄 / 已作废 / 键被占用，
+		// 这些都必须正常关闭，否则既不在等待表里又没关，fd 就泄漏了。
+		if !durableRegistry.disconnect(o) {
+			o.close()
+		}
 	}
 	return status.Success
 }
 
 // ---- 句柄表 ----
 
-// AddOpen 登记一个新打开的句柄并分配 FileId。
+// AddOpen 登记一个新打开的句柄并分配 FileId（MS-SMB2 §2.2.14.1）。
 //
-// Persistent 与 Volatile 都用同一个单调递增值：我们不支持 durable handle，
-// 因此 Persistent 只需在会话内唯一即可（MS-SMB2 §2.2.14.1）。
+// 两半的作用域**不同**，不要再把它们合成一个值：
+//
+//   - Volatile 只在本会话的句柄表里查，用会话内计数器即可；
+//   - Persistent 是 GlobalOpenTable 的索引（§3.3.1.10），作用域是整个
+//     服务端。durable handle v1 重连时客户端带回的就是它，所以它必须
+//     全进程唯一 —— 详见 durable.go 的 newPersistentID。
 func (s *Session) AddOpen(o *Open) status.Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -311,7 +315,7 @@ func (s *Session) AddOpen(o *Open) status.Status {
 
 	s.nextVolatile++
 	o.Volatile = s.nextVolatile
-	o.Persistent = s.nextVolatile
+	o.Persistent = newPersistentID()
 	o.Session = s
 	s.opens[o.Volatile] = o
 	return status.Success
@@ -363,11 +367,14 @@ func (s *Session) Close() {
 
 	for _, o := range opens {
 		// 持久句柄不能随会话销毁而关闭——它们要进 waiting 表等重连。
-		// 普通句柄正常关闭底层文件。
-		if o.Durable != nil && o.Durable.Granted && !o.Durable.Invalidated {
-			durableRegistry.disconnect(o)
-		} else {
+		// disconnect 返回 false 的（非持久 / 已作废 / 键被占）正常关闭。
+		if !durableRegistry.disconnect(o) {
 			o.close()
 		}
 	}
+
+	// 会话拆除是「等待重连表可能变大」的另一个时机，顺手清一遍过期项。
+	// 与 register 里的机会式回收合起来，覆盖了两个方向：有新句柄进来、
+	// 有旧连接离开。刻意不起常驻定时器 goroutine。
+	durableRegistry.reap(time.Now())
 }
