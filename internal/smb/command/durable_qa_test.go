@@ -97,7 +97,8 @@ func TestQAPersistentIDIsGloballyUnique(t *testing.T) {
 		t.Fatalf("durableKey 仍在碰撞：%q", k1)
 	}
 
-	// 规模化对照：单会话内连开 200 个句柄，Persistent 不许重复。
+	// 规模化对照：单会话内连开 200 个句柄，Persistent 不许重复，
+	// 且不许撞上两个保留值（0=未分配，全 1=复合请求占位）。
 	seen := map[uint64]bool{o1.Persistent: true, o2.Persistent: true}
 	for i := 0; i < 200; i++ {
 		o := qaAddOpen(t, s1, tree1, "f.txt", &fakeHandle{})
@@ -105,6 +106,50 @@ func TestQAPersistentIDIsGloballyUnique(t *testing.T) {
 			t.Fatalf("第 %d 个句柄的 Persistent(%d) 与之前重复", i, o.Persistent)
 		}
 		seen[o.Persistent] = true
+	}
+	for p := range seen {
+		if p == 0 {
+			t.Error("分配出了 Persistent=0（该值保留作「未分配」）")
+		}
+		if p == ^uint64(0) {
+			t.Error("分配出了 Persistent=0xFFFFFFFFFFFFFFFF（wire.CompoundFileID 占位值）")
+		}
+	}
+}
+
+// TestQAPersistentIDNeverCollidesWithCompoundSentinel 钉死 newPersistentID 的
+// 不变量：分配值不得等于 wire.CompoundFileID 的任一半。
+//
+// 那个哨兵（全 0xFF）在复合请求里表示「复用上一条 CREATE 返回的句柄」
+// （§3.2.4.1.4，macOS 大量使用）。分配器一旦吐出它，IsCompound() 会把一个
+// 正常句柄误判成占位符，客户端拿到的句柄直接串号。
+//
+// 当前实现单调递增、首值为 1，天然碰不到；本用例的意义是把这条不变量**钉在
+// 测试里**，防止将来改成「复用回收的 ID / 时间戳 / 随机数」时悄悄破坏它 ——
+// 那时递增性不再成立，必须显式排除这两个值。
+func TestQAPersistentIDNeverCollidesWithCompoundSentinel(t *testing.T) {
+	prev := uint64(0)
+	for i := 0; i < 1000; i++ {
+		got := newPersistentID()
+		if got == 0 {
+			t.Fatal("newPersistentID 返回 0（保留作「未分配」）")
+		}
+		if got == ^uint64(0) {
+			t.Fatal("newPersistentID 返回 0xFFFFFFFFFFFFFFFF（复合请求占位值）")
+		}
+		if got <= prev {
+			t.Fatalf("newPersistentID 不再单调递增：%d 之后是 %d", prev, got)
+		}
+		prev = got
+	}
+
+	// 反向对照：确认哨兵确实要求两半同时为全 1，且它真的还在。
+	// wire 侧若改了定义，这里会提醒回来重新评估上面的不变量。
+	if !(wire.FileID{Persistent: ^uint64(0), Volatile: ^uint64(0)}).IsCompound() {
+		t.Error("wire.CompoundFileID 的定义已变，请重新评估 newPersistentID 的不变量")
+	}
+	if (wire.FileID{Persistent: 1, Volatile: 1}).IsCompound() {
+		t.Error("正常 FileId 被判成复合占位符")
 	}
 }
 
