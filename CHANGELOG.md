@@ -15,10 +15,18 @@
 > 3. **区分三档置信度，不要混为一谈**：**已实测验证** / **只交叉编译过** /
 >    **只读代码推断**。例：`F_FULLFSYNC` 的 darwin 分支属于第二档（开发容器是
 >    Linux，从没真跑过），写的时候必须点明。
-> 4. **v0.2.0 已将下列此前「在各自分支上」的能力合入 `main`**：durable handle
->    （v1/v2）、ShareAccess、oplock/lease 断连通道、per-share quota、Windows 路径
->    junction 逃逸修复、`internal/meta` 旁路存储。Time Machine 定级据此上调，见
->    [`docs/timemachine-status.md`](docs/timemachine-status.md)。
+> 4. **PR 号必须逐条核对过再写。** 本节初稿把 durable handle 记成 PR #119、
+>    oplock 通道记成 #103、per-share quota 记成 #42、VFS 修复记成 #38 ——
+>    这四个号实际上分别是两篇 memory 文档和两个测试 PR，全错。核对方法：
+>    `git log --oneline --merges --ancestry-path <功能提交>..origin/main | tail -1`。
+>
+> **本节只写 v0.1.0 之后的增量。** v0.1.0 已交付的能力（SMB 2.0.2~3.1.1 协商、
+> NTLMv2、SMB 签名、SMB3 加密与 `encryption_required` 修复、19 个 SMB2 命令、
+> 进程内 mDNS/DNS-SD、多共享、AAPL / 命名流 / 稀疏文件等 Apple 扩展）在本版本
+> **继续有效且未做改动**，完整描述见下方 v0.1.0 小节，此处不复述。
+> 特别地：`internal/smb/crypto`、`internal/auth`、`internal/smb/dialect` 三个目录
+> 自 v0.1.0 起**零改动**（`git diff --stat v0.1.0..main` 对这三个目录输出为空），
+> 因此本版本没有任何「加密 / 签名修复」可写，不要把 v0.1.0 的那条搬过来。
 
 ### 发布物形态
 
@@ -28,11 +36,23 @@
 - **多架构 Docker 镜像**：`FROM scratch` 基础镜像，**零 `RUN` 指令**（仅 `COPY`，
   无需 QEMU 模拟），内嵌 `stupidsamba` 二进制 + `configs/docker.yaml`，监听 445/tcp
   与 5353/udp。由 `docker buildx` 构建 `linux/amd64` + `linux/arm64` 双架构 manifest。
+  镜像里的二进制**与裸包里的是同一份字节**：`scripts/docker-build.sh` 从
+  `scripts/build-release.sh` 产出的 `.tar.gz` 里解出二进制再 `COPY` 进镜像，
+  于是裸包那五项自检（CGO 关没关、`-trimpath` 生效没、GOOS/GOARCH 对不对、
+  版本号有没有真注入、`ldd` 静态链接）自动覆盖到镜像。若改成在 Dockerfile 里
+  `RUN go build`，镜像里的二进制反而会成为整个发布物中唯一没被自检过的东西。
 - 镜像**未推送**至远端仓库：最终 tag 与镜像推送由 team-lead 在全部 PR 合入、
   CI 全绿后执行。本地已构建并验证 manifest 含 amd64 + arm64 两架构。
 - 端到端镜像验证脚本 [`scripts/verify-image.sh`](scripts/verify-image.sh)：用
   `smbclient` + `impacket` 对容器做 8 项可证伪校验（启动、静态可执行、读写往返、
-  共享不存在被拒的反向对照、数据落到命名卷、guest 警告、mDNS 关闭），均通过。
+  共享不存在被拒的反向对照、数据落到命名卷、guest 警告、mDNS 关闭）。
+  **已实测：8/8 通过**（2026-08-09 本机 docker 27+/buildx v0.35 实跑），
+  并做过变异对照——把内置配置的共享路径改成不存在的目录重打镜像，脚本如期报红。
+- `scripts/docker-build.sh` 的多架构自检**不再在本地构建时跳过**：改用
+  `docker create --platform` 做解析探针，并以一个未构建的架构（`linux/s390x`）
+  做反向对照。此前本地路径直接打印「跳过 manifest 核对」，等于「多架构」在推送前
+  从来没被验证过——buildx 只出宿主架构时命令照样返回 0，要等 arm64 用户拉下来
+  `exec format error` 才发现。
 
 ### 开发流程与工具（不影响运行时行为）
 
@@ -55,52 +75,101 @@
 
 ### 协议与功能
 
-- **durable / persistent handle（v0.2.0 头号新增，PR #119）**：实现持久句柄 v1/v2，
-  断网重连后可恢复已打开的句柄。**已实测验证**：`create_context_durable_test.go`
-  覆盖 reconnect 签名；但**尚无真实 macOS Time Machine 长跑断线恢复**的端到端证据
-  （开发环境无 macOS），置信度属「已实测验证握手与重连路径」，而非「真实备份过程不中断」。
-- **ShareAccess（PR #34）**：`CREATE` 现在解析并强制 `ShareAccess` 共享模式
-  （R/W/D 互斥/共享），违反时返回 `STATUS_SHARING_VIOLATION`。
-- **CREATE context 注册表**：`AAPL` / `AlSi` / `MxAc` / `QFid` + durable 上下文统一登记，
-  不再散落硬编码。
-- **oplock / lease 断连通道（PR #103）**：`handleOplockBreak` 已接线并返回正确的
-  `STATUS_INVALID_OPLOCK_PROTOCOL`，新增相关 NTSTATUS 常量。但**服务端仍不宣告
-  `SMB2_GLOBAL_CAP_LEASING`、仍一律授予 `NONE` oplock**——对外可观察行为无变化，
-  客户端继续不缓存。属内部修正，为后续真实 oplock 铺路。
-- **per-share quota（PR #42）**：`quota_bytes` 向客户端上报卷容量（Time Machine 限容
-  的唯一有效手段），现已按共享粒度生效。
-- **VFS 修复（PR #38）**：路径安全与属性映射若干修正。
-- **Windows 路径 junction 逃逸修复（PR #44）**：防御 `..` 经 junction/符号链接逃逸。
-  **置信度：仅交叉编译 + 单元测试通过**，无 Windows 真机验证（开发容器是 Linux）。
-- Windows 旁路 POSIX 元数据存储（随 PR #26 合入，`internal/meta`）改用新 bucket 名
-  `posix.v2`。v0.1.0 时期由 `internal/vfs/metadata_windows.go` 写入的 `posix` bucket
-  记录（若存在）本版本**不再读取**，回退到默认属主/权限——这是有意的、无迁移的改名：
-  v0.1.0 的 Windows 后端从未被真机执行过、库里没有真实数据，为不存在的数据写迁移逻辑
-  收益为零且引入第二个不可验证路径。详见 `internal/meta/bolt.go` 的 bucketName 注释。
+- **durable / persistent handle v1 / v2（本版本头号新增，PR #20，缺陷修复 PR #40，
+  独立验证用例 PR #29）**：授予、断线后重连认领、超时回收。这是 v0.1.0「已知问题」
+  里列的头号缺口——一次 Time Machine 备份动辄数小时，此前网络抖动会让已打开的句柄
+  无法恢复、备份中断重来。
+  PR #40 修掉 6 个缺陷：登记表键跨会话碰撞、归属校验缺失、data race、超时未关句柄、
+  「先授权后驱逐」的次序、重连未改绑树；`DH2Q` 的 persistent 位改为**降级**而非
+  打死整个 `CREATE`。
+  **置信度：单元测试 + impacket 线级用例（手工拼 create context）验证了授予/重连/
+  超时路径**；**没有** macOS 真机长跑断线恢复的证据（开发环境无 macOS）。
+  也就是说已验证的是「握手与重连协议正确」，不是「真实备份过程不会中断」。
+- **共享模式（ShareAccess）冲突判定（PR #34，MS-FSA §2.1.5.1.2）**：此前
+  `ShareAccess` 三个位一路解析到 `create.go` 就断了，`STATUS_SHARING_VIOLATION`
+  定义了却从没有人返回——典型的「字段解析出来了但从未接线」。
+  判定是**双向**的：新请求的 `DesiredAccess` 要被所有已存在句柄的 `ShareAccess` 允许，
+  且新请求的 `ShareAccess` 要允许所有已存在句柄的 `DesiredAccess`；只做前者的话
+  「先以 SHARE_ALL 打开、再以 `ShareAccess=0` 打开」这种反向独占请求会被放行，
+  第二个客户端会以为自己拿到了独占而实际没有。
+  **已知边界（刻意不修）**：两个**不同的共享**指向同一个宿主目录时，彼此看不到
+  对方的句柄——跨共享检测需要 (设备号, inode) 这一级的全局身份，当前 VFS 不暴露。
+- **CREATE context 处理重构成注册表（随 PR #20）**：新增一种 context 只需在自己的
+  文件里 `init()` 登记，不再改 `create.go`。现登记 `AAPL` / `AlSi` / `MxAc` / `QFid`
+  与 durable 族。**注意前四种在 v0.1.0 就已支持**，这里变的只是组织方式。
+- **oplock / lease break 主动推送通道（PR #12；NTSTATUS 常量 PR #4）**：
+  MS-SMB2 §3.3.4.6 / §3.3.4.7，break 通知的 `MessageId` 固定为 `0xFFFFFFFFFFFFFFFF`。
+  `handleOplockBreak` 改回返回 `STATUS_INVALID_OPLOCK_PROTOCOL`（此前误用
+  `STATUS_INVALID_PARAMETER`）。
+  **这只是通道**：服务端**仍不宣告** `SMB2_GLOBAL_CAP_LEASING`、`CREATE` 仍一律授予
+  `NONE` oplock，因此**对客户端可观察行为没有任何变化**，客户端继续不缓存。
+- **配额按共享粒度计算（PR #14；启动自检 PR #15）**：可用空间改按**本共享**的实际
+  用量计算，修掉空共享被报 0 可用而直接阻断 Time Machine 的问题；启动时自检
+  `quota_bytes` 是否已经小于共享现有用量并告警。
+- **VFS 修复（PR #13）**：`SET_INFO` 纯 mode 变更曾丢失、`Mode` 被归零、
+  `Rename` 大小写别名路径上的数据丢失（改用 `os.SameFile` 判定别名）。
+  另有 `ResolveParent` 改为先精确匹配再回退（PR #10）。
 
 ### 安全
 
-- **Windows junction 逃逸修复（PR #44）**：见上「协议与功能」。属服务端路径穿越防御的
-  加固，置信度为「仅交叉编译 + 单测」，无 Windows 真机证明。
+- **堵住 Windows junction（目录联接）逃逸（PR #44）**：Go 在 Windows 上用
+  `fi.Mode()&os.ModeSymlink` 判断链接会**漏掉 junction**，于是 v0.1.0 的路径穿越
+  防护在 Windows 上留了一个缺口——共享内的 junction 可以指向共享外。现按平台分别判定。
+  **置信度：只交叉编译过 + 纯判定逻辑的表驱动单测通过，无 Windows 真机验证。**
+  实现刻意把不依赖系统调用的判定规则剥进无 build tag 的文件里以便在 Linux 上测试，
+  真正调用 `FindFirstFileW` / `GetFinalPathNameByHandleW` 的那一半跑不了。
+- `validateWindowsName` 接线进 `ValidateComponent`（PR #19）——此前同样是「写了没接」。
 
 ### 配置
 
-- 路径字段按**运行平台**判定绝对性：`metadata_path` 等路径在错误平台上填绝对路径会直接
-  启动失败（而非静默忽略），跨平台校验语义已在 v0.1.0 的 README/example.yaml 修正中落地。
+- `configs/example.yaml` 澄清**路径字段按运行平台判定绝对性**：`shares[].path`、
+  `shares[].metadata_path`、`log.file` 校验的是**当前运行平台**意义上的绝对路径，
+  `/srv/share/public` 在 Windows 上不算绝对路径、会直接启动失败。
+- `metadata_path` 的校验按平台判定（PR #18）：非 Windows 上跳过运行时使用，
+  但**所有平台都参与启动校验**。因此同一份配置跨平台复用时，这一项要么留空、
+  要么按平台分开写。文档此前写作「会被忽略」，容易被读成「随便填」。
 
-### 内部
+### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
 
-- **`internal/meta`（PR #26，v0.3.0 准备）**：纯 Go 嵌入式 KV 旁路存储已合入，但
-  **当前产品代码尚未引用**——它要到 v0.3.0 的 `oscap` builtin 适配器落地后才真正启用。
-  本版本只是把底座就位，不做功能承诺。
+以下两项都是 v0.3.0 的底座，写在这里是因为它们已经进了仓库（其中一项还进了
+`go.mod`），但**产品代码目前一行都没有引用**。不要读成功能承诺。
+
+- **`internal/oscap`：OS 能力抽象 port（PR #123）**。按 AGENTS.md §1.2 C9 / §5 P7
+  定义六项可选能力的接口——`xattr` / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 /
+  DOS 属性位——外加逐能力降级矩阵、`auto`/`native`/`portable` 三态模式与平台探测，
+  并配 31 例单元测试。**只有 port，`native/` 与 `builtin/` 两个适配器都还不存在**，
+  配置项 `filesystem_mode` 也**尚未接入** `internal/config`（现在写进配置文件会因为
+  严格 YAML 的未知字段校验而启动失败）。
+- **`internal/meta`：POSIX 元数据旁路 KV 存储（PR #26）**。Windows 用
+  `go.etcd.io/bbolt`（纯 Go，符合 C1 禁 CGO），非 Windows 为 noop 实现，bucket 名
+  `posix.v2`。
+  ⚠️ **本版本实际生效的 Windows 旁路存储仍然是 `internal/vfs/metadata_windows.go`
+  那一份**（bucket 名 `posix`），`internal/meta` 没有任何产品调用点。
+  两份实现会派生出**同一个数据库文件路径**
+  （`%AppData%\stupidsamba\metadata-<共享根哈希>.db`），只是 bucket 不同——
+  在 v0.3.0 把 `internal/meta` 接线时必须一并拆掉旧实现，否则同一个文件会被两套
+  代码用两个 bucket 各写各的。此项已作为风险 R11 记录在
+  [`docs/status-v0.2.0.md`](docs/status-v0.2.0.md)。
+  另注：`internal/meta` 的 bbolt 分支挂在 `windows || metabolt` build tag 下，
+  默认 CI 不编译它，需 `-tags metabolt` 才能跑到。
 
 ### 已知问题 / 未实现（v0.2.0）
 
 - **`CHANGE_NOTIFY` 仍返回 `STATUS_NOT_SUPPORTED`**：客户端降级为定时轮询，目录列表
   不会自动刷新（需手动刷新）。异步变更通知未实现。
-- **真实 oplock / lease 能力仍未对外生效**：见「协议与功能」。
-- **Time Machine 仍未通过 macOS 真机端到端验收**：durable handle 已就位但无真机断线
-  恢复证据；详见 [`docs/timemachine-status.md`](docs/timemachine-status.md)。
+- **真实 oplock / lease 能力仍未对外生效**：通道通了，但不宣告 `CAP_LEASING`、
+  一律授予 `NONE` oplock，客户端继续不缓存，band 文件密集写吞吐仍受损。
+- **Time Machine 定级仍为 C 档，未上调。** durable handle 这个头号缺口已经补上，
+  但定级的依据是 [`docs/timemachine-status.md`](docs/timemachine-status.md)，
+  而该文档的 B 档要求包含「真机断线恢复证据」，本版本一条都没有（开发环境无 macOS）。
+  **能力就位 ≠ 定级上调**，在真机跑过之前不动这个结论。**请勿用于唯一备份。**
+- **`internal/oscap` 只有 port，没有适配器**；`filesystem_mode` 配置项尚未接入，
+  写进配置文件会因严格 YAML 未知字段校验而启动失败。
+- **非 Windows 平台仍无元数据旁路兜底**：`internal/vfs/metadata_other.go` 直接
+  返回 nil。宿主文件系统不支持 xattr 时（FAT32/exFAT 外置盘、`nouser_xattr` 挂载、
+  只读根）这些元数据会**静默丢失**且不报错。这是 v0.3.0 builtin 完整化的第一优先级。
+- **不支持**（与 v0.1.0 相同）：完整 SMB1 文件操作、Kerberos/AD、DFS、打印机共享、
+  多通道（multichannel）、目录租约（directory leasing）。
 
 ---
 
