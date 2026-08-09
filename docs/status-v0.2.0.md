@@ -1509,9 +1509,47 @@ git diff --name-only origin/main...$br -- .cnb.yml  # → 0  三点：报「没�
 |---|---|---|
 | `lead/memory-dirty` | `memory/reference_cnb_pr_api.md`（内容冲突） | **待 team-lead 处理**（是他的分支） |
 | `win-meta/is-windows-slash` | `internal/config/validate.go` | **作废**——win-meta 确认 main 里 `isWindowsSlash` 已是同样的委托实现且注释更全，该分支唯一提交无独有价值 |
-| `win-vfs/openhost-seam` | `internal/vfs/openhost_*.go` / `winopen.go`（add/add） | **疑似作废**——落后 main 8889 行，唯一提交「抽出 `openHostFile` 接缝」已由 `#33` 在 main 落地。**需 win-vfs 本人确认后放弃** |
+| `win-vfs/openhost-seam` | `internal/vfs/openhost_*.go`（**add/add**） | **确认作废，且无需任何人处置**——其 PR **#30 早已 closed（`is_merged: false`）**。详见 §17.4.1 |
 
 其余 16 个未合并分支与 main 均可干净合并。
+
+### 17.4.1 `openhost-seam`：不是「待确认作废」，是**同一份工作被做了两遍**（16:29 查证）
+
+我按 PM 纪律没有转述二手结论，自己核了一遍 —— 结论比 win-meta 说的更明确，**但两个细节要更正**：
+
+| win-meta 的说法 | 实际 |
+|---|---|
+| 「main 已由 **#33** 落地」 | **#33 是 `win-meta/validate-slash-source`**（`isWindowsSlash` 收敛成薄封装），与接缝无关。接缝进 main 靠的是提交 **`182af15`**，不属于任何被合并的 PR |
+| 「疑似作废，需 win-vfs 确认」 | 该分支的 **PR #30 早在之前就 `state=closed` 且 `is_merged: false`**——已经被关掉了。**不存在待办**，它只是一个 PR 已关闭的死分支 |
+
+**真实经过（时间戳说话）**：
+
+- `13:53:21` `8231d1a` 在 `win-vfs/openhost-seam` 上完成接缝 → 开 PR **#30**
+- `13:58:37` `182af15` **在 main 上把同一件事又做了一遍**（改写版），**相隔 5 分 16 秒**
+- 随后 #30 被 close 且未合并；`8231d1a` 至今只被 `win-vfs/openhost-seam` 这一个 ref 引用
+
+**main 版确实是严格超集，我逐字核过而不是只比行数**：不仅函数体一致、注释重组为编号 TODO，
+**分支版那句安全备注也完整保留了** ——「另见 `sys_windows.go` 的 `openNoFollow = 0`
+（Windows 上符号链接逃逸防护缺口，同样待第二步用 `FILE_FLAG_OPEN_REPARSE_POINT` 补）」。
+这句是本分支唯一可能的独有价值（§8 安全条目），**没丢**，所以放弃该分支零损失。
+
+> **方法自省**：我给 win-vfs 发确认信时说的「main 版是严格超集」，当时依据只有**行数对比**
+> （19 vs 17、25 vs 21）和 unix 侧全文。行数更多**不等于**内容是超集 —— 完全可能是
+> 注释重写时把一句安全备注换成了三句别的。**结论下对了，方法是错的。**
+> 补查那句 `FILE_FLAG_OPEN_REPARSE_POINT` 才是真正的判据。
+> 这与本轮 §17.2 同源：**聚合数字（行数、分支计数）最容易掩盖口径错误，必须落到具体内容上验。**
+
+**这才是本条真正的教训——不是分支作废，是重复劳动**：
+两人在 5 分钟内各自实现了同一道接缝，先开 PR 的那份被丢弃。
+连同 `win-meta/is-windows-slash`（同形态），本轮共发现 **2 例**。
+两例都落在 Windows 相关的小改动上，**根因相同：这类零散小修不在 §7.1 的文件所有权表里**，
+谁看见谁顺手做。建议 v0.3.0 开工前把 `internal/vfs/openhost_*.go`、
+`internal/config/validate.go` 这类「多人都会顺手碰」的文件也明确归属。
+
+> **附**：`win-vfs` **已不在当前团队名单**（现存 team-lead / pm / qa-verify / win-meta /
+> qa-proto / oscap-port / oscap-native / oscap-builtin / oscap-config / release）。
+> 我发给他的确认信进了收件箱但可能无人读 —— 好在 PR #30 已关闭，**本条不再阻塞任何人**。
+> 分支按 §7.5 留在原地不删。
 
 ## 17.5 采纳 win-meta 的反建议：**不给两个 CI 文件设 owner**
 
@@ -1536,3 +1574,18 @@ git diff --name-only origin/main...$br -- .cnb.yml  # → 0  三点：报「没�
 另查实 `cnb pulls create-pull` 静默失败、`pm/status` 的 PR 从未存在——
 「改共享状态的命令必须独立回查」自此写进流程。
 当前：main = `b6d16b4`，开放 PR = `#121`，未合并分支 19 个、其中 3 个冲突（2 个疑似作废）。**
+
+## 17.7 补记（16:29）：本轮共查出 **2 例重复劳动**，这是比「分支作废」更该报的事
+
+`win-meta/is-windows-slash` 与 `win-vfs/openhost-seam` 表面是「两个作废分支」，
+实质是**同一件事被两个人分别做完**、先落地的进 main、另一份沦为纯冲突源。
+后者有精确时间戳：`13:53:21` 分支做完开 PR #30 → `13:58:37` main 上重做一遍 → #30 关闭未合。
+**5 分 16 秒的重复劳动**，而且它不会被任何门禁发现——两份代码各自都是对的、CI 都是绿的。
+
+这与 §17.2 的教训在同一个方向上：**并行开发的真实成本不在冲突，在于不冲突的重复**。
+冲突至少 git 会喊一声；重复劳动只表现为「有个分支合不进去」，
+如果按「作废、放弃」处理掉，那 5 分钟就静悄悄地消失在盘点表里了。
+
+**给 v0.3.0 的建议（合并到 §17.4.1 那条一起提）**：文件所有权表要覆盖**零散小修**，
+不能只划分主目录；`internal/vfs/openhost_*.go`、`internal/config/validate.go`
+这类「谁都会顺手碰一下」的文件尤其需要点名归属。
