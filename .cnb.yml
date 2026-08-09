@@ -61,9 +61,24 @@ $:
         - &gate_constraints
           name: 校验硬性约束 C1/C3/C4/C8 (AGENTS.md)
           script: sh scripts/check-constraints.sh
+        # 这一关原先写的是 `CGO_ENABLED=0 go test -race`，而**race 检测器依赖 cgo**，
+        # 于是 go 直接拒绝执行：`go: -race requires cgo; enable cgo by setting
+        # CGO_ENABLED=1`，0.1 秒退出、返回码 2。后果不是「测试没跑」这么简单：
+        # 它是流水线里第一个失败的 stage，**它后面的四关（交叉编译 / 静态链接 /
+        # 示例配置 / 优雅退出冒烟）全部被 skip**，也就是从来没有执行过一次。
+        # 实测：main 上每一次 push、每一个 PR、以及 v0.1.0 的发布流水线，
+        # 无一例外全部红在这里。修法是把两件事拆开：
+        #   1. 按 C1 的真实交付形态（CGO_ENABLED=0）跑一遍测试；
+        #   2. 再用 CGO_ENABLED=1 单独跑 race 检测。
+        # 第 2 步开 cgo **不违反 C1** —— C1 约束的是**交付的二进制**必须能在
+        # 无 cgo 下构建，这一点由上面的 gate_build 和下面的静态链接校验负责证明；
+        # race 检测只是测试期的工具，产物不发布。
         - &gate_test
-          name: 单元测试
-          script: CGO_ENABLED=0 go test -race -count=1 ./...
+          name: 单元测试 (CGO_ENABLED=0，与交付形态一致)
+          script: CGO_ENABLED=0 go test -count=1 ./...
+        - &gate_race
+          name: 竞态检测 (race 检测器依赖 cgo，故单独开 CGO_ENABLED=1)
+          script: CGO_ENABLED=1 go test -race -count=1 ./...
         - &gate_cross
           name: 交叉编译校验 (AGENTS.md C7)
           script: |
@@ -74,10 +89,14 @@ $:
             done
         - &gate_static
           name: 校验产物为静态链接 (AGENTS.md C2)
+          # LC_ALL=C 不能省：ldd 的输出是**本地化**的。中文环境下它打印
+          # 「不是动态可执行文件」，匹配不上英文串，这一关就会误报「产物不是静态链接」。
+          # 本地复跑时真踩到了。CI 镜像目前是 C locale 所以看不出来，
+          # 但一个门禁的判定结果不该取决于跑它的机器装了什么语言包。
           script: |
             CGO_ENABLED=0 go build -o /tmp/stupidsamba ./cmd/stupidsamba
-            if ldd /tmp/stupidsamba 2>&1 | grep -qv "not a dynamic executable"; then
-              echo "错误: 产物不是静态链接"; ldd /tmp/stupidsamba; exit 1
+            if LC_ALL=C ldd /tmp/stupidsamba 2>&1 | grep -qv "not a dynamic executable"; then
+              echo "错误: 产物不是静态链接"; LC_ALL=C ldd /tmp/stupidsamba; exit 1
             fi
             echo "OK: 静态链接"
         # 示例配置是大多数人接触本项目的第一份文件，它错了等于开箱即坏。
@@ -111,6 +130,7 @@ $:
         - *gate_test_compile
         - *gate_constraints
         - *gate_test
+        - *gate_race
         - *gate_cross
         - *gate_static
         - *gate_example_config
@@ -146,6 +166,7 @@ $:
         - *gate_test_compile
         - *gate_constraints
         - *gate_test
+        - *gate_race
         - *gate_cross
         - *gate_static
         - *gate_example_config
