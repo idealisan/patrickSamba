@@ -58,27 +58,26 @@ func handleChangeNotify(ctx *Context) error {
 //
 // 规范对"找不到匹配 oplock 的确认"要求回 STATUS_INVALID_OPLOCK_PROTOCOL
 // （§3.3.5.22.1）。
-//
-// TODO: internal/smb/status 目前没有 STATUS_INVALID_OPLOCK_PROTOCOL
-// (0xC00000E3)，已请 wire agent 补充；补上后把下面的返回值换掉。
 func handleOplockBreak(ctx *Context) error {
 	switch wire.PeekOplockBreakKind(ctx.Msg) {
 	case wire.OplockBreakKindOplock:
 		req, err := wire.ParseOplockBreak(ctx.Msg)
 		if err != nil {
+			// 报文本身就解不开，属于格式错误而非 oplock 协议错误。
 			return status.InvalidParameter
 		}
 		ctx.Log.Warn("收到 oplock break 确认，但本服务从不授予 oplock",
 			"level", req.OplockLevel, "session", ctx.Header.SessionID)
-		return status.InvalidParameter
+		return status.InvalidOplockProtocol
 
 	case wire.OplockBreakKindLease:
 		// 没声明 SMB2_GLOBAL_CAP_LEASING 却收到 lease 族属于协议违规。
 		ctx.Log.Warn("收到 lease break 确认，但本服务未声明 LEASING 能力",
 			"session", ctx.Header.SessionID)
-		return status.InvalidParameter
+		return status.InvalidOplockProtocol
 
 	default:
+		// StructureSize 既不是 24 也不是 36，连是哪一族都判不出来。
 		return status.InvalidParameter
 	}
 }

@@ -107,6 +107,18 @@ const (
 	InvalidBufferSize                Status = 0xC0000206 // STATUS_INVALID_BUFFER_SIZE
 	SMBNoPreauthIntegrityHashOverlap Status = 0xC05D0000 // STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP
 	SMBBadClusterDialect             Status = 0xC05D0001 // STATUS_SMB_BAD_CLUSTER_DIALECT
+
+	// oplock / lease 相关（MS-ERREF §2.3.1）。单独成组，避免打乱上面各组的对齐。
+	//
+	// OplockBreakInProgress 属于**成功类**（高两位为 0），语义是
+	// 「open/create 完成时该文件上正有一个 oplock break 在进行中」，
+	// 用于 CREATE 响应（MS-SMB2 §3.3.5.9.7）；客户端应按成功处理。
+	// OplockNotGranted 表示 oplock 请求被拒绝。
+	// InvalidOplockProtocol 表示收到了非法的 oplock break 确认
+	// （MS-SMB2 §3.3.5.22.1 / §3.3.5.22.2：Ack 与当前 break 状态不匹配）。
+	OplockBreakInProgress Status = 0x00000108 // STATUS_OPLOCK_BREAK_IN_PROGRESS
+	OplockNotGranted      Status = 0xC00000E2 // STATUS_OPLOCK_NOT_GRANTED
+	InvalidOplockProtocol Status = 0xC00000E3 // STATUS_INVALID_OPLOCK_PROTOCOL
 )
 
 // names 用于 String()。仅收录本包定义的值。
@@ -184,6 +196,10 @@ var names = map[Status]string{
 
 	SMBNoPreauthIntegrityHashOverlap: "STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP",
 	SMBBadClusterDialect:             "STATUS_SMB_BAD_CLUSTER_DIALECT",
+
+	OplockBreakInProgress: "STATUS_OPLOCK_BREAK_IN_PROGRESS",
+	OplockNotGranted:      "STATUS_OPLOCK_NOT_GRANTED",
+	InvalidOplockProtocol: "STATUS_INVALID_OPLOCK_PROTOCOL",
 }
 
 // String 返回 NTSTATUS 的符号名；未知值返回十六进制形式。
