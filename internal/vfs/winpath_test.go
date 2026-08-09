@@ -180,14 +180,24 @@ func TestValidateWindowsNameAccepts(t *testing.T) {
 	}
 }
 
-// TestValidateWindowsNameSupersetOfReservedNames 确认新表是 path.go 那张
-// 旧表的**超集**：换用 validateWindowsName 之后不能有任何设备名被漏掉。
+// legacyReservedNames 是 path.go 里那张已删除的旧设备名表的**冻结快照**。
 //
-// 这条是为接线（ValidateComponent 改调本函数）准备的回归网。
-func TestValidateWindowsNameSupersetOfReservedNames(t *testing.T) {
-	for old := range reservedNames {
+// 接线（ValidateComponent → validateWindowsName）时旧表被删掉了，但「新表
+// 不能比旧表少认一个设备名」这条约束不能跟着一起消失，所以在这里留一份字面
+// 量。它是历史事实，**不要**随 winReservedNames 一起增补——那样这条断言就
+// 变成自己跟自己比，永远为真。
+var legacyReservedNames = []string{
+	"CON", "PRN", "AUX", "NUL",
+	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+}
+
+// TestValidateWindowsNameSupersetOfLegacyReservedNames 确认新表是旧表的
+// **超集**：换用 validateWindowsName 之后不能有任何设备名被漏掉。
+func TestValidateWindowsNameSupersetOfLegacyReservedNames(t *testing.T) {
+	for _, old := range legacyReservedNames {
 		if _, ok := winReservedNames[old]; !ok {
-			t.Errorf("path.go 的 reservedNames 里有 %q，winReservedNames 却没有；"+
+			t.Errorf("旧表 reservedNames 里有 %q，winReservedNames 却没有；"+
 				"接线后这个设备名会被漏掉", old)
 		}
 	}
