@@ -51,6 +51,11 @@ type Open struct {
 	// deleteOnClose 表示关闭时删除目标（FILE_DELETE_ON_CLOSE 或
 	// SET_INFO(FileDispositionInformation)）。
 	deleteOnClose bool
+	// vfsOwnsDelete 为 true 时，底层的 vfs 句柄会在 Close 时自己删除文件
+	// （FILE_DELETE_ON_CLOSE 创建选项会走这条路，见 create.go），命令层
+	// 的 CLOSE handler 就**不能再删一次**，否则会与 vfs 重复删除，
+	// 报出 "delete-on-close 删除失败 ... vfs: not found"。
+	vfsOwnsDelete bool
 
 	// dirPattern 是 QUERY_DIRECTORY 的当前枚举通配符。
 	// SMB2 只在第一次（或带 SMB2_RESTART_SCANS 时）携带模式，

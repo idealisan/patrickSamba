@@ -123,6 +123,9 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 			return err
 		}
 		open.SetDeleteOnClose(true)
+		// vfs 层在 OpenDeleteOnClose 下会在 Close 时自行删除文件，
+		// 命令层 CLOSE handler 必须让出，避免重复删除（见 close.go）。
+		open.vfsOwnsDelete = true
 	}
 
 	if st := ctx.Session.AddOpen(open); st != status.Success {

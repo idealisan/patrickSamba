@@ -48,21 +48,27 @@ func handleIoctl(ctx *Context) error {
 // ⚠️ 这是防降级攻击的复核：客户端把它**当初发出的** NEGOTIATE 请求内容
 // 再发一遍，要求服务端回显自己**当初响应过的**方言/能力/GUID/安全模式。
 // 任何字段对不上，Windows 会立刻 TCP RESET，且不给任何提示。
-//
-// 只在 3.0 / 3.0.2 上有意义：3.1.1 用 preauth integrity hash 覆盖了同样的
-// 威胁模型，客户端不会再发这个（MS-SMB2 §3.3.5.15.12 明确要求
-// 3.1.1 时回 STATUS_FILE_CLOSED）。
 func ioctlValidateNegotiate(ctx *Context, req *wire.IoctlRequest) error {
 	c := ctx.Conn
 
+	// MS-SMB2 §3.3.5.15.12：3.1.1 用 preauth integrity hash 覆盖了降级攻击
+	// 的威胁模型，客户端**不得**发这个 IOCTL；收到即视为对端行为异常，必须
+	// 回 STATUS_FILE_CLOSED（Windows 会直接 TCP RESET）。
 	if c.Dialect == dialect.SMB311 {
-		// 规范要求的行为：3.1.1 上收到它说明对端行为异常。
 		return status.FileClosed
 	}
-	if c.Dialect < dialect.SMB300 {
+	// 连接尚未完成协商：没有可复核的基准，直接拒绝。
+	if c.Dialect == 0 {
 		return status.FileClosed
 	}
 
+	// 2.0.2 / 2.1 / 3.0 / 3.0.2 一律正常复核并回显。
+	//
+	// 规范建议对 < 3.0 的方言也回 STATUS_FILE_CLOSED，但实测 smbclient 4.22
+	// 会在 SMB 2.1 上发 FSCTL_VALIDATE_NEGOTIATE_INFO，收到 FILE_CLOSED 就
+	// 放弃整条连接（表现为 "tree connect failed: NT_STATUS_..."）。
+	// 据 AGENTS.md §9「真实客户端行为优先于规范」，这里按客户端期望处理，
+	// 否则 §2 要求的 SMB 2.0.2 / 2.1 文件共享对 smbclient 不可用。
 	in, err := wire.ParseValidateNegotiateInfoRequest(req.Input)
 	if err != nil {
 		// 输入畸形也按「校验失败」处理：断连比放行降级攻击安全。

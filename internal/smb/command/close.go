@@ -71,7 +71,8 @@ func handleClose(ctx *Context) error {
 	if ctx.Chain.LastOpen == open {
 		ctx.Chain.LastOpen = nil
 	}
-	delPath, doDelete := open.Path, open.DeleteOnClose() && open.Handle != nil
+	// vfsOwnsDelete 时底层句柄已在 open.close() 里删过，命令层不再删。
+	delPath, doDelete := open.Path, open.DeleteOnClose() && open.Handle != nil && !open.vfsOwnsDelete
 	open.close()
 
 	// delete-on-close 的实际删除必须在句柄关闭之后做
