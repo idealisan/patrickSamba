@@ -1,10 +1,10 @@
 ---
 name: 「成功回显」不等于事情真的发生了
-description: 本项目反复出现同一类事故——命令/门禁/接口给出正反馈，但要做的事一件没做。已知六个实例与各自的自查命令
+description: 本项目反复出现同一类事故——命令/门禁/接口给出正反馈，但要做的事一件没做。已知七个实例与各自的自查命令
 type: project
 ---
 
-本项目已累计**六个**同形态事故：系统给了正反馈（打印成功、CI 有记录、测试 0 失败），
+本项目已累计**七个**同形态事故：系统给了正反馈（打印成功、CI 有记录、测试 0 失败），
 但要做的事根本没发生。它们看起来毫不相关，实际是同一个病。
 
 **Why:** 这类失败不会报错，只会「安静地什么都没做」，所以从来不是被发现的，
@@ -21,6 +21,7 @@ type: project
 | 4 | 变异测试用 `grep '^    --- FAIL'` 计数，只匹配带缩进的子测试；顶层 FAIL 没缩进 → 报 0 失败。编译失败同样让计数变 0 | 「变异没被捕获」的误判 | 变异前先跑一次**未变异基线**，确认计数器读数符合预期，否则分不清「没抓到」和「根本没跑」 |
 | 5 | 安全检查写好了但没接线（`validateWindowsName` 未被 `ValidateComponent` 调用）；旧表被架空后 Go 不报 unused | 代码在、测试绿 | 新增校验函数后 grep 它的调用点；替换旧实现时**必须删掉旧的包级变量**，留着就是负资产 |
 | 6 | **build tag 后面的代码在 linux 上一行都没被编译**。`internal/meta/bolt.go` 是 `//go:build windows \|\| metabolt`，裸跑 `go list -deps ./internal/meta` 只吐出包自己（bbolt 不在依赖图里）、`go test ./internal/meta` 报 `no tests to run` | 依赖核验、vet、test 全绿 | 查 `go list -deps` 结果里**有没有你要查的那个依赖**；`go test` 输出出现 `[no tests to run]` 就是没在测。带 `-tags` 或 `GOOS=windows` 重跑 |
+| 7 | **`go build ./...` 不编译 `_test.go`**。改函数签名时分两步做（先改声明与产品代码调用方，测试调用方留到下一步），中间提交 `go build` 绿灯放行、推送成功，实际 `go vet`/`go test` 直接编译失败。该提交进了 main，成为 `git bisect` 地雷（撞上与被查 bug 无关的编译错误） | build 绿、push 成功 | 推送前用 `sh test/ci/check-test-compile.sh`（它跑 `go vet -tags ... ./...` × 4 平台），**不能只用 `go build ./...`**。AGENTS.md §7.2 已按此更新 |
 
 推论：**`skipped`、`0 failures`、`no tests to run`、`已推送` 四种输出都不构成证据。**
 要么有独立探针，要么有反向对照（故意破坏一次，确认会红）。

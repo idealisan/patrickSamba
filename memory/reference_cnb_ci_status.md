@@ -47,3 +47,38 @@ go 拒绝执行、0.1 秒退出码 2，它是第一个 stage，后面四关全�
   `git rev-parse origin/<分支>:.cnb.yml` 与 `git rev-parse origin/main:.cnb.yml`，
   blob 不同就先怀疑假红。
 - 让 push 也变绿不需要改代码，分支上 `git pull --rebase origin main` 即可。
+
+## 第三种形态：**push 绿 / PR 红，而且 PR 的红才是真的**（2026-08-09 第 12 轮实测）
+
+上面写的是「push 红 / PR 绿」。**反过来也会发生，且方向相反时红的那个是真的**：
+
+`win-vfs/open-seam`（PR #31）push=`success`、pull_request=`error`。
+原因是分支从**旧 main** 切出，push 只编译分支自身（不含新合入的 `qadefect` 测试文件）；
+PR 事件跑「与当前 main 的合并预览」，把新文件带进来才暴露问题。
+
+**所以「push 绿就没事」是错的。** 判据统一为一句话：**只看 `event=pull_request`。**
+（老结论「别拿 push 的红拦 PR」仍然成立，两条不矛盾——都是「push 那条不可信」。）
+
+## 该 API **不返回 stage 级明细**，排障必须本地实跑
+
+`.data[].pipelines[].stages` 实测是**空数组**，只有
+`pipelineSuccessCount / pipelineFailCount / pipelineTotalCount` 三个计数
+（典型 `0/1/1`）。**光靠 API 查不出「红在哪一关」。**
+
+要定位就在干净 worktree 上照 `.cnb.yml` 逐关手跑，例如：
+`sh test/ci/check-test-compile.sh`、`sh scripts/check-constraints.sh`、
+`CGO_ENABLED=0 go test ./...`、`CGO_ENABLED=1 go test -race ./...`。
+
+## ⚠️ stage 顺序执行、失败即中断 → **第一道红灯会掩盖后面所有关卡**
+
+2026-08-09 实测：`main` 红在第 ④ 关（`qadefect` build tag 未注册），
+于是第 ⑤~⑪ 关**从未执行过**，其中第 ⑦ 关 `竞态检测` 藏着一个真实的产品级 data race
+（`durable.go` 的 `remove()` 与 `disconnectedAtZero()`）。
+当时全队都以为「合了修第 ④ 关的那个 PR 就绿了」——**错的，修完只是红灯前移一关。**
+
+**Why**：这是 R1「CI 假绿」的第三次同构复发。三次的共同本质都是
+**「没报错」被当成了「检查过了」**。
+
+**How to apply**：
+- 判断「修了这个红灯是不是就绿了」时，**必须把整条链跑到底**，只验自己那一关等于没验。
+- 报「CI 已修复」之前，先确认自己看到的是**最后一关**的绿，而不是**下一关**还没跑。
