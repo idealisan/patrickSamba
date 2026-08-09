@@ -29,3 +29,4 @@
 - [跨 agent 的 sha/计数出厂即过期 + 批量扫描要抽验](feedback_stale_sha_refetch_and_batch_spotcheck.md) — 决策前先自己 fetch；批量结论随机抽 1 个用精确方法复验，别换简单命令
 - [两个 CodeBuddy 进程可同挂一个 session](project_dual_codebuddy_session.md) — codebuddy -c 不查占用；「双进程=两套同名 agent 共写 /work」是机制推演，本次实测**未发生**（跨 owner 写冲突 0 次），当危险信号看、别当事故成因；附自检命令与「崩溃丢什么/不丢什么」判据
 - [v0.2.0 进度板](../docs/status-v0.2.0.md) — PM 每轮巡检结论（R 风险登记 / D 待决 / 三大块进度），跟踪双 bbolt 撞车(R11) 与 -tags metabolt CI 假绿洞处置
+- [墙钟耗时不能当 CI 判据](project_timing_criteria_flaky.md) — 微秒级比值在共享 runner 必假红；改数事件次数；附 GOGC=5 复现配方与 overlay 配对对照
