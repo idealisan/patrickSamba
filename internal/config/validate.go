@@ -56,7 +56,11 @@ func isAbsWindowsPath(p string) bool {
 }
 
 // isWindowsSlash：Windows 上正反斜杠都是路径分隔符。
-func isWindowsSlash(c byte) bool { return c == '\\' || c == '/' }
+// 委托给 vfs.IsWindowsSlash —— Windows 分隔符的唯一真源收敛到 vfs（PR #27），
+// config 不再各自持有一份定义，避免两边静默漂移。
+// 注释边界（见 vfs.IsWindowsSlash）：这是「配置校验的 Windows 分隔符」语义，
+// 不是路径穿越安全校验，不能当安全边界用。
+func isWindowsSlash(c byte) bool { return vfs.IsWindowsSlash(c) }
 
 // quotaMinWarn 是 quota_bytes 的建议下限（1 GiB）。
 // 低于此值的卷容量上报对 Time Machine 不实用（会反复失败、空间抖动），
