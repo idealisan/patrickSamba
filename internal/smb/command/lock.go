@@ -11,181 +11,165 @@ func init() {
 	register(wire.CommandLock, true, true, handleLock)
 }
 
+// ---------------------------------------------------------------------------
+// 字节范围锁（MS-SMB2 §3.3.5.14 + MS-FSA §2.1.4.10 / §2.1.5.7）
+//
+// 这里实现的是 SMB 层面的**咨询锁**：只在本进程内部记账，不下沉到宿主
+// 文件系统的 flock/fcntl。理由：
+//   - SMB 的锁语义（按 Open 归属、强制型、冲突即失败）与 POSIX 咨询锁
+//     （按进程归属、fcntl 会在任意 fd 关闭时全丢）根本对不上，硬映射
+//     只会制造更难查的 bug；
+//   - AGENTS.md C7 要求跨平台，Windows 的 LockFileEx 语义又是另一套。
+//
+// 锁表挂在 **Share** 上而不是 Session/Tree 上 —— 冲突判定必须跨会话、
+// 跨连接生效，否则两个客户端各锁各的，锁就等于没有。
+// ---------------------------------------------------------------------------
+
 // byteRangeLock 是一条已授予的字节范围锁。
 type byteRangeLock struct {
-	// owner 是持有该锁的句柄。同一个 Open 重复加锁不算冲突。
+	// owner 是持有该锁的句柄。同一个 Open 内部不互相冲突。
 	owner *Open
-	// offset/length 是锁定区间。length == 0 的锁不锁定任何字节。
+	// offset / length 来自 SMB2_LOCK_ELEMENT，单位字节。
+	// length == 0 的锁不与任何范围冲突（MS-FSA：零长度锁总是成功）。
 	offset uint64
 	length uint64
-	// exclusive 为 true 表示独占锁（写锁），false 为共享锁（读锁）。
+	// exclusive 为 false 表示共享锁（读锁）。
 	exclusive bool
 }
 
-// overlaps 报告本锁与 [off, off+length) 是否有交集。
+// overlaps 报告两个范围是否有交集。
 //
-// 这里刻意用 128 位安全的写法：off+length 可能在 uint64 上回绕，
-// 直接相加比较会把越界区间误判成不相交（AGENTS.md §8 整数溢出防御）。
-func (l byteRangeLock) overlaps(off, length uint64) bool {
+// offset+length 可能溢出 uint64（客户端可以送 offset=2^64-1, length=2^64-1），
+// 所以用"起点比较"而不是"终点比较"，全程不做加法。
+func (l byteRangeLock) overlaps(offset, length uint64) bool {
 	if l.length == 0 || length == 0 {
-		// 零长度锁不占用任何字节，与谁都不冲突（MS-FSA §2.1.4.10）。
+		// 零长度锁不占据任何字节，永不冲突。
 		return false
 	}
-	// a 的结束位置：用减法改写 a.off+a.len > b.off，避免溢出。
-	//   l.offset+l.length > off  ⟺  l.length > off-l.offset（当 off >= l.offset）
-	// 分两种情况直接比较更稳妥：
-	if l.offset <= off {
-		return l.length > off-l.offset
+	// [l.offset, l.offset+l.length) 与 [offset, offset+length) 相交
+	//   ⇔ l.offset < offset+length 且 offset < l.offset+l.length
+	// 用减法改写以避免溢出：
+	if offset >= l.offset {
+		return offset-l.offset < l.length
 	}
-	return length > l.offset-off
+	return l.offset-offset < length
 }
 
-// lockTable 是一个共享上的字节范围锁表，按共享内相对路径索引。
-//
-// 零值可用。
+// lockTable 是一个共享上的字节范围锁表，按路径分桶。并发安全。
 type lockTable struct {
 	mu sync.Mutex
-	m  map[string][]byteRangeLock
+	// byPath 的 key 是相对共享根的路径（大小写敏感，与 VFS 一致）。
+	byPath map[string][]byteRangeLock
 }
 
-// conflict 在已有锁中查找与请求区间冲突的锁。
-//
-// 冲突规则（MS-FSA §2.1.4.10 / MS-SMB2 §3.3.5.14）：
-// 两个区间有交集，且至少一方是独占锁，且不是同一个句柄持有 —— 才冲突。
-// 同一句柄自己的锁不与自己冲突。
-func (t *lockTable) conflict(path string, o *Open, off, length uint64, exclusive bool) bool {
-	for _, l := range t.m[path] {
-		if l.owner == o {
+// conflict 检查在 path 上为 owner 申请 [offset, length) 是否与他人冲突。
+// 调用方必须已持有 t.mu。
+func (t *lockTable) conflict(path string, owner *Open, offset, length uint64, exclusive bool) bool {
+	for _, l := range t.byPath[path] {
+		if l.owner == owner {
+			// 同一句柄的锁互不冲突（简化：不做同句柄重叠排他锁的自冲突判定，
+			// 真实客户端不会这么用，Samba 也放行）。
 			continue
 		}
 		if !l.exclusive && !exclusive {
 			// 共享锁之间可以共存。
 			continue
 		}
-		if l.overlaps(off, length) {
+		if l.overlaps(offset, length) {
 			return true
 		}
 	}
 	return false
 }
 
-// lock 原子地授予一组锁。
+// add 无条件登记一条锁。调用方必须已持有 t.mu 并先做过冲突判定。
+func (t *lockTable) add(path string, l byteRangeLock) {
+	if t.byPath == nil {
+		t.byPath = make(map[string][]byteRangeLock)
+	}
+	t.byPath[path] = append(t.byPath[path], l)
+}
+
+// remove 摘除 owner 在 path 上**完全匹配** [offset, length) 的一条锁。
 //
-// MS-SMB2 §3.3.5.14：一条 LOCK 请求里的多个 LockElement 是**全有或全无**的，
-// 任何一条冲突都不得留下部分已授予的锁。
-func (t *lockTable) lock(path string, o *Open, elems []wire.LockElement) status.Status {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// 先整体校验，再整体写入。
-	for _, e := range elems {
-		exclusive := e.Flags.IsExclusive()
-		if t.conflict(path, o, e.Offset, e.Length, exclusive) {
-			// 未置 FAIL_IMMEDIATELY 时规范要求把请求挂起、等锁释放再回应
-			// （异步 STATUS_PENDING）。当前所有 handler 都是同步执行的，
-			// 挂起会占住整条连接，反而更糟，所以一律立即拒绝。
-			//
-			// TODO: 待实现异步未决请求表后，改为对未置 FAIL_IMMEDIATELY
-			// 的请求回 STATUS_PENDING 并在锁释放时补发响应。
-			return status.LockNotGranted
-		}
-	}
-
-	if t.m == nil {
-		t.m = make(map[string][]byteRangeLock)
-	}
-	for _, e := range elems {
-		t.m[path] = append(t.m[path], byteRangeLock{
-			owner:     o,
-			offset:    e.Offset,
-			length:    e.Length,
-			exclusive: e.Flags.IsExclusive(),
-		})
-	}
-	return status.Success
-}
-
-// unlock 释放一组锁。区间必须与加锁时**完全一致**，否则回
-// STATUS_RANGE_NOT_LOCKED（MS-SMB2 §3.3.5.14）。
-//
-// 同样是全有或全无：先确认每一条都能找到，再统一删除。
-func (t *lockTable) unlock(path string, o *Open, elems []wire.LockElement) status.Status {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	cur := t.m[path]
-	// idx 记录每条请求对应的下标，-1 表示没找到。
-	idx := make([]int, len(elems))
-	taken := make(map[int]bool, len(elems))
-	for i, e := range elems {
-		idx[i] = -1
-		for j, l := range cur {
-			if taken[j] || l.owner != o {
-				continue
-			}
-			if l.offset == e.Offset && l.length == e.Length {
-				idx[i] = j
-				taken[j] = true
-				break
-			}
-		}
-		if idx[i] < 0 {
-			return status.RangeNotLocked
-		}
-	}
-
-	kept := cur[:0]
-	for j, l := range cur {
-		if !taken[j] {
-			kept = append(kept, l)
-		}
-	}
-	t.setLocked(path, kept)
-	return status.Success
-}
-
-// releaseAll 释放某个句柄在某个路径上的全部锁，供 CLOSE 调用。
-func (t *lockTable) releaseAll(path string, o *Open) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	cur := t.m[path]
-	if len(cur) == 0 {
-		return
-	}
-	kept := cur[:0]
-	for _, l := range cur {
-		if l.owner != o {
-			kept = append(kept, l)
-		}
-	}
-	t.setLocked(path, kept)
-}
-
-// setLocked 写回某路径的锁列表，空列表时删除条目避免表无限增长。
+// MS-SMB2 §3.3.5.14.2：解锁必须与加锁的范围精确一致，
+// 部分解锁 / 跨锁解锁一律 STATUS_RANGE_NOT_LOCKED。
 // 调用方必须已持有 t.mu。
-func (t *lockTable) setLocked(path string, locks []byteRangeLock) {
-	if len(locks) == 0 {
-		delete(t.m, path)
+func (t *lockTable) remove(path string, owner *Open, offset, length uint64) bool {
+	locks := t.byPath[path]
+	for i, l := range locks {
+		if l.owner != owner || l.offset != offset || l.length != length {
+			continue
+		}
+		locks = append(locks[:i], locks[i+1:]...)
+		if len(locks) == 0 {
+			delete(t.byPath, path)
+		} else {
+			t.byPath[path] = locks
+		}
+		return true
+	}
+	return false
+}
+
+// releaseAll 释放某个句柄持有的全部锁。
+//
+// CLOSE、LOGOFF、TREE_DISCONNECT、连接断开都要走到这里，
+// 否则一个崩掉的客户端会把文件永久锁死（MS-SMB2 §3.3.5.10）。
+func (t *lockTable) releaseAll(owner *Open) {
+	if t == nil {
 		return
 	}
-	t.m[path] = locks
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	for path, locks := range t.byPath {
+		kept := locks[:0]
+		for _, l := range locks {
+			if l.owner != owner {
+				kept = append(kept, l)
+			}
+		}
+		if len(kept) == 0 {
+			delete(t.byPath, path)
+		} else {
+			t.byPath[path] = kept
+		}
+	}
+}
+
+// count 返回某个句柄当前持有的锁数量，用于测试。
+func (t *lockTable) count(owner *Open) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	n := 0
+	for _, locks := range t.byPath {
+		for _, l := range locks {
+			if l.owner == owner {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // handleLock 处理 SMB2 LOCK（MS-SMB2 §3.3.5.14）。
 //
-// 实现范围：字节范围锁的**非阻塞**语义 —— 无冲突即授予，有冲突立即回
-// STATUS_LOCK_NOT_GRANTED。锁表挂在 Share 上，因此跨会话可见。
+// 支持的语义：
+//   - 加锁（共享/排他）：与**其它句柄**的锁做重叠冲突判定，无冲突即授予；
+//   - 解锁：必须与加锁范围精确一致；
+//   - 数组内要么全是加锁、要么全是解锁，混用回 STATUS_INVALID_PARAMETER；
+//   - 数组内任意一条失败，本请求中**已经授予的部分必须回滚**（原子性）。
 //
-// 未实现：阻塞等待（需要异步未决请求表）、lock sequence 的重放抑制
-// （MS-SMB2 §3.3.5.14 里用于多通道重传去重，单通道下不会触发）。
+// 未实现：阻塞等待。SMB2_LOCKFLAG_FAIL_IMMEDIATELY 未置位时规范要求服务端
+// 挂起该请求（回 STATUS_PENDING，等锁释放或收到 CANCEL 再了结）。本服务端
+// 目前所有 handler 都是同步执行的，没有异步未决请求表，因此一律按"立即失败"
+// 处理并回 STATUS_LOCK_NOT_GRANTED。
+// TODO: 等异步未决请求表（见 cancel.go）做好后改为真正的阻塞等待。
 func handleLock(ctx *Context) error {
 	req, err := wire.ParseLockRequest(ctx.Msg)
 	if err != nil {
-		return status.InvalidParameter
-	}
-	if len(req.Locks) == 0 {
-		// LockCount 必须 >= 1（MS-SMB2 §2.2.26）。
 		return status.InvalidParameter
 	}
 
@@ -193,42 +177,94 @@ func handleLock(ctx *Context) error {
 	if err != nil {
 		return err
 	}
+	// 目录上不能加字节范围锁（MS-SMB2 §3.3.5.14）。
+	if open.IsDir {
+		return status.InvalidParameter
+	}
 	if open.IsPipe() {
-		// 管道不支持字节范围锁。
+		// 管道没有字节范围的概念。
 		return status.InvalidDeviceRequest
 	}
-	if ctx.Tree == nil || ctx.Tree.Share == nil {
-		return status.NetworkNameDeleted
-	}
 
-	// 一条请求里 UNLOCK 不能与加锁混用（MS-SMB2 §3.3.5.14：若首条是
-	// UNLOCK，则全部必须是 UNLOCK，否则 STATUS_INVALID_PARAMETER）。
-	unlocking := req.Locks[0].Flags.IsUnlock()
+	// §3.3.5.14："If the flags of the first element ... SMB2_LOCKFLAG_UNLOCK,
+	// and any other element does not have it set, the server MUST fail the
+	// request with STATUS_INVALID_PARAMETER."（反之亦然）
+	unlockMode := req.Locks[0].Flags.IsUnlock()
 	for _, e := range req.Locks {
-		if e.Flags.IsUnlock() != unlocking {
+		if e.Flags.IsUnlock() != unlockMode {
 			return status.InvalidParameter
 		}
-		if !unlocking {
-			// 加锁时 SHARED 与 EXCLUSIVE 必须二选一。
-			shared := e.Flags&wire.LockFlagSharedLock != 0
-			excl := e.Flags&wire.LockFlagExclusiveLock != 0
-			if shared == excl {
-				return status.InvalidParameter
-			}
+		if err := validateLockFlags(e.Flags); err != nil {
+			return err
 		}
 	}
 
-	table := &ctx.Tree.Share.locks
-	var st status.Status
-	if unlocking {
-		st = table.unlock(open.Path, open, req.Locks)
-	} else {
-		st = table.lock(open.Path, open, req.Locks)
+	table := ctx.Tree.Share.lockTable()
+	table.mu.Lock()
+	defer table.mu.Unlock()
+
+	path := open.Path
+
+	if unlockMode {
+		for i, e := range req.Locks {
+			if !table.remove(path, open, e.Offset, e.Length) {
+				// 回滚：把本请求中已经解掉的锁装回去。
+				for _, done := range req.Locks[:i] {
+					table.add(path, byteRangeLock{
+						owner:     open,
+						offset:    done.Offset,
+						length:    done.Length,
+						exclusive: done.Flags.IsExclusive(),
+					})
+				}
+				return status.RangeNotLocked
+			}
+		}
+		ctx.Out = (&wire.LockResponse{}).Append(ctx.Out)
+		return nil
 	}
-	if st != status.Success {
-		return st
+
+	for i, e := range req.Locks {
+		exclusive := e.Flags.IsExclusive()
+		if table.conflict(path, open, e.Offset, e.Length, exclusive) {
+			// 回滚本请求中已经授予的锁。
+			for _, done := range req.Locks[:i] {
+				table.remove(path, open, done.Offset, done.Length)
+			}
+			if !e.Flags.FailImmediately() {
+				ctx.Log.Debug("阻塞式 LOCK 暂按立即失败处理（未实现异步等待）",
+					"path", path, "offset", e.Offset, "length", e.Length)
+			}
+			return status.LockNotGranted
+		}
+		table.add(path, byteRangeLock{
+			owner:     open,
+			offset:    e.Offset,
+			length:    e.Length,
+			exclusive: exclusive,
+		})
 	}
 
 	ctx.Out = (&wire.LockResponse{}).Append(ctx.Out)
+	return nil
+}
+
+// validateLockFlags 校验单个 SMB2_LOCK_ELEMENT 的 Flags 组合
+// （MS-SMB2 §2.2.26.1 / §3.3.5.14）。
+func validateLockFlags(f wire.LockFlags) error {
+	if f.IsUnlock() {
+		// UNLOCK 不能与 SHARED / EXCLUSIVE / FAIL_IMMEDIATELY 同时出现。
+		if f&(wire.LockFlagSharedLock|wire.LockFlagExclusiveLock|
+			wire.LockFlagFailImmediately) != 0 {
+			return status.InvalidParameter
+		}
+		return nil
+	}
+	shared := f&wire.LockFlagSharedLock != 0
+	excl := f&wire.LockFlagExclusiveLock != 0
+	if shared == excl {
+		// 既没指定也不能两个都指定。
+		return status.InvalidParameter
+	}
 	return nil
 }
