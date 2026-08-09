@@ -94,9 +94,10 @@ CGO_ENABLED=0 go test ./...
 |---|---|
 | 协议实现 | 内核 cifs / smb3 驱动、`mount -t cifs`、任何内核态或系统自带的 SMB 实现 |
 | 守护进程 | avahi / Bonjour(mDNSResponder) / systemd-resolved / winbind / SSSD / nmbd / smbd |
-| 名字解析 | NSS、`/etc/resolv.conf`、`/etc/hosts`、系统解析器语义、`os/user.Lookup*` |
-| 认证机制 | PAM / SSPI / LSA / OpenDirectory / 系统 Kerberos 配置（与 C8 重合，此处再申明一次） |
-| 挂载与命名空间 | `mount` / `umount` / `setns` / `unshare` / `chroot` / `pivot_root` / FUSE / loop 设备 |
+| 名字解析 | NSS、`/etc/resolv.conf`、`/etc/nsswitch.conf`、`/etc/hosts`、系统解析器语义、`os/user.Lookup*` |
+| 系统状态文件 | `/proc/net/` 下的一切（要网络信息就自己从套接字拿，不要去读内核导出的文本） |
+| 认证机制 | PAM / SSPI / LSA / OpenDirectory / 系统 Kerberos 配置（与 C8 重合，此处再申明一次；`/etc/passwd` 那组归 C8，不在 C9 重复） |
+| 挂载与命名空间 | `mount` / `umount` / `setns` / `unshare` / `chroot` / `pivot_root`、`CLONE_NEW*` 各标志、FUSE / loop 设备 |
 
 #### 明确**不在**禁止之列：平台 ABI 本身
 
@@ -107,9 +108,24 @@ Windows 没有稳定的系统调用号，**官方 ABI 边界就是 DLL 导出函
 `os` / `net` / `time` 全部通过 `NewLazySystemDLL` 调用 `kernel32.dll` / `ntdll.dll` /
 `ws2_32.dll`。这是**平台调用约定**，不是 C2 说的「依赖第三方动态库」——
 把我们的代码产物整个删掉，Windows 进程照样加载 kernel32。Linux 上的 `syscall` 指令同理。
+本仓库现存的这类调用点如 `internal/vfs/sys_windows.go:17`
+（`NewLazySystemDLL("kernel32.dll")` 取 `GetDiskFreeSpaceW`）是**合规**的。
 
-判据是**语义**不是形式：向 OS 要「一个字节区间的读写」是允许的，
-向 OS 要「一个 SMB 客户端」「一次身份认证」「一次挂载」是禁止的。
+但豁免只给**平台调用约定本身**，不是给「凡是加载 DLL 都行」。门禁按白名单判：
+
+- ✅ 只放行 `windows.NewLazySystemDLL("<名字>")`，且名字必须是**字面量**，
+      取值限于 `kernel32` / `ntdll` / `ws2_32` / `advapi32`。
+- ❌ `NewLazyDLL` / `LoadLibrary` 一律违规 —— 它们**不走 System32 安全加载路径**，
+      是 DLL 劫持的经典入口。参数不是字面量的（运行时拼出来的 DLL 名）同样判红。
+
+**明确不在禁止之列的还有：套接字操作本身。** `net.Listen` / `net.ListenMulticastUDP`
+以及 `internal/mdns` 在 224.0.0.251:5353 与 `[ff02::fb]:5353` 上自己收发组播报文，
+不但不违反 C9，而且正是 **C4 明确要求**的做法（C4 禁的是去调 avahi/Bonjour 的
+D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「修」mdns。
+
+判据是**语义**不是形式：向 OS 要「一个字节区间的读写」「一个能收发的套接字」是允许的，
+向 OS 要「一个 SMB 客户端」「一次身份认证」「一次挂载」「一份现成的名字解析结果」是禁止的。
+前者绕不过去，后者我们本来就该自己做。
 
 #### 架构：能力抽象 port + native/builtin 双适配器
 
