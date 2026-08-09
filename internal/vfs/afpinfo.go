@@ -44,7 +44,7 @@ package vfs
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 )
 
 // AfpInfo 相关常量。数值出处见文件头注释（Samba MacExtensions.h）。
@@ -70,8 +70,10 @@ const (
 //
 // Samba 与 Apple 自己的 SMB 服务器都会在客户端写入这个流时校验头部，
 // 校验失败就拒绝写入（见 `man vfs_fruit` 的 fruit:validate_afpinfo）。
-// 我们照做：SMB 层应把它映射成 STATUS_INVALID_PARAMETER。
-var ErrBadAfpInfo = errors.New("vfs: malformed AFP_AfpInfo")
+//
+// 包装 ErrInvalidArg 从而映射成 STATUS_INVALID_PARAMETER —— 对齐 Samba
+// fruit_pwrite_meta() 校验失败时置 errno=EINVAL 的行为。
+var ErrBadAfpInfo = fmt.Errorf("vfs: malformed AFP_AfpInfo: %w", ErrInvalidArg)
 
 // AfpInfo 是 AFP_AfpInfo 流的解析结果。
 //

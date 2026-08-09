@@ -13,7 +13,9 @@ package vfs
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"time"
 )
 
@@ -275,6 +277,13 @@ var (
 
 	// ErrInvalidArg 表示**参数**非法（而不是路径非法）：
 	// 负的 offset/length、offset+length 溢出、对目录做 Truncate 等。
-	// SMB 层应映射为 STATUS_INVALID_PARAMETER (0xC000000D)。
-	ErrInvalidArg = errors.New("vfs: invalid argument")
+	// SMB 层映射为 STATUS_INVALID_PARAMETER (0xC000000D)。
+	//
+	// 刻意包装 fs.ErrInvalid（== os.ErrInvalid）而不是用裸 errors.New：
+	// status.FromVFSError 的 vfs sentinel 分支里没有本错误的条目，只有标准库
+	// 分支认 fs.ErrInvalid。不包装就会静默落到兜底的 STATUS_UNSUCCESSFUL ——
+	// 实测过：往 AFP_AfpInfo 流写越界数据时客户端收到的是 UNSUCCESSFUL，
+	// 与上面这行注释承诺的 INVALID_PARAMETER 不符。包装后两边自然一致，
+	// 也不需要去改 status 包（那是别的模块的文件）。
+	ErrInvalidArg = fmt.Errorf("vfs: %w", fs.ErrInvalid)
 )
