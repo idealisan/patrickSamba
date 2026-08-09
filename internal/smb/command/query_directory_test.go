@@ -281,9 +281,9 @@ func TestQueryDirectoryAAPLEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, fileName), bytes.Repeat([]byte{7}, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// 资源派生走 AppleDouble 旁路文件 `._band-00000`，与 vfs 的 ADS 实现一致。
+	fs := newQueryDirTestFS(t, root)
 	rsrc := []byte("RESOURCEFORK")
-	writeAppleDouble(t, filepath.Join(root, "._"+fileName), sampleFinderInfo, rsrc)
+	writeAppleMetadata(t, fs, fileName, sampleFinderInfo, rsrc)
 
 	for _, aaplOn := range []bool{false, true} {
 		name := "readdir_attr 关"
@@ -291,7 +291,7 @@ func TestQueryDirectoryAAPLEndToEnd(t *testing.T) {
 			name = "readdir_attr 开"
 		}
 		t.Run(name, func(t *testing.T) {
-			ctx, open := newQueryDirTestContext(t, root, aaplOn)
+			ctx, open := newQueryDirTestContext(t, fs, aaplOn)
 			entries := runQueryDirectory(t, ctx, open, "*")
 
 			raw, ok := entries[fileName]
@@ -363,9 +363,10 @@ func TestQueryDirectoryAAPLOtherInfoClass(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeAppleDouble(t, filepath.Join(root, "._f"), sampleFinderInfo, []byte("RSRC"))
+	fs := newQueryDirTestFS(t, root)
+	writeAppleMetadata(t, fs, "f", sampleFinderInfo, []byte("RSRC"))
 
-	ctx, open := newQueryDirTestContext(t, root, true)
+	ctx, open := newQueryDirTestContext(t, fs, true)
 	if newAAPLDirAttrSource(ctx, open, wire.FileBothDirectoryInformation) != nil {
 		t.Error("FileBothDirectoryInformation 不该启用 readdir_attr")
 	}
@@ -404,8 +405,8 @@ func TestAAPLChildPath(t *testing.T) {
 // 测试脚手架
 // ---------------------------------------------------------------------------
 
-// newQueryDirTestContext 建一个指向 root 的真实 LocalFS 共享，并打开根目录句柄。
-func newQueryDirTestContext(t *testing.T, root string, aaplOn bool) (*Context, *Open) {
+// newQueryDirTestFS 建一个指向 root 的真实 LocalFS。
+func newQueryDirTestFS(t *testing.T, root string) *vfs.LocalFS {
 	t.Helper()
 
 	fs, err := vfs.NewLocalFS(vfs.LocalConfig{Root: root, CaseInsensitive: true})
@@ -413,6 +414,12 @@ func newQueryDirTestContext(t *testing.T, root string, aaplOn bool) (*Context, *
 		t.Fatalf("NewLocalFS: %v", err)
 	}
 	t.Cleanup(func() { _ = fs.Close() })
+	return fs
+}
+
+// newQueryDirTestContext 在 fs 上建共享与会话，并打开根目录句柄。
+func newQueryDirTestContext(t *testing.T, fs vfs.FileSystem, aaplOn bool) (*Context, *Open) {
+	t.Helper()
 
 	share := &Share{Name: "backup", Type: wire.ShareTypeDisk, FS: fs, TimeMachine: true}
 	conn := NewConn(&Settings{Shares: []*Share{share}}, "test", "test")
@@ -526,15 +533,37 @@ func splitDirEntries(t *testing.T, buf []byte, out map[string][]byte) {
 	}
 }
 
-// writeAppleDouble 造一个 AppleDouble 旁路文件（`._name`），
-// 里面带 FinderInfo 与资源派生 —— 与 vfs 的 AFP_Resource 实现使用同一格式。
-func writeAppleDouble(t *testing.T, path string, fi [vfs.FinderInfoSize]byte, rsrc []byte) {
+// writeAppleMetadata 通过**公开的 ADS 路径**给对象写上 FinderInfo 与资源派生
+// （AFP_AfpInfo → netatalk xattr，AFP_Resource → `._` 旁路文件）。
+//
+// 刻意不直接拼磁盘格式：这样这条测试同时验证了 readdir_attr 读到的东西
+// 与客户端通过流写进去的东西是同一份。
+func writeAppleMetadata(t *testing.T, fs vfs.FileSystem, path string, fi [vfs.FinderInfoSize]byte, rsrc []byte) {
 	t.Helper()
 
-	ad := vfs.NewAppleDouble()
-	ad.SetFinderInfo(fi)
-	ad.SetResource(rsrc)
-	if err := os.WriteFile(path, ad.Encode(), 0o644); err != nil {
-		t.Fatalf("写 AppleDouble %s: %v", path, err)
+	ai := vfs.NewAfpInfo()
+	ai.FinderInfo = fi
+	writeStream(t, fs, path, vfs.StreamAFPInfo, ai.Marshal())
+	if len(rsrc) > 0 {
+		writeStream(t, fs, path, vfs.StreamAFPResource, rsrc)
+	}
+}
+
+func writeStream(t *testing.T, fs vfs.FileSystem, path, stream string, data []byte) {
+	t.Helper()
+
+	h, _, err := fs.Open(&vfs.OpenRequest{
+		Path:        path,
+		Stream:      stream,
+		Flags:       vfs.OpenWrite,
+		Disposition: vfs.TruncateAlways,
+	})
+	if err != nil {
+		t.Fatalf("打开流 %s:%s: %v", path, stream, err)
+	}
+	defer func() { _ = h.Close() }()
+
+	if _, err := h.WriteAt(data, 0); err != nil {
+		t.Fatalf("写流 %s:%s: %v", path, stream, err)
 	}
 }
