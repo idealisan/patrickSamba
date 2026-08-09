@@ -31,7 +31,10 @@ func mapErrno(errno syscall.Errno) error {
 	case syscall.ENAMETOOLONG, syscall.EILSEQ, syscall.ELOOP:
 		// ELOOP：软链环。对客户端而言这条路径就是不可用的。
 		return ErrInvalidPath
-	case syscall.EOPNOTSUPP, syscall.ENOSYS:
+	case syscall.EOPNOTSUPP, syscall.ENOSYS, syscall.EXDEV:
+		// EXDEV：跨设备的 rename/link。共享内部一般不跨设备，但
+		// bind mount 与子卷挂载点会让它真实发生。SMB 层应映射成
+		// STATUS_NOT_SAME_DEVICE，而不是含义模糊的「权限不足」。
 		return ErrNotSupported
 	case syscall.EINVAL, syscall.EOVERFLOW:
 		// 参数非法（负 offset、越界 length 等），不是路径问题。
