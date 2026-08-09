@@ -1,11 +1,11 @@
 ---
 name: 「成功回显」不等于事情真的发生了
-description: 本项目反复出现同一类事故——命令/门禁/接口给出正反馈，但要做的事一件没做。已知七个实例与各自的自查命令
+description: 本项目反复出现同一类事故——命令/门禁/接口给出正反馈（或干脆沉默），但要做的事一件没做。已知八个实例与各自的自查命令
 type: project
 ---
 
-本项目已累计**七个**同形态事故：系统给了正反馈（打印成功、CI 有记录、测试 0 失败），
-但要做的事根本没发生。它们看起来毫不相关，实际是同一个病。
+本项目已累计**八个**同形态事故：系统给了正反馈（打印成功、CI 有记录、测试 0 失败），
+或者**什么都不说**（第 8 条），但要做的事根本没发生。它们看起来毫不相关，实际是同一个病。
 
 **Why:** 这类失败不会报错，只会「安静地什么都没做」，所以从来不是被发现的，
 都是隔了很久由别的调查顺带撞出来的。v0.1.0 就是在这五个洞全开的情况下发布的。
@@ -23,8 +23,14 @@ type: project
 | 6 | **build tag 后面的代码在 linux 上一行都没被编译**。`internal/meta/bolt.go` 是 `//go:build windows \|\| metabolt`，裸跑 `go list -deps ./internal/meta` 只吐出包自己（bbolt 不在依赖图里）、`go test ./internal/meta` 报 `no tests to run` | 依赖核验、vet、test 全绿 | 查 `go list -deps` 结果里**有没有你要查的那个依赖**；`go test` 输出出现 `[no tests to run]` 就是没在测。带 `-tags` 或 `GOOS=windows` 重跑 |
 | 7 | **`go build ./...` 不编译 `_test.go`**。改函数签名时分两步做（先改声明与产品代码调用方，测试调用方留到下一步），中间提交 `go build` 绿灯放行、推送成功，实际 `go vet`/`go test` 直接编译失败。该提交进了 main，成为 `git bisect` 地雷（撞上与被查 bug 无关的编译错误） | build 绿、push 成功 | 推送前用 `sh test/ci/check-test-compile.sh`（它跑 `go vet -tags ... ./...` × 4 平台），**不能只用 `go build ./...`**。AGENTS.md §7.2 已按此更新 |
 
+| 8 | **`cnb pulls create-pull` 什么都没输出，PR 从未被创建**。2026-08-09 16:0x，pm 提 `pm/status` 的 PR，命令走完、退出码正常、stdout 为空；十几分钟后查开放 PR 列表才发现根本没有它 | **连假信号都没有——既无「成功」也无报错，只有沉默** | 任何**改变共享状态**的 CNB 命令（建 PR / 合 PR / 发评论 / 改 Issue）执行后，**用一条独立的读命令回查**（`list-pulls` / `get-pull` / 查 comment id），不以原命令 stdout 为准。**别用 `\| grep` 过滤它的输出**——过滤器匹配不到时输出同样是空，两种「空」外观完全一致 |
+
 推论：**`skipped`、`0 failures`、`no tests to run`、`已推送` 四种输出都不构成证据。**
 要么有独立探针，要么有反向对照（故意破坏一次，确认会红）。
+**第 8 条把这条推到极端：输出为空时，「命令没生效」与「生效了但不回显」外观完全相同**，
+只能靠独立回查区分。同一个人在同一小时内对 `post-issue-comment` 做了回查
+（拿到 `status: 201` + comment id 才收工）、对 `create-pull` 却忘了 ——
+**说明它不能靠「记得做」，必须写进流程。**
 
 **跨平台代码的特例（第 6 条的一般化）**：`internal/vfs/metadata_windows.go`、
 `internal/meta/bolt.go` 这类 Windows-only 文件，在本容器（linux）的所有常规门禁下
