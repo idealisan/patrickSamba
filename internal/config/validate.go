@@ -142,6 +142,18 @@ func validateServer(c *Config, errs *ValidationErrors) {
 	//     所以启动时就报错，而**不是**悄悄把 min_dialect 抬到 3.0 ——
 	//     静默改写用户写下的配置是魔法行为，本项目一律用"启动时一次性
 	//     校验 + 人话错误"处理这类矛盾（与上面 max_dialect 那条对称）。
+	//
+	// 与 Samba 的差异（为什么我们更严格）：Samba 允许
+	// encryption_required=true 与 min_dialect=2.x 并存——它不会在配置期报错，
+	// 而是让 2.x 客户端在协商/会话建立阶段自然失败（拿不到加密能力），
+	// 行为由客户端决定是否继续，服务端不主动拦。我们选择在**启动期**就硬失败，
+	// 把矛盾暴露在配置里，而不是藏在运行期的"连不上"里。
+	//
+	// 代价：这条 fail-closed（2.x 客户端被拒）完全由 command/negotiate.go 的拒绝
+	// 逻辑保证，配置层无法表达、运行期也没有兜底开关。换言之一旦协商层的拒绝逻辑
+	// 被改坏，没有任何配置能救，只有 test/ 下的回归测试会变红。因此该组合的正确
+	// 性**只能靠测试覆盖**——改动 negotiate.go 时必须同步跑对应用例
+	// （test/ 中 encryption_required + 2.x 的协商测试）。
 	if c.Server.EncryptionRequired && maxRank >= 0 && maxRank < dialectRank("3.0") {
 		errs.add("server.encryption_required", "要求加密但 max_dialect 为 %s，SMB3 加密最低需要 3.0", c.Server.MaxDialect)
 	}
