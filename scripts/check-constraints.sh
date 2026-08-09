@@ -44,15 +44,25 @@ for pkg in os/user; do
     fi
 done
 
+# 把整行注释**清空**（而不是删掉）再匹配。
+# 清空是为了保留行号：删行会让报出来的行号比真实行号小，
+# 拿着去翻文件找不到对应代码，等于报了个没法用的位置。
+strip_comments() { sed -E 's|^[[:space:]]*(//\|\*\|/\*).*$||' "$1"; }
+
 # 禁止在字符串字面量里出现系统账户数据库路径。
-# 要求命中双引号内部，避免误伤说明性注释。
+# 要求命中双引号内部，且先剥掉注释 —— 约束文档本身就要写这些路径，
+# 一句 `// 禁止读 "/etc/shadow"` 的说明性注释不该把 CI 判红。
 #
 # **_test.go 豁免**：`/etc/passwd` 是路径穿越攻击的经典目标，
 # 安全测试的攻击向量里就该出现它。把测试向量改成别的路径只会削弱测试，
 # 属于为了让检查变绿而破坏代码 —— 正好是这个检查要防止的反面。
 # 真正的 C8 违规（运行时去读系统账户库）由上面的依赖图检查兜底。
 for path in /etc/passwd /etc/shadow /etc/group /etc/krb5.conf; do
-    hits=$(grep -rn --include='*.go' -- "\"[^\"]*$path" . | grep -v '_test\.go:' || true)
+    hits=$(
+        find . -name '*.go' -not -name '*_test.go' -not -path './.git/*' | while read -r f; do
+            strip_comments "$f" | grep -n -- "\"[^\"]*$path" 2>/dev/null | sed "s|^|$f:|"
+        done
+    )
     if [ -n "$hits" ]; then
         printf '%s\n' "$hits"
         fail "非测试代码的字符串字面量中出现 $path，违反 C8"
@@ -60,13 +70,10 @@ for path in /etc/passwd /etc/shadow /etc/group /etc/krb5.conf; do
 done
 
 # 禁止 NSS / PAM / 系统登录 API 的符号。
-# 先剥掉整行注释再匹配，避免误伤。
-strip_comments() { grep -v -E '^[[:space:]]*(//|\*|/\*)' "$1"; }
-
 for sym in getpwnam getgrnam getpwuid getgrgid pam_authenticate pam_start LogonUserW ODNodeCopyRecord; do
     hits=$(
         find . -name '*.go' -not -path './.git/*' | while read -r f; do
-            strip_comments "$f" | grep -nH -w -- "$sym" 2>/dev/null | sed "s|^|$f:|"
+            strip_comments "$f" | grep -n -w -- "$sym" 2>/dev/null | sed "s|^|$f:|"
         done
     )
     if [ -n "$hits" ]; then
@@ -84,7 +91,7 @@ done
 
 exechits=$(
     find ./internal ./cmd -name '*.go' -not -name '*_test.go' 2>/dev/null | while read -r f; do
-        strip_comments "$f" | grep -nH -E 'os/exec|exec\.Command' 2>/dev/null | sed "s|^|$f:|"
+        strip_comments "$f" | grep -n -E 'os/exec|exec\.Command' 2>/dev/null | sed "s|^|$f:|"
     done
 )
 if [ -n "$exechits" ]; then
@@ -98,7 +105,7 @@ fi
 
 dbushits=$(
     find ./internal ./cmd -name '*.go' -not -name '*_test.go' 2>/dev/null | while read -r f; do
-        strip_comments "$f" | grep -nH -E 'godbus|dbus\.|avahi|/var/run/avahi' 2>/dev/null | sed "s|^|$f:|"
+        strip_comments "$f" | grep -n -E 'godbus|dbus\.|avahi|/var/run/avahi' 2>/dev/null | sed "s|^|$f:|"
     done
 )
 if [ -n "$dbushits" ]; then
