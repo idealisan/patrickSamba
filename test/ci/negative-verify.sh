@@ -196,6 +196,71 @@ assert_rc pass "移除后 gofmt 门禁恢复绿" sh -c '
     out=$(gofmt -l .)
     if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi'
 
+# ============================================================ 3b. 竞态检测门禁
+say "3b. 竞态检测门禁：确认它真的抓得住数据竞争"
+
+# 先记录这一关**曾经**的样子：`CGO_ENABLED=0 go test -race`。
+# race 检测器依赖 cgo，所以这条命令 0.1 秒就以返回码 2 退出，一个测试都没跑，
+# 并且把它后面的四关（交叉编译/静态链接/示例配置/冒烟）全部拖进 skip。
+# 保留这条断言是为了防止有人「顺手」把 CGO_ENABLED 改回 0。
+assert_rc fail "回归 · CGO_ENABLED=0 go test -race 必定拒绝执行（旧配置就是这样红的）" \
+    sh -c 'CGO_ENABLED=0 go test -race -count=1 ./internal/config/'
+
+# 注入一个真实的数据竞争，验证 race 门禁有牙。overlay 支持映射一个**不存在**的
+# 路径，等于凭空加一个文件进去，工作树依旧零改动。
+cat > "$SCRATCH/race-injected_test.go" <<'EOF'
+package config
+
+import (
+	"sync"
+	"testing"
+)
+
+func TestDeliberateDataRace(t *testing.T) {
+	x := 0
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5000; j++ {
+				x++
+			}
+		}()
+	}
+	wg.Wait()
+	_ = x
+}
+EOF
+OV3=$(mkoverlay internal/config/zz_race_injected_test.go "$SCRATCH/race-injected_test.go")
+
+assert_rc pass "普通单元测试关对数据竞争无感（所以 race 关不能省）" \
+    with_overlay "$OV3" sh -c 'CGO_ENABLED=0 go test -count=1 ./internal/config/'
+assert_rc fail "race 门禁 · CGO_ENABLED=1 go test -race 必须抓住注入的数据竞争" \
+    with_overlay "$OV3" sh -c 'CGO_ENABLED=1 go test -race -count=1 ./internal/config/'
+
+# ============================================================ 3c. 静态链接门禁的 locale 依赖
+say "3c. 静态链接门禁：判定不能取决于机器装了什么语言包"
+
+# ldd 的输出是本地化的：中文环境打印「不是动态可执行文件」，
+# 匹配不上英文串 "not a dynamic executable"，门禁就误报「产物不是静态链接」。
+# 本地就是中文环境，正好当反向对照用。
+CGO_ENABLED=0 go build -o "$SCRATCH/staticprobe" ./cmd/stupidsamba
+
+assert_rc pass "静态链接门禁 · 加了 LC_ALL=C 之后判定正确（与 .cnb.yml 逐字一致）" sh -c "
+    if LC_ALL=C ldd '$SCRATCH/staticprobe' 2>&1 | grep -qv 'not a dynamic executable'; then
+        echo '错误: 产物不是静态链接'; exit 1
+    fi"
+
+if LC_ALL=C ldd "$SCRATCH/staticprobe" 2>&1 | head -1 | grep -q 'not a dynamic'; then
+    if [ "$(ldd "$SCRATCH/staticprobe" 2>&1 | head -1)" != "$(LC_ALL=C ldd "$SCRATCH/staticprobe" 2>&1 | head -1)" ]; then
+        printf '  \033[1;32m[OK]\033[0m   本机 ldd 确实是本地化输出，LC_ALL=C 这一手不是多余的\n'
+        PASS=$((PASS + 1))
+    else
+        printf '  \033[1;33m[--]\033[0m   本机 ldd 输出本来就是英文，locale 这一档在此机器上无法对照\n'
+    fi
+fi
+
 # ============================================================ 4. 门禁自身的防腐
 say "4. 门禁自身的防腐：新增 build tag 时必须报错，而不是悄悄漏掉"
 
