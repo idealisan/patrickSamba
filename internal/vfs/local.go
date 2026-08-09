@@ -626,7 +626,7 @@ func (l *LocalFS) applyQuota(info *FSInfo) {
 }
 
 // Streams 实现 FileSystem，列出 alternate data stream
-//（对应 SMB2 QUERY_INFO 的 FileStreamInformation）。
+// （对应 SMB2 QUERY_INFO 的 FileStreamInformation）。
 //
 // 除主数据流外，还会报告存在的 AFP_AfpInfo / AFP_Resource ——
 // macOS Finder 靠这个判断文件有没有资源派生与 FinderInfo。
