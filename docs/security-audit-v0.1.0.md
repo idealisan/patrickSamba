@@ -189,3 +189,107 @@ TWINE_PASSWORD = <h=1578f30c len=27>   ← 同一个值
 | `test/integration/*` | 8 | 小写 + 大写 |
 | `internal/vfs/local_test.go` | 24 | 小写 + 大写 + 符号 |
 | `docs/test-infra.md` `pwd` | 5 | 纯小写 |
+
+---
+
+## 7. 第二泄漏出口复核：发布脚本与 CI
+
+### 7.1 `scripts/publish-release.sh` —— 存在一个出口（argv）
+
+脚本头部 `:18` 自查注释称「不会把它打印出来、写进文件或塞进 URL」。
+这三条经复核**均属实**，但**漏了第四个维度：进程命令行**。
+
+`publish-release.sh:113` 与 `:120`：
+
+```sh
+curl -sS -X "$_m" -H "Authorization: Bearer $CNB_TOKEN" ...
+```
+
+shell 展开后 token 成为 curl 进程的 argv，因而出现在 `/proc/<pid>/cmdline`，
+**同机任意进程可读**。
+
+实测（使用假 token，未接触真实凭据）：
+
+| 写法 | `/proc/*/cmdline` 命中 |
+|---|---|
+| `curl -H "Authorization: Bearer $TOK"` | **命中** |
+| `curl -K <配置文件>`（头写在文件里） | **0 命中** |
+
+建议改为：
+
+```sh
+umask 077
+printf 'header = "Authorization: Bearer %s"\n' "$CNB_TOKEN" > "$TMP/curlrc"
+curl -sS -K "$TMP/curlrc" ...
+```
+
+`$TMP` 已有 `trap cleanup EXIT INT TERM`，无需额外收尾。
+
+**危害等级：中。** 利用前提是攻击者已能在同机执行代码——真到那一步，
+直接读环境变量更省事。因此**不改变 token 轮换的紧迫性**。
+但本项目十个 agent 共用一台容器、互相可见对方进程，故仍建议修复。
+
+### 7.2 `.cnb.yml` —— 干净，紧迫性不升级
+
+当前为 **15 个 stage**（非 11 个；`6813805` / `eb69fb5` 新增了
+「测试代码编译校验」与「race 单独开 CGO」）。逐个核查 9 类会把环境
+写进构建日志的写法：
+
+`set -x` / xtrace、裸 `env`、`printenv`、`declare -x` / `export -p`、
+`echo $XXX_TOKEN`、`curl -v`、token 拼进 URL、
+`git push https://tok@...`、`cat .env`
+
+| 目标 | 非注释命中 |
+|---|---|
+| `.cnb.yml` | **0** |
+| `scripts/build-release.sh` | **0** |
+| `scripts/check-constraints.sh` | **0** |
+
+且 `.cnb.yml` 中**未出现任何凭据类变量引用**——token 由平台直接注入给
+`git:release` 内置任务与 `cnbcool/attachments` 插件，YAML 不经手。
+
+**检测器自身做了双向对照**（这一步抓到了本次审计自己的一个 bug）：
+
+- 反向对照：注入 9 类危险写法 → **9/9 全部检出**。
+  首版 `bare env` 检测器曾漏报（正则缺 `MULTILINE`，匹配不到
+  `script: env`），改为词元法后修正。
+- 阴性对照：`env FOO=1 ./x`、`envsubst`、`$ENV_HOME` **均不误报**。
+
+若无这两步，「0 命中」这一结论不可信。
+
+---
+
+## 8. 明确未覆盖的范围（可证伪边界）
+
+「我扫了全部」不是可接受的结论。以下是本次**确实没有覆盖**的部分：
+
+1. **CNB 服务端侧数据**：构建日志正文、PR 评论、Issue、Release 描述、
+   webhook 配置、CI 变量面板。均在 git 之外，本地无法访问。
+   §7.2 只能证明「YAML 与脚本不会打印环境」，
+   **无法证明**第三方镜像（`git:release`、`cnbcool/attachments`）
+   内部不打印——需人工查看控制台日志正文。
+2. **2 个远端对象取不到**：`git ls-remote` 列出但无法 fetch
+   （PR 临时 merge ref，服务端已回收），其内容未经验证。
+3. **已被 gc 回收的对象**：按内存约束**未执行 `git gc`**
+   （仓库含 149 MB 历史快照，重打包会耗尽内存）。
+   因此只覆盖当前对象库中仍存在的对象；
+   「曾提交、后被 gc 清除」的对象**任何本地手段都无法追溯**。
+4. **加密 / 加壳内容**：7 个归档已解压扫描，
+   但若有人将凭据加密后提交，模式扫描无效。
+5. **时间边界**：截止 `origin/main` = `30d55e1`，2026-08-09T04:44Z。
+   此后的新提交不在覆盖范围内。
+
+---
+
+## 9. 建议动作
+
+| # | 动作 | 责任方 | 优先级 |
+|---|---|---|---|
+| 1 | 轮换泄漏的 token，**git 侧与制品库侧（`TWINE_PASSWORD`）一并轮换** | 项目所有者 | 高 |
+| 2 | 人工核查 CNB 控制台历史构建日志正文（本地不可达，见 §8.1） | 项目所有者 | 中 |
+| 3 | `publish-release.sh` 改用 `curl -K`，消除 argv 泄漏（§7.1） | qa | 中 |
+| 4 | `save-history.sh` 增加存档前脱敏（§5） | qa | 中 |
+
+**不建议**重写历史：项目所有者已明确要求保留历史痕迹，
+且凭据一经泄漏即应视为已泄漏，轮换才是根治手段，
+`filter-branch` 只会破坏协作历史而不消除风险。
