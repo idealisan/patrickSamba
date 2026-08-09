@@ -5,6 +5,33 @@
 
 ---
 
+## Unreleased（v0.2.0 开发中）
+
+> **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实）：
+>
+> 1. **功能没合入 `main` 之前，一个字都不写进这里。** 分支上跑通了不算，PR open 着也不算。
+> 2. **打折要写在句子主干里。** 「已支持 X（但 Y 未实现）」是坏写法；
+>    「X 尚未通过端到端验收，已验证的是 A/B/C，未实现的是 D/E」是好写法。
+> 3. **区分三档置信度，不要混为一谈**：**已实测验证** / **只交叉编译过** /
+>    **只读代码推断**。例：`F_FULLFSYNC` 的 darwin 分支属于第二档（开发容器是
+>    Linux，从没真跑过），写的时候必须点明。
+> 4. **Time Machine 定级在相关能力合入 `main` 之前保持不变**（当前 **C 档**，
+>    依据见 [`docs/timemachine-status.md`](docs/timemachine-status.md)）。
+>    durable handle / oplock-lease / quota 的改动正在各自分支上，未合入前不动结论。
+
+### 开发流程与工具（不影响运行时行为）
+
+- 新增 [`docs/dev-workflow.md`](docs/dev-workflow.md)：开发工作流 SOP
+  （独立 git worktree + 独立分支 + PR）。v0.2.0 起全员适用。
+- 新增 `scripts/devenv.sh`：开发环境削峰配置（编译串行锁、`GOFLAGS=-p=1`、
+  git 重打包内存上限、`gobuild` / `gocheck` / `gocross` 快捷命令）。
+
+### 协议与功能
+
+（暂无。v0.2.0 的功能改动尚未合入 `main`，按上面第 1 条纪律，合入后才登记。）
+
+---
+
 ## v0.1.0（2026-08-09，prerelease）
 
 第一个可对外试用的版本。目标是提供一个**可用的 SMB2/3 文件共享服务**：单个静态
