@@ -144,22 +144,37 @@ func (t *lockTable) unlock(path string, o *Open, elems []wire.LockElement) statu
 	return status.Success
 }
 
-// releaseAll 释放某个句柄在某个路径上的全部锁，供 CLOSE 调用。
-func (t *lockTable) releaseAll(path string, o *Open) {
+// releaseAll 释放某个句柄持有的**全部**锁，供 CLOSE 调用。
+//
+// ⚠️ path 只是调用方（close.go）顺手给的提示，本函数**故意不依赖它**，
+// 而是扫全表按 owner 摘除。这不是保守，是修一个真实的锁泄漏：
+//
+//	SET_INFO 的 FileRenameInformation 成功后会改写 open.Path
+//	（见 set_info.go 的 `open.Path = dst` —— 句柄在改名后仍然有效）。
+//	于是「加锁 → 用同一句柄改名 → 关闭」这条路径上，锁登记在旧路径的桶里，
+//	而 CLOSE 传进来的是新路径。只扫一个桶的话那把锁**永远不会被释放**，
+//	直到进程退出为止都挡着旧路径上的那段字节。
+//
+// 全表扫描的代价可以忽略：releaseAll 每个句柄一生只调用一次，
+// 而锁表里的条目数以「当前被锁住的文件数」为上界，通常是个位数。
+// 用正确性换这点常数是划算的。
+func (t *lockTable) releaseAll(_ string, o *Open) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	cur := t.m[path]
-	if len(cur) == 0 {
-		return
-	}
-	kept := cur[:0]
-	for _, l := range cur {
-		if l.owner != o {
-			kept = append(kept, l)
+	for path, cur := range t.m {
+		kept := cur[:0]
+		for _, l := range cur {
+			if l.owner != o {
+				kept = append(kept, l)
+			}
 		}
+		if len(kept) == len(cur) {
+			// 这个桶里没有该句柄的锁，原样留着。
+			continue
+		}
+		t.setLocked(path, kept)
 	}
-	t.setLocked(path, kept)
 }
 
 // setLocked 写回某路径的锁列表，空列表时删除条目避免表无限增长。
