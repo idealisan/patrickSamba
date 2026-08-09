@@ -36,6 +36,8 @@
 package builtin
 
 import (
+	"os"
+
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
@@ -46,6 +48,18 @@ import (
 // 「同一个对象的元数据」散落在六处，反而更难保证一致。
 type adapter struct {
 	st *store
+
+	// inode 从 os.FileInfo 里取宿主 inode，生产路径恒为 inodeOf。
+	//
+	// 做成字段是**为了让「宿主给不出 inode」那条路能在 CI 里真被执行**。
+	// 那条路在 Windows 与异种文件系统上是常态，而 CI 跑在 Linux 上，
+	// inodeOf 永远返回 ok=true —— 不留这个接缝，FileID 的后半段
+	// （查库 → 只读则 ErrNotSupported → 否则分配）就是一段**永远不会被
+	// 执行到的代码**，等于没写（AGENTS.md §1.2：一条 CI 里从未执行过的
+	// 路径，到需要它的那天一定是坏的）。
+	//
+	// 与本仓库 internal/vfs 的 openHostFile 接缝同一手法。
+	inode func(os.FileInfo) (uint64, bool)
 }
 
 // New 构造一套完整的 builtin 能力实现，签名即 oscap.Factory。
@@ -60,7 +74,7 @@ func New(o oscap.Options) (oscap.Set, error) {
 	if err != nil {
 		return oscap.Set{}, err
 	}
-	a := &adapter{st: st}
+	a := &adapter{st: st, inode: inodeOf}
 	return oscap.Set{
 		Xattr:   a,
 		Sparse:  a,

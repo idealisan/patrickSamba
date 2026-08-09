@@ -181,6 +181,78 @@ func TestPortableFileIDFallbackAllocation(t *testing.T) {
 	}
 }
 
+// TestPortableFileIDWithoutHostInode 走**完整的 FileID 方法**，模拟宿主给不出
+// inode 的平台（Windows、异种文件系统）。
+//
+// 与上面那条 TestPortableFileIDFallbackAllocation 的区别很要紧：那条直接调
+// st.assignFileID，测的是分配器本身；而 FileID 方法里「查库 → 只读则
+// ErrNotSupported → 否则分配」这三步的**编排**它一步都没走到。
+// 覆盖率如实报告了这件事：加这条用例之前 store.lookupFileID 是 **0.0%**，
+// FileID 是 35.7% —— 一段在 Windows 上属于常态、却从未被执行过的代码。
+func TestPortableFileIDWithoutHostInode(t *testing.T) {
+	e := newEnv(t)
+	ref := e.file("a.txt", []byte("x"))
+	ad := e.set.Xattr.(*adapter)
+
+	// 把接缝换成「宿主给不出 inode」。
+	ad.inode = func(os.FileInfo) (uint64, bool) { return 0, false }
+
+	// 第一次：库里没有 → 走分配。
+	id, err := ad.FileID(ref)
+	if err != nil {
+		t.Fatalf("FileID 失败: %v", err)
+	}
+	if id < idFallbackBase {
+		t.Fatalf("分配号必须落在 [2^63, ...) 号段避开真实 inode，实得 %d", id)
+	}
+
+	// 第二次：必须命中库里已有的记录（这一步才会调到 lookupFileID），
+	// 且返回同一个号 —— 否则 FileID 就不「稳定」，QFid 会在客户端眼里跳变。
+	again, err := ad.FileID(ref)
+	if err != nil {
+		t.Fatalf("第二次 FileID 失败: %v", err)
+	}
+	if again != id {
+		t.Fatalf("同一对象两次查询不一致: %d vs %d", id, again)
+	}
+
+	// 另一个对象必须拿到不同的号。
+	other, err := ad.FileID(e.file("b.txt", []byte("y")))
+	if err != nil {
+		t.Fatalf("FileID(b) 失败: %v", err)
+	}
+	if other == id {
+		t.Fatalf("两个对象拿到同一个号 %d", id)
+	}
+
+	// 落盘后重开仍是同一个号（证明真进了库，不是内存里的假象）。
+	e.reopen(false)
+	ad2 := e.set.Xattr.(*adapter)
+	ad2.inode = func(os.FileInfo) (uint64, bool) { return 0, false }
+	if got, err := ad2.FileID(ref); err != nil || got != id {
+		t.Fatalf("重开后号变了: %d -> %d (err=%v)", id, got, err)
+	}
+}
+
+// TestPortableFileIDReadOnlyWithoutInodeIsHonest 钉住那条「宁可没有，也不发
+// 一个会变的号」的取舍（fileid.go 包注释末段）。
+//
+// 只读共享 + 拿不到 inode + 库里从未记过账 → 必须 ErrNotSupported。
+// 这里最危险的错误实现是「临时编一个号返回」：它会让所有测试变绿，
+// 而客户端会看到 FileID 每次重连都在变，Time Machine 会认为整个卷换了。
+func TestPortableFileIDReadOnlyWithoutInodeIsHonest(t *testing.T) {
+	e := newEnv(t)
+	ref := e.file("a.txt", []byte("x"))
+	e.reopen(true)
+
+	ad := e.set.Xattr.(*adapter)
+	ad.inode = func(os.FileInfo) (uint64, bool) { return 0, false }
+
+	if id, err := ad.FileID(ref); !errors.Is(err, oscap.ErrNotSupported) {
+		t.Fatalf("只读且无 inode 时应得 ErrNotSupported，实得 (%d, %v)", id, err)
+	}
+}
+
 // TestPortableDefaultMetadataPathOutsideRoot 盯的是一条硬要求：
 // 默认库文件**不能落在共享根里面**，否则客户端会在共享里看见它。
 func TestPortableDefaultMetadataPathOutsideRoot(t *testing.T) {
