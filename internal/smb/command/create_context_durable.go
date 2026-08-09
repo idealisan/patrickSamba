@@ -62,6 +62,15 @@ func (h *durableHandler) Registered(ctx *Context, open *Open) error {
 
 	// persistent handle 需要 CONTINUOUS_AVAILABILITY 共享，本服务端没有，
 	// 永远不能授予（诚实：不假装支持，直接拒）。§3.3.5.9.11。
+	//
+	// 已知争议，**暂不改**：MS-SMB2 §3.3.5.9.12 读起来是「share 不是 CA 就
+	// 忽略 persistent 位、继续按普通 durable v2 处理」，也就是应当**降级**
+	// 而不是让整个 CREATE 失败（客户端顺手带上这个位就连文件都打不开）。
+	// 但这只是读规范推断出来的，我们没有对真实 Windows/macOS 客户端抓过包，
+	// 而 AGENTS.md §9 要求「规范与真实客户端行为不一致时以真实客户端行为为
+	// 准」。在拿到抓包证据之前保持现状，不把未经验证的规范解读写进生产代码。
+	// 复现用例：durable_defect_test.go 的 TestQADefectPersistentFlagDegradesNotFails
+	// （qadefect tag，故意留红）。
 	if intent.RequestV2 != nil && intent.RequestV2.Flags.IsPersistent() {
 		return status.NotSupported
 	}
@@ -87,7 +96,15 @@ func (h *durableHandler) Registered(ctx *Context, open *Open) error {
 	ds.path = open.Path
 	ds.identity = ctx.Session.Identity()
 	open.Durable = ds
-	durableRegistry.register(open)
+	if !durableRegistry.register(open) {
+		// 登记表里这个键已被另一个存活句柄占着（v1 的键只有 Persistent
+		// 一个维度，跨会话会撞）。此时无法保证重连时交回**正确**的句柄，
+		// 于是诚实地不授予、降级为普通句柄，而不是登记上去等着串号。
+		open.Durable = nil
+		ctx.Log.Warn("durable 授予被拒：登记表键已被占用",
+			"share", ds.share, "path", ds.path, "v2", ds.v2)
+		return nil
+	}
 	h.granted = true
 	return nil
 }
