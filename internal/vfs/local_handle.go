@@ -94,7 +94,11 @@ func (h *localHandle) WriteAt(p []byte, off int64) (int, error) {
 	if h.writeThrough {
 		// FILE_WRITE_THROUGH：客户端要求每次写都落盘。
 		// 慢，但这是它显式要的语义，不能偷懒。
-		if err := h.f.Sync(); err != nil {
+		//
+		// 用 platformFullSync 而不是 f.Sync()：在 macOS 上后者只把数据
+		// 交给磁盘控制器，掉电仍可能丢 —— 客户端显式要了持久化就应该
+		// 给它真正的持久化。Linux/Windows 上两者等价，无额外代价。
+		if err := platformFullSync(h.f); err != nil {
 			return n, mapError(err)
 		}
 	}
@@ -135,14 +139,29 @@ func (h *localHandle) Truncate(size int64) error {
 //
 // full=true 对应 SMB2 FLUSH 与 macOS 的 F_FULLFSYNC：
 // Time Machine 依赖它保证备份数据真的落到盘片上（AGENTS.md §2 阶段二）。
+// 各平台的落地见 platformFullSync：
+//
+//	linux    fsync(2)（Linux 的 fsync 本就要求刷到持久介质；
+//	         fdatasync 不够，元数据也要落）
+//	darwin   fcntl(F_FULLFSYNC)，失败时退化为 fsync
+//	windows  FlushFileBuffers
 func (h *localHandle) Sync(full bool) error {
-	if h.f == nil {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return ErrClosed
+	}
+	f := h.f
+	h.mu.Unlock()
+
+	if f == nil {
+		// OpenAttrOnly 句柄没有数据流，没有东西需要刷。
 		return nil
 	}
 	if full {
-		return mapError(platformFullSync(h.f))
+		return mapError(platformFullSync(f))
 	}
-	return mapError(h.f.Sync())
+	return mapError(f.Sync())
 }
 
 // ---------------------------------------------------------------- 属性
