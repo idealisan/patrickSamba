@@ -14,6 +14,8 @@
 #   SMB_PORT   主服务端口，默认 4445（非特权，便于无 root 环境跑）
 #   SMB_PORT_GUEST   guest 服务端口，默认 SMB_PORT+1000
 #   SMB_PORT_STRICT  强签名/强加密服务端口，默认 SMB_PORT+2000
+#   SMB_PORT_ENC     强制加密但**允许低方言接入**的服务端口，默认 SMB_PORT+3000
+#   SMB_PORT_TAP     线级探针 smbtap 的监听端口，默认 SMB_PORT+4000
 #              偏移取 1000/2000 而不是 +1/+2，是因为多 agent 并行开发时
 #              大家的调试端口是连号分配的（4461、4462…），+1/+2 会直接
 #              撞到隔壁 agent 的服务上 —— 已经真踩过一次。
@@ -30,6 +32,8 @@ export CGO_ENABLED=0
 PORT=${SMB_PORT:-4445}
 PORT_GUEST=${SMB_PORT_GUEST:-$((PORT + 1000))}
 PORT_STRICT=${SMB_PORT_STRICT:-$((PORT + 2000))}
+PORT_ENC=${SMB_PORT_ENC:-$((PORT + 3000))}
+PORT_TAP=${SMB_PORT_TAP:-$((PORT + 4000))}
 USER=${SMB_USER:-testuser}
 PASS=${SMB_PASS:-testpass123}
 ONLY=$1
@@ -38,6 +42,8 @@ WORK=$(mktemp -d /tmp/stupidsamba-acc.XXXXXX)
 SHARE="$WORK/share"
 RO="$WORK/readonly"
 LOG="$WORK/server.log"
+LOG_STRICT="$WORK/server-strict.log"
+LOG_ENC="$WORK/server-enc.log"
 SRVPIDS=""
 
 PASSED=""
@@ -167,7 +173,49 @@ mdns:
 log:
   level: debug
 EOF
-echo "  OK ($WORK/config.yaml, config-guest.yaml, config-strict.yaml)"
+
+# 强制加密、但 min_dialect 故意放到 2.0.2 的服务。
+#
+# 这个配置存在的唯一理由是**回归**：曾经的缺口是客户端一句
+# `smbclient -m SMB2_10` 把方言压到 3.1.1 以下，加密算法就协商不出来，
+# 而 encryption_required 只在"协商出了算法"时才生效 —— 于是强制加密被
+# 静默旁路，全程明文，服务端既不拒绝也不告警。
+#
+# config-strict 里 min_dialect 是 3.0，低方言在**方言选择**那一层就被挡了，
+# 根本走不到加密那段代码，测不出这个缺口。必须把门开到 2.0.2，让客户端
+# 真的能协商到 2.0.2/2.1，才能验证"加密强制自己"会不会 fail closed。
+#
+# 服务端启动时会为这个组合打一条 WARN（配置与行为不一致的提示），这是预期的。
+cat > "$WORK/config-enc.yaml" <<EOF
+server:
+  name: STUPIDENC
+  domain: WORKGROUP
+  smb1: true
+  min_dialect: "2.0.2"
+  max_dialect: "3.1.1"
+  # 刻意不强制签名：把"加密"这一个属性单独隔离出来测，
+  # 否则用例失败时分不清是签名挡的还是加密挡的。
+  signing_required: false
+  encryption_required: true
+listen:
+  addresses:
+    - 127.0.0.1
+  port: $PORT_ENC
+auth:
+  allow_guest: false
+  users:
+    - name: $USER
+      password: "$PASS"
+shares:
+  - name: secure
+    path: $SHARE
+    read_only: false
+mdns:
+  enabled: false
+log:
+  level: debug
+EOF
+echo "  OK ($WORK/config.yaml, config-guest.yaml, config-strict.yaml, config-enc.yaml)"
 
 # 用 Go 编译一个无外部依赖的端口探针（不依赖 python3 / nc 等，
 # 因为这些工具在重启后的环境里经常缺失）
@@ -181,6 +229,9 @@ func main(){
 }
 GOEOF
 go build -o "$WORK/probe" "$WORK/probe.go" || { echo "  端口探针编译失败"; exit 1; }
+
+# 线级探针：加密到底有没有生效，只有看网线上的字节才算数。见该文件头部注释。
+go build -o "$WORK/smbtap" ./scripts/clients/smbtap || { echo "  smbtap 编译失败"; exit 1; }
 
 need_tool() {
     command -v "$1" >/dev/null 2>&1 || { echo "  跳过：缺少工具 $1"; return 77; }
@@ -238,7 +289,8 @@ start_server() {
 say "启动服务"
 start_server "$WORK/config.yaml"        "$PORT"        "$LOG"
 start_server "$WORK/config-guest.yaml"  "$PORT_GUEST"  "$WORK/server-guest.log"
-start_server "$WORK/config-strict.yaml" "$PORT_STRICT" "$WORK/server-strict.log"
+start_server "$WORK/config-strict.yaml" "$PORT_STRICT" "$LOG_STRICT"
+start_server "$WORK/config-enc.yaml"    "$PORT_ENC"    "$LOG_ENC"
 
 SKIPPED=""
 skip() { printf '\033[1;33m  [SKIP] %s (%s)\033[0m\n' "$1" "$2"; SKIPPED="$SKIPPED $1"; }
@@ -400,44 +452,164 @@ t_signing() {
 }
 
 # ---------------------------------------------------------------- 加密
-
+#
+# 这一组用例的判据**不是**"smbclient 能读到文件内容"。
+#
+# 那个判据对**明文旁路**完全无感：服务端没加密、客户端也没加密，内容照样读得到，
+# 用例照样绿。真实发生过 —— encryption_required: true 的服务被
+# `smbclient -m SMB2_10` 一句降级成全程明文，验收脚本一声不吭。
+#
+# 所以正向判定改成看网线上的字节：客户端连 smbtap（透明 TCP 中继），
+# 由它按 Direct TCP 帧边界统计 ProtocolId，断言
+#   - 出现 SMB2 TRANSFORM_HEADER（0xFD 'S' 'M' 'B'，MS-SMB2 §2.2.41），且
+#   - 明文帧里除 NEGOTIATE(0x00) / SESSION_SETUP(0x01) 外没有任何命令
+#     （这两个按 MS-SMB2 §3.3.4.1.4 本来就不能加密）。
+# 第二条比第一条严格：只加密了一部分流量的实现同样会被抓出来。
+#
+# 探针本身的有效性做过反向对照：对不加密的会话，它报出
+# c2s_plain_postauth_cmds=0x3,0x4,0x5,0x6,0x8,0xe,0x10
+#（TREE_CONNECT/TREE_DISCONNECT/CREATE/CLOSE/READ/QUERY_DIRECTORY/QUERY_INFO），
+# 即它确实抓得住明文，不是恒绿的摆设。
+#
 # 注意：smbclient 4.22 **没有 `-e` 选项**（4.15 之前才有），要用
 # `--client-protection=encrypt`。写成 -e 会直接打印 usage 退出、根本没连服务端，
 # 表现却是"加密全线失败"，看着像服务端不支持加密 —— 典型的假故障。
+
+# repval <报告文件> <键>  —— 从 smbtap 的 key=value 报告里取值
+repval() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
+
+# enc_case <服务端口> <共享> <服务端日志> <方言> <期望 reject|encrypt> <期望cipher|-> [额外 smbclient 参数...]
+#
+# 全程经由 smbtap 转发，结束后按线级统计断言。返回 0 表示该档符合预期。
+enc_case() {
+    _p=$1; _sh=$2; _slog=$3; _d=$4; _expect=$5; _wantcipher=$6
+    shift 6
+
+    _tag="$_p-$_d"
+    _rep="$WORK/tap-$_tag.txt"
+    _tout="$WORK/tap-$_tag.out"
+    _cliout="$WORK/cli-$_tag.out"
+    rm -f "$_rep"
+    _mark=$(wc -l < "$_slog")
+
+    "$WORK/smbtap" -listen "127.0.0.1:$PORT_TAP" -target "127.0.0.1:$_p" \
+        -report "$_rep" -conns 1 -timeout 60s > "$_tout" 2>&1 &
+
+    # 等探针真的 bind 上再放客户端进来（它就绪时会打印 "smbtap ready"），
+    # 否则会撞 connection refused，看起来像服务端拒绝了连接。
+    _i=0
+    while [ $_i -lt 100 ]; do
+        grep -q "smbtap ready" "$_tout" 2>/dev/null && break
+        _i=$((_i + 1)); sleep 0.1
+    done
+
+    _cli=0
+    smbclient "//127.0.0.1/$_sh" -p "$PORT_TAP" -U "$USER%$PASS" -d1 -m "$_d" "$@" \
+        -c "ls; get hello.txt $WORK/enc-$_tag.txt" > "$_cliout" 2>&1 || _cli=1
+
+    # 报告是连接结束后才落盘的；`wait` 在 dash 下不保证文件已经可见，轮询更稳。
+    _i=0
+    while [ $_i -lt 100 ] && [ ! -f "$_rep" ]; do
+        _i=$((_i + 1)); sleep 0.1
+    done
+    if [ ! -f "$_rep" ]; then
+        echo "    $_d: smbtap 未产出报告（探针本身出问题了）"
+        sed 's/^/      /' "$_tout" | head -5
+        return 1
+    fi
+
+    _tx=$(repval "$_rep" c2s_transform)
+    _rx=$(repval "$_rep" s2c_transform)
+    _leak=$(repval "$_rep" c2s_plain_postauth_cmds)
+    _leakrx=$(repval "$_rep" s2c_plain_postauth_cmds)
+
+    if [ "$_expect" = reject ]; then
+        if [ "$_cli" -eq 0 ]; then
+            echo "    $_d: 期望被拒，实际**连上了** —— 强制加密被方言降级绕过"
+            return 1
+        fi
+        # 被拒还不够：必须确认没有任何业务命令以明文走过网线
+        if [ -n "$_leak" ] || [ -n "$_leakrx" ]; then
+            echo "    $_d: 虽然报错，但明文里出现了业务命令 c2s=[$_leak] s2c=[$_leakrx]"
+            return 1
+        fi
+        echo "    $_d: 被拒绝（$(grep -o 'NT_STATUS_[A-Z_]*' "$_cliout" | head -1)），线上无明文业务命令 → OK"
+        return 0
+    fi
+
+    # _expect = encrypt
+    if [ "$_cli" -ne 0 ]; then
+        echo "    $_d: 期望连上并加密，实际失败："
+        tail -2 "$_cliout" | sed 's/^/      /'
+        return 1
+    fi
+    if ! grep -q "hello from stupidsamba" "$WORK/enc-$_tag.txt" 2>/dev/null; then
+        echo "    $_d: 连上了但下载内容不匹配"
+        return 1
+    fi
+    if [ "${_tx:-0}" -eq 0 ] || [ "${_rx:-0}" -eq 0 ]; then
+        echo "    $_d: 线上没有 TRANSFORM_HEADER（c2s=$_tx s2c=$_rx）—— 根本没加密"
+        return 1
+    fi
+    if [ -n "$_leak" ] || [ -n "$_leakrx" ]; then
+        echo "    $_d: 有加密帧，但仍有业务命令走明文 c2s=[$_leak] s2c=[$_leakrx]"
+        return 1
+    fi
+    if [ "$_wantcipher" != "-" ] &&
+       ! tail -n +$((_mark + 1)) "$_slog" | grep -q "cipher=$_wantcipher"; then
+        echo "    $_d: 服务端协商出的 cipher 不是 $_wantcipher，实际："
+        tail -n +$((_mark + 1)) "$_slog" | grep -o "cipher=[0-9]*" | head -2 | sed 's/^/      /'
+        return 1
+    fi
+    echo "    $_d: 加密帧 c2s=$_tx s2c=$_rx，明文仅协商/认证，cipher=$_wantcipher → OK"
+    return 0
+}
+
 t_encryption() {
     need_tool smbclient || return 77
     rc=0
-    # 1) 客户端主动要求加密，对不强制加密的主服务
-    if sc "$PORT" public "ls; get hello.txt $WORK/enc1.txt; put $WORK/enc1.txt enc-up.txt; rm enc-up.txt" \
-        -m SMB3 --client-protection=encrypt >/dev/null 2>&1; then
-        echo "  客户端要求加密（SMB3）→ OK"
-    else
-        echo "  客户端要求加密（SMB3）→ 失败"; rc=1
+
+    # 探针端口必须是空的，否则整轮加密验收会在测别人的服务
+    if "$WORK/probe" "127.0.0.1:$PORT_TAP" 2>/dev/null; then
+        echo "  smbtap 端口 127.0.0.1:$PORT_TAP 被占用：$(fuser "$PORT_TAP"/tcp 2>&1 | tr -s ' ')"
+        echo "  换端口重跑：SMB_PORT_TAP=<其它端口>"
+        return 1
     fi
-    # 2) SMB 3.1.1 加密（AES-128-GCM 路径，与 3.0 的 AES-128-CCM 是两套代码）
-    if sc "$PORT" public "ls" -m SMB3_11 --client-protection=encrypt >/dev/null 2>&1; then
-        echo "  SMB 3.1.1 + 加密 → OK"
+
+    # ---- A. 服务端不强制，客户端主动要求加密 ----
+    # 3.1.1 走 AES-128-GCM(cipher=2)，3.0 走 AES-128-CCM(cipher=1)，是两套代码。
+    echo "  A. 客户端主动要求加密（服务端未强制，$PORT）"
+    enc_case "$PORT" public "$LOG" SMB3_11 encrypt 2 --client-protection=encrypt || rc=1
+    enc_case "$PORT" public "$LOG" SMB3_00 encrypt 1 --client-protection=encrypt || rc=1
+
+    # ---- B. encryption_required + min_dialect 2.0.2：方言降级不得绕过加密 ----
+    # 这是整组用例的核心。低方言必须在 NEGOTIATE 阶段就被拒，
+    # 不是"连上了但不加密"，更不是"连上了还能读文件"。
+    echo "  B. encryption_required + 允许低方言接入（$PORT_ENC）—— 降级绕过回归"
+    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB2_02 reject  - || rc=1
+    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB2_10 reject  - || rc=1
+    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_00 encrypt 1 || rc=1
+    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_02 encrypt 1 || rc=1
+    enc_case "$PORT_ENC" secure "$LOG_ENC" SMB3_11 encrypt 2 || rc=1
+
+    # 拒绝必须是**显式**的：服务端要留下告警，而不是悄悄降级。
+    if [ "$(grep -c '拒绝协商' "$LOG_ENC")" -ge 2 ]; then
+        echo "    服务端为被拒的低方言留下了告警日志 → OK"
     else
-        echo "  SMB 3.1.1 + 加密 → 失败"; rc=1
+        echo "    服务端拒绝低方言时没有告警日志（静默拒绝，运维无从发现）"; rc=1
     fi
-    # 2b) SMB 3.0 加密（AES-128-CCM 路径）
-    if sc "$PORT" public "ls" -m SMB3_00 --client-protection=encrypt >/dev/null 2>&1; then
-        echo "  SMB 3.0 + 加密 → OK"
-    else
-        echo "  SMB 3.0 + 加密 → 失败"; rc=1
-    fi
-    # 3) 服务端 encryption_required：客户端**没主动要求**也必须被加密保护
-    if sc "$PORT_STRICT" secure "ls; get hello.txt $WORK/enc3.txt" -m SMB3 >/dev/null 2>&1; then
-        echo "  服务端 encryption_required（客户端未显式 -e）→ OK"
-    else
-        echo "  服务端 encryption_required（客户端未显式 -e）→ 失败"; rc=1
-    fi
-    # 4) 走一遍纯 Go 客户端，交叉验证不是只对 Samba 客户端调通
+
+    # ---- C. encryption_required + min_dialect 3.0：配置层再挡一道 ----
+    echo "  C. encryption_required + min_dialect 3.0（$PORT_STRICT）"
+    enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB2_10 reject  - || rc=1
+    enc_case "$PORT_STRICT" secure "$LOG_STRICT" SMB3_11 encrypt 2 || rc=1
+
+    # ---- D. 换一个协议栈交叉验证，别只对 Samba 客户端调通 ----
     if ( cd "$ROOT/scripts/clients/gosmb2" && \
          go run . "127.0.0.1:$PORT_STRICT" "$USER" "$PASS" secure >/dev/null 2>&1 ); then
-        echo "  go-smb2 对强制加密服务 → OK"
+        echo "  D. go-smb2 对强制加密服务 → OK"
     else
-        echo "  go-smb2 对强制加密服务 → 失败"; rc=1
+        echo "  D. go-smb2 对强制加密服务 → 失败"; rc=1
     fi
     return $rc
 }
