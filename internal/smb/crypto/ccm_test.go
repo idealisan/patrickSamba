@@ -79,10 +79,10 @@ func TestCCM_SP80038C(t *testing.T) {
 	key := mustHex(t, "404142434445464748494a4b4c4d4e4f")
 
 	cases := []struct {
-		name              string
-		nonce, aad, pt    string
-		tagLen            int
-		out               string // ciphertext || tag
+		name           string
+		nonce, aad, pt string
+		tagLen         int
+		out            string // ciphertext || tag
 	}{
 		{
 			name:   "Example 1 (Nlen=7, Tlen=4)",
