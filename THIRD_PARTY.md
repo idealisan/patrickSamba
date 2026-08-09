@@ -19,7 +19,7 @@
 | `github.com/goccy/go-yaml` | v1.19.2 | MIT | YAML 配置解析（`internal/config`） | 选它而非 `gopkg.in/yaml.v3` 是因为它能给出**带行号的错误**，满足 §6「人话错误信息」要求 |
 | `golang.org/x/net` | v0.44.0 | BSD-3-Clause | `ipv4`/`ipv6` 组播控制（`internal/mdns`） | 标准库 `net` 无法逐网卡加入组播组、无法设置组播 TTL |
 | `golang.org/x/sys` | v0.47.0 | BSD-3-Clause | 纯 Go syscall：`F_FULLFSYNC`、`statx`、`fallocate`、xattr、`SO_REUSEPORT` | Go 官方准标准库，纯 Go 无 CGO |
-| `go.etcd.io/bbolt` | v1.5.0 | MIT | Windows POSIX 元数据旁路存储（`internal/vfs/metadata_windows.go`） | **仅 Windows 编译进来**（build tag 隔离），Linux/macOS 为 noop、零开销。选它而非 SQLite 是因为 `mattn/go-sqlite3` 需要 CGO，违反 C1 |
+| `go.etcd.io/bbolt` | v1.5.0 | MIT | Windows POSIX 元数据旁路存储（`internal/meta`，`//go:build windows \|\| metabolt`） | **仅 Windows 编译进来**（`metabolt` tag 仅供 Linux CI 编译/测试用，非生产配置）；Linux/macOS 为 noop、零开销。选它而非 SQLite 是因为 `mattn/go-sqlite3` 需要 CGO，违反 C1。go.mod 中标 `// indirect` 系 build tag 导致 `go mod tidy` 在 linux 视角看不到直接引用，但按 GOOS=windows 会保留、不会被误删——**不要 tidy 掉**。 |
 
 ## 仅测试 / 开发用（不进产品二进制）
 

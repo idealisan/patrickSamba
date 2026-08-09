@@ -43,6 +43,11 @@
 - 新增 oplock / lease 相关的三个 NTSTATUS 常量；`handleOplockBreak` 改回返回
   `STATUS_INVALID_OPLOCK_PROTOCOL`（此前误用 `STATUS_INVALID_PARAMETER`）。
   属协议状态机内部修正，不改变对外可观察行为。
+- Windows 旁路 POSIX 元数据存储（随 PR #26 合入，`internal/meta`）改用新 bucket 名
+  `posix.v2`。v0.1.0 时期由 `internal/vfs/metadata_windows.go` 写入的 `posix` bucket
+  记录（若存在）本版本**不再读取**，回退到默认属主/权限——这是有意的、无迁移的改名：
+  v0.1.0 的 Windows 后端从未被真机执行过、库里没有真实数据，为不存在的数据写迁移逻辑
+  收益为零且引入第二个不可验证路径。详见 `internal/meta/bolt.go` 的 bucketName 注释。
 
 ---
 

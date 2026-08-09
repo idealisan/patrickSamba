@@ -226,6 +226,14 @@ func Fold(s string) string {
 // 库内键一律带前导 '/'，根目录就是 "/"。这样「取 dir 的直接子项」永远是
 // 一次 dir+"/" 前缀扫描（根目录也不例外），不用为根写特例；而且 "/a/" 这个
 // 前缀天然不会误伤 "/ab"。
+//
+// 结果会经 Fold 折叠大小写（见 Fold）。**前提契约**：Fold 只在宿主文件系统
+// 大小写不敏感时才正确——这正是 Windows/NTFS 的默认行为，本包本来也只在
+// Windows 上启用（bolt.go 的 `windows || metabolt` 约束）。`metabolt` 这个 tag
+// 仅供 CI 在 Linux 上**编译/测试**用，**不是生产配置**：若有人拿 `-tags metabolt`
+// 在 Linux（大小写敏感）上跑真业务，a.txt 与 A.txt 会共用同一条记录，造成与
+// Record.StaleFor 注释里同一性质的属主串味。这条假设由 bolt_test.go 的
+// TestNormKeyCaseFoldingIsContract 钉死为显式契约，而非隐含行为。
 func normKey(rel string) (string, error) {
 	if strings.IndexByte(rel, 0) >= 0 {
 		return "", ErrInvalidKey

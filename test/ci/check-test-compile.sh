@@ -41,7 +41,12 @@ export PATH
 
 # 本仓库用到的全部 build tag。新增 tag 时必须同步加到这里，
 # 否则新 tag 下的文件又会变成没人编译的死角。
-TAGS=integration,smoke
+# `metabolt` 是 internal/meta 给 Linux CI 用的逃生 tag：bolt.go 带
+# `//go:build windows || metabolt`，Linux 上必须靠它才能编译/测试。
+# 它的存在同时带来反向约束 `!metabolt`（noop.go），与 `!windows` 同理——
+# 脚本对平台类反向约束本来就放行（见下方 KNOWN），这里把 metabolt 也纳入，
+# 让 `!metabolt` 走同一套「已知反向约束、不报错」的处理。
+TAGS=integration,smoke,metabolt
 
 # ------------------------------------------------------- 0. tag 清单自检
 #
@@ -58,7 +63,7 @@ scan_tags() {
         grep -v '^$' | sort -u
 }
 
-KNOWN='linux|darwin|windows|unix|js|wasip1|plan9|aix|android|dragonfly|freebsd|hurd|illumos|ios|netbsd|openbsd|solaris|amd64|arm64|386|arm|riscv64|ppc64|ppc64le|s390x|mips.*|loong64|wasm|cgo|race|go1\..*|gc|gccgo|ignore'
+KNOWN='linux|darwin|windows|unix|js|wasip1|plan9|aix|android|dragonfly|freebsd|hurd|illumos|ios|netbsd|openbsd|solaris|amd64|arm64|386|arm|riscv64|ppc64|ppc64le|s390x|mips.*|loong64|wasm|cgo|race|go1\..*|gc|gccgo|ignore|metabolt'
 
 UNKNOWN=$(scan_tags | grep -Ev "^(!?($KNOWN))$" || true)
 for t in $UNKNOWN; do

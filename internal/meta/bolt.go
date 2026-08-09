@@ -54,7 +54,22 @@ import (
 const Enabled = true
 
 // bucketName 是存放 POSIX 属主/权限位的 bucket 名。
-var bucketName = []byte("posix")
+//
+// v0.2.0 从 posix 改名为 posix.v2。**不写迁移代码**。理由是一条当初定方案时
+// 容易漏掉的事实：v0.1.0 的旁路实现（internal/vfs/metadata_windows.go）受
+// `//go:build windows` 约束，而项目没有任何 Windows runner，那份代码在地球上
+// 从未被真正执行过一行（连 Linux CI 都不编译它）；v0.1.0 本身是私有仓库的
+// 预发布内测包，线上不存在用旧 12 字节布局写出来的 .db 文件。
+//
+// 为不存在的数据写一段同样无法验证的迁移逻辑，收益为零，风险是新增第二个
+// 不可验证的代码路径。不如改名了事：
+//
+//   - 改名真正防御的是**反方向**：用户先跑 v0.2.0（21 字节记录进 posix2）再回退到
+//     v0.1.0，旧二进制看到的是「没有 posix bucket」→ 无记录 → 回退默认值，是安全的
+//     降级，而非把 21 字节按 12 字节解出错误的 uid/gid/mode。
+//   - 旧 bucket 名 posix **原样保留、本包不读不写**。将来万一真发现用户数据，可凭
+//     真实数据补迁移——选项没有被关掉，只是推迟到有证据的时候。
+var bucketName = []byte("posix.v2")
 
 // openTimeout 限制等待 bbolt 文件锁的时间。
 //
