@@ -16,6 +16,60 @@ func fakeSMB2Message() []byte {
 	return msg
 }
 
+// TestDecrypt_SambaCapture 用**真实 Samba 客户端加密的报文**做已知答案测试。
+//
+// 来源：smbclient（Samba 4）以 SMB 3.1.1 + AES-128-CCM 连上本服务，
+// 用 `--option="debug encryption=yes" -d5` 打印它自己派生的密钥，
+// 同时用 TCP 代理原样抓下客户端发来的第一条 TRANSFORM 帧。
+//
+// 为什么必须有这条：其余 CCM 测试要么是 RFC 3610 / SP800-38C 的向量
+// （参数是 Nlen=13/Tlen=8 等，**不是** SMB3 用的 Nlen=11/Tlen=16），
+// 要么是自己 Seal 再自己 Open 的往返测试 —— 往返测试对"Seal 和 Open 同时
+// 错得一样"完全无能为力（比如 AAD 范围取错、nonce 截断长度取错、
+// tag 该放进 Signature 字段却拼在密文尾部）。只有拿另一套实现产出的密文
+// 来解，才能证明我们和真实客户端在同一个频道上。
+func TestDecrypt_SambaCapture(t *testing.T) {
+	// Samba 侧打印的 ServerIn Key（C2S 方向，服务端用它解密）。
+	key := mustHex(t, "87bf3c8c75b99158b8b0d8ad512e2879")
+
+	// 客户端发来的完整 TRANSFORM 帧（不含 Direct TCP 的 4 字节长度前缀）。
+	frame := mustHex(t,
+		"fd534d42"+ // ProtocolId
+			"5fe8136bf9b881a981688e3510862ac0"+ // Signature（即 AEAD tag）
+			"0100000000000000"+"05ca3b0000000000"+ // Nonce(16)，仅前 11 字节参与 CCM
+			"66000000"+ // OriginalMessageSize = 0x66 = 102
+			"0000"+ // Reserved
+			"0100"+ // Flags = Encrypted
+			"0100000000000000"+ // SessionId
+			// —— 以下为密文 ——
+			"294252f8a7b60db6b947427fec011748047dfde413749dff66fe4387320d7938"+
+			"42152fd298fdec5ee38b8e9dc1a9689aed15be301f743b8c755f4a9cfd5e77e5"+
+			"d91e3a024620036189e6b0bcb3cfc091ae1c7b62e533377e6a1b1559d709edf3"+
+			"51e2351efc11")
+
+	plain, err := Decrypt(CipherAES128CCM, key, frame)
+	if err != nil {
+		t.Fatalf("解密真实 Samba 报文失败: %v", err)
+	}
+	if len(plain) != 102 {
+		t.Fatalf("明文长度 = %d, want 102（OriginalMessageSize）", len(plain))
+	}
+	if !bytes.HasPrefix(plain, []byte{0xFE, 'S', 'M', 'B'}) {
+		t.Fatalf("明文不是 SMB2 报文: % x", plain[:min(8, len(plain))])
+	}
+	// 这条是 smbclient 建会话后的第一条加密请求：TREE_CONNECT(0x0003)。
+	if cmd := binary.LittleEndian.Uint16(plain[0x0C:]); cmd != 0x0003 {
+		t.Errorf("Command = %#04x, want 0x0003 (TREE_CONNECT)", cmd)
+	}
+
+	// 换错密钥必须失败，确认上面的成功不是"根本没验 tag"。
+	bad := append([]byte(nil), key...)
+	bad[0] ^= 0xFF
+	if _, err := Decrypt(CipherAES128CCM, bad, frame); err == nil {
+		t.Error("错误密钥竟然解密成功 —— tag 没有被校验")
+	}
+}
+
 // TRANSFORM_HEADER 布局 golden test（MS-SMB2 §2.2.41）。
 func TestTransformHeaderLayout(t *testing.T) {
 	h := &TransformHeader{
