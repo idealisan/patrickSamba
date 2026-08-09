@@ -32,3 +32,16 @@ Go 工具链消失、python3/smbclient 消失、`/root/.codebuddy/.../memory` �
 6. **致命坑二：smbclient 4.22 的 `-c` 不按换行分割命令**。多条命令必须用**分号**分隔。
    写成多行会产生 `NT_STATUS_NO_SUCH_FILE listing \get` 这种**假故障**，
    看起来像服务端 bug，其实是测试脚本的问题。
+7. **致命坑三：`setsid nohup ... &` 之后 `$!` 不是监听进程**。`$!` 拿到的是 setsid
+   包装进程的 PID，真正 listen 的是它的子进程，`kill $!` 杀不掉，端口一直被占，
+   下一次起服务报 address already in use。找真实 PID 用 **`fuser <port>/tcp`**
+   （本容器里 `ss -ltnp` 拿不到 pid 列）。
+8. **多 agent 共用工作树时，未提交的中间态同样会砸到别人**。真实发生过：
+   某 agent 分两步做重命名（先 Edit 改声明、再 sed 改引用），中间约 1 分钟窗口里
+   工作树是 `undefined: xxx`，另一个 agent 正好在那时跑 `go build ./...` 撞上，
+   花了时间排查一个根本不存在的 bug。**重命名/跨文件改动必须一次原子改完再落盘**，
+   不只是 commit 要保证可编译。
+
+**会话历史的备份与恢复**见 AGENTS.md §10 与 `scripts/save-history.sh` /
+`scripts/restore-history.sh`。要点：`codebuddy --resume=<uuid>` 可用且不重跑工作，
+但 `codebuddy -c` 是陷阱（接的是最近一次会话，崩溃后往往是新开的空壳）。
