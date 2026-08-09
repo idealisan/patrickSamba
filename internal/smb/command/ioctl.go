@@ -45,6 +45,8 @@ func handleIoctl(ctx *Context) error {
 		return ioctlSetZeroData(ctx, req)
 	case wire.FSCTLQueryAllocatedRanges:
 		return ioctlQueryAllocatedRanges(ctx, req)
+	case wire.FSCTLSrvEnumerateSnapshots:
+		return ioctlEnumerateSnapshots(ctx, req)
 	default:
 		ctx.Log.Debug("未实现的 FSCTL", "ctl", req.CtlCode)
 		return status.InvalidDeviceRequest
@@ -314,6 +316,42 @@ func truncateAllocatedRanges(ranges []wire.FileAllocatedRangeBuffer, maxOut uint
 		return nil, overflow
 	}
 	return wire.AppendAllocatedRanges(nil, ranges), overflow
+}
+
+// ioctlEnumerateSnapshots 处理 FSCTL_SRV_ENUMERATE_SNAPSHOTS
+// （MS-SMB2 §3.3.5.15.1，输出结构 §2.2.32.2）。
+//
+// 我们**不做卷影副本**，但必须回「0 个快照」而不是 STATUS_INVALID_DEVICE_REQUEST：
+//   - smbclient 每次 `allinfo` 都会查它，报错会在输出里刷
+//     "NT_STATUS_INVALID_DEVICE_REQUEST getting shadow copy data"；
+//   - Windows 资源管理器的「以前的版本」属性页也查，报错会让该页卡住。
+//
+// 零快照时的确切字节布局（规范文本两可）已由 wire 层查实定案，
+// 见 wire.SrvSnapshotArray 上方那段注释：输出最少 16 字节，
+// SnapShotArraySize 按 n*50+2 上报。这里只负责流程。
+func ioctlEnumerateSnapshots(ctx *Context, req *wire.IoctlRequest) error {
+	// 必须是有效句柄：本 FSCTL 是对某个已打开对象所在卷发起的查询。
+	open, err := ctx.resolveOpen(req.FileID)
+	if err != nil {
+		return err
+	}
+	if open.IsPipe() {
+		// 管道所在的 IPC$ 没有卷，也就没有快照。
+		return status.InvalidDeviceRequest
+	}
+
+	// §3.3.5.15.1 原文：「If the MaxOutputResponse of the request is less than
+	// 16 bytes, the server MUST fail the request with STATUS_INVALID_PARAMETER.」
+	// 注意是 INVALID_PARAMETER 而不是 BUFFER_TOO_SMALL —— 16 是这个 FSCTL 的
+	// 硬性下限，连「只回计数」都装不下，属于请求本身不合理。
+	if req.MaxOutputResponse < wire.SrvSnapshotArrayMinSize {
+		return status.InvalidParameter
+	}
+
+	// 传 nil：本服务端的 Share.SnapshotList 恒为空。
+	// 装不下的截断逻辑在 NewSrvSnapshotArray 里，这里没有快照所以用不上。
+	arr := wire.NewSrvSnapshotArray(nil, req.MaxOutputResponse)
+	return appendIoctlResponse(ctx, req, arr.Encode())
 }
 
 // ioctlEmptyOK 回一个成功但输出为空的 IOCTL 响应。
