@@ -305,7 +305,7 @@ func newSparseCtx(t *testing.T, size int64) (*Context, *wire.IoctlRequest) {
 		Tree: tree,
 		Log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	ctx.Chain.LastOpen = open
+	ctx.Chain = &Chain{LastOpen: open}
 
 	req := &wire.IoctlRequest{
 		Flags:             wire.IoctlIsFSCTL,
