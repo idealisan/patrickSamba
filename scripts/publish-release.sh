@@ -1,18 +1,19 @@
 #!/bin/sh
-# publish-release.sh —— 手工把四平台产物发布成 CNB Release（默认标记为 prerelease）。
+# publish-release.sh —— 手工把四平台产物发布成 CNB Release（prerelease 由 tag 名按 SemVer 判定：带连字符=预发布，否则正式版）。
 #
 # 为什么要有这个脚本：
 #   自动流水线（.cnb.yml 的 tag_push）第一次跑起来大概率有坑，而"能让人下载到"
 #   这件事不该被流水线调试卡住。这条手工路径与流水线用的是同一套 CNB Open API
 #   语义（git:release 内置任务本质上也是调它），所以先手工走通，再去补流水线。
 #
-# 用法：
-#   scripts/publish-release.sh --tag v0.1.0-test              # 构建 + 建 prerelease + 传附件
-#   scripts/publish-release.sh --tag v0.1.0 --no-prerelease   # 正式版
-#   scripts/publish-release.sh --tag v0.1.0-test --skip-build # 复用已有 dist/
-#   scripts/publish-release.sh --tag v0.1.0-test --dry-run    # 只看要做什么，不写任何东西
-#   scripts/publish-release.sh --tag v0.1.0-test --delete     # 删掉这个 Release（清理试验）
-#   scripts/publish-release.sh --tag v0.1.0-test --delete --delete-tag  # 连 tag 一起删
+# 用法（prerelease 由 tag 名自动判定，与 .cnb.yml 同一套 SemVer 规则；也可显式覆盖）：
+#   scripts/publish-release.sh --tag v0.2.0              # 正式版（不带连字符 → prerelease=false, make_latest=true）
+#   scripts/publish-release.sh --tag v0.2.0-rc1           # 预发布（带连字符 → prerelease=true, 不抢 latest）
+#   scripts/publish-release.sh --tag v0.2.0-rc1 --no-prerelease   # 显式覆盖：强制当正式版发
+#   scripts/publish-release.sh --tag v0.2.0 --skip-build # 复用已有 dist/
+#   scripts/publish-release.sh --tag v0.2.0 --dry-run    # 只看要做什么，不写任何东西
+#   scripts/publish-release.sh --tag v0.2.0 --delete     # 删掉这个 Release（清理试验）
+#   scripts/publish-release.sh --tag v0.2.0 --delete --delete-tag  # 连 tag 一起删
 #
 # 凭据：
 #   只从环境变量 $CNB_TOKEN 读取，脚本任何路径都不会把它打印出来、写进文件或塞进 URL。
@@ -55,7 +56,7 @@ die()  { printf '\033[1;31m错误: %s\033[0m\n' "$1" >&2; exit 1; }
 TAG=
 NAME=
 NOTES_FILE=CHANGELOG.md
-PRERELEASE=true
+PRERELEASE=
 TARGET=
 SKIP_BUILD=0
 DRY_RUN=0
@@ -78,6 +79,17 @@ while [ $# -gt 0 ]; do
         *)              die "未知参数: $1（--help 看用法）" ;;
     esac
 done
+
+# prerelease 默认按 tag 名推断 —— 与 .cnb.yml 的发布渠道判定保持同一套 SemVer 规则：
+# 带连字符的是预发布（如 v0.2.0-rc1），不带的是正式版（如 v0.2.0）。显式
+# --prerelease / --no-prerelease 已在上面设过 PRERELEASE，这里只在留空时推导，
+# 绝不覆盖人工指定值（救场脚本必须保留人工兜底）。两处判据一旦漂移就是下一个 R11。
+if [ -z "$PRERELEASE" ]; then
+  case "$TAG" in
+    *-*) PRERELEASE=true  ;;
+    *)   PRERELEASE=false ;;
+  esac
+fi
 
 [ -n "$TAG" ] || die "必须用 --tag 指定标签名，例如 --tag v0.1.0"
 [ -n "$NAME" ] || NAME=$TAG
