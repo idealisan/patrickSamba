@@ -25,7 +25,7 @@
 
 | 模块 | License | 用途 |
 |---|---|---|
-| `github.com/hirochachacha/go-smb2` | BSD-2-Clause | 验收测试的 Go SMB **客户端**（`scripts/clients/gosmb2/`，**独立 go module**，刻意不污染主模块 go.mod） |
+| `github.com/hirochachacha/go-smb2` | BSD-2-Clause | 验收测试的 Go SMB **客户端**（AGENTS.md §3 第 6 项第三方栈）。两处使用：① 独立 CLI 客户端 `scripts/clients/gosmb2/`（**独立 go module**，不污染主模块）；② **主模块的集成测试 `test/integration/gosmb2_test.go`**——它必须 import `internal/...`（进程内起真服务做端到端），而 `internal/` 只允许主模块导入，所以 go-smb2 同时是**主模块的直接依赖**（仅在 `//go:build integration` 下被引用，不进产品二进制）。其传递依赖 `github.com/geoffgarside/ber`(BSD)、`golang.org/x/crypto`(BSD) 一并进入主模块 go.mod |
 
 外部测试工具（系统安装，非 Go 依赖，仅本地/CI 验收用）：
 `smbclient`、`mount.cifs`、`impacket`、`samba`（仅用于采集参考抓包）。
