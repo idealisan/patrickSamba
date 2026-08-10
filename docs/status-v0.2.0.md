@@ -3480,7 +3480,7 @@ rc=1 需人动手：#171（4 文件，见上）   #172（memory 4 文件）
 | **qa** | `qa/v020-verify`（`RELEASE_VERIFY_REPORT.md`，`f953891`） | 发布链路：Release 渠道 / `tag_push`(`success 1 0`) / 镜像双 tag 同 manifest 双架构 / `check-test-compile.sh` rc=0 / `check-constraints.sh`(C1–C9) rc=0 | **5/5 PASS** |
 | **vfs** | `vfs/v020-tag-verify`（`VFS_TAG_REPORT.md`，`d343191`） | `vfs`+`oscap`+`oscap/builtin`+`oscap/native` 全 PASS，`go build ./...` rc=0；oscap「2/6 接线」口径 3 条判据 3/3 相符；portable 门禁在位（定义+push/PR 双引用+脚本存在） | **4 pkg / 304 子测试 PASS / 0 SKIP / 0 FAIL** |
 | **server** | `server/v020-tag-verify`（`SERVER_TAG_REPORT.md`，`b28995d`） | `server`/`smb/*`/`auth` 全 PASS，`go build ./...` rc=0；CHANGELOG「协议与功能」5 项服务端声明逐项与代码一致；`crypto`/`auth`/`dialect` 自 v0.1.0 零改动 | **7 pkg PASS / 0 FAIL；声明 5/5 一致** |
-| **release-eng** | `release-eng/v020-assets` | **待回填**（截至 2026-08-10 10:31 CST 该分支尚无独立报告提交，本人仍在验证）；由 team-lead 合并时补入 | 待回填 |
+| **release-eng** | `release-eng/v020-assets`（`RELEASE_ASSET_REPORT.md`，`16d1513`） | 5 资产 `sha256sum -c` 全成功；四平台二进制均 v0.2.0 / commit ccc4302 / CGO=0 / -trimpath，linux 双架构 `ldd`=非动态可执行（C2）；`:latest` 与 `:v0.2.0` index digest 逐位相同、镜像内二进制与裸包 tar.gz 逐字节 sha256 一致；容器起服务 + smbclient SMB3 匿名列共享/读写往返字节一致 | **5 资产完整 / 同源 / 静态链接 / 正向对照 PASS** |
 
 **未做（如实列出，超出本轮范围）**：真机 SMB 客户端往返测试、pipeline stage 级逐条红绿人工核、
 Time Machine 真机备份/恢复验收——均**未执行**，不在上述 PASS 计数内。
@@ -3501,6 +3501,6 @@ Time Machine 真机备份/恢复验收——均**未执行**，不在上述 PASS
 ### 21.4 收尾结论
 
 **v0.2.0 发版目标达成：发布已上线（Release 正式版 + 多架构镜像 + 5 资产 + `tag_push` 成功），
-且经 qa / vfs / server 三个独立 agent 在发布 commit `ccc4302` 上复跑验证通过
-（发布链路 5/5、vfs/oscap 304 子测试全绿、server 7 包全绿且声明 5/5 一致）；
-release-eng 的资产完整性复核待回填。上述未变项均为已知、已记录、不影响已发布产物。**
+且经 qa / release-eng / vfs / server 四个独立 agent 在发布 commit `ccc4302` 上复跑验证通过
+（发布链路 5/5、资产完整性+镜像同源+静态链接+正向对照 PASS、vfs/oscap 304 子测试全绿、server 7 包全绿且声明 5/5 一致）。
+上述未变项均为已知、已记录、不影响已发布产物。**
