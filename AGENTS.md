@@ -186,52 +186,25 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **部分有**（截至 2026-08-09 19:10 CST）。PR #159 把 `CapXattr`（6 处）与 `CapNamedStream`（4 处）接进了 `internal/vfs` 的真实数据路径，`cmd/stupidsamba` 的装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**（接线前 1）。**但六项能力只接了两项**，`CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 仍无消费方。见下方「已建成 ≠ 已生效」 |
 
 上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
-2026-08-09 的一轮文档审计核实：**双适配器与 portable CI 门禁已于 v0.2.0 期间全部合入**，
-上一版这里写的「开发中 / 未完成」已过期，故就地订正。
 
 <!-- BEGIN-OSCAP-WIRING-STATUS-AGENTS：本段与 CHANGELOG.md、README.md、configs/example.yaml
-     的同名块是**一套四处**，接线 PR 合入后四处都要改，只改一处会在另外三处留下过期陈述。
-     一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
-**⚠️ 已建成 ≠ 已生效：v0.2.0 接了 6 项里的 2 项（落笔前务必知道）**：
-六项能力的两套适配器都造好了、都有测试、portable 门禁也在 CI 里真跑。
-**PR #159 之前**，整个 oscap 子系统没有任何产品调用点，`filesystem_mode` 三个取值
-运行期行为完全一样；**现在这句话只对剩下的四项成立**。
+     的同名块是**一套四处**，接线 PR 合入后四处都要改。一次找齐：
+     grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
+**OSCAP 接线状态（v0.3.0）：六项能力全部接进 VFS 数据路径。**
+`CapXattr` / `CapNamedStream` 在 v0.2.0（PR #159）接好；`CapSparse`、`CapStableFileID`、
+`CapCreationTime`、`CapDOSAttributes` 在 v0.3.0 由 `vfs-sparse` / `vfs-attr` 接进
+（`internal/vfs/optional.go` 经 `caps.Sparse()`；`local_handle.go` / `attr_*.go` /
+`query_info.go` 经 `caps.Times()` / `caps.IDs()` / `caps.DOS()`）。至此 `filesystem_mode`
+三态（auto / native / portable）对全部六项能力都有真实运行期效果。
 
-现状（2026-08-09 19:10 CST 实测，四条判据可自行复算）：
+**验证判据（可自行复算）**：
+1. `go list -deps ./cmd/stupidsamba | grep -c oscap` ≥ 3（oscap / native / builtin 已链进二进制）。
+2. 包外真实调用点：`caps.Xattr()` / `caps.Streams()` / `caps.Sparse()` / `caps.Times()` / `caps.IDs()` / `caps.DOS()`。
+3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` 活调用为 0（R11 双写消除）。
+4. `FilesystemMode` 由 `cmd/stupidsamba` 装配层**逐共享**下传给 `NewLocalFS`。
 
-1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（接线前 1）——
-   `internal/oscap`、`oscap/native`、`oscap/builtin` **都已链进发布二进制**。
-   这是最硬的一条：链接依赖由编译器算出，测试写得再漂亮也可能没走真实路径，这个数字不会骗人。
-2. 包外真实调用点 **1 → 9**。判据要给到能原样粘贴执行的程度，否则读者数出来对不上
-   就只能猜谁错了（本条初稿写的是 8，就是漏了 `oscap_xattr.go` 里两个 factory 各算一处）：
-
-   ```sh
-   grep -rn 'oscap\.Open\|oscap\.ParseMode\|native\.New\|builtin\.New\|caps\.Xattr()\|caps\.Streams()' \
-     --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'
-   ```
-
-   接线前唯一那处是 `internal/config/validate.go` 的 `oscap.ParseMode`，那是校验配置
-   字符串，**不是使用能力**——「有人 import」和「有人用」是两回事，
-   这一条当初就是这么被误读的。
-3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` **活调用 9 → 0**，
-   `internal/vfs/xattr_unix.go`、`xattr_other.go` **已整文件删除**（R11 双写消除）。
-   注意裸跑 `grep -rn 'newXattrAccessor\|readMetaXattrFast' --include='*.go' .` 会得到
-   **1**，那一处是 `internal/vfs/oscap_xattr.go:131` 的注释（讲旧签名的 error 返回值
-   为什么没了），不是调用；要得到 0 得再接一段 `| grep -v '^[^:]*:[0-9]*://'`。
-4. `FilesystemMode` 由 `cmd/stupidsamba` 装配层**逐共享**下传给 `NewLocalFS`，
-   不再只是被校验一下就丢掉——**这一步才是让配置项真正有反应的那一环**。
-
-**但只接了 `CapXattr` 与 `CapNamedStream` 两项。** `CapSparse`、`CapStableFileID`、
-`CapCreationTime`、`CapDOSAttributes` 四项仍无产品调用点，对它们而言
-`filesystem_mode` 依旧没有运行期效果。**不要把本节读成「oscap 已接线」——是 2/6。**
-
-接线时必须一并拆掉旧的那份实现（本次已对 xattr 做到），否则会重演 `internal/meta` 与
-`internal/vfs/metadata_windows.go` 的双实现撞车（风险 R11）。
-
-顺带一条给写文档的人：`configs/example.yaml` 里 `filesystem_mode` 上方那段注释的**前半截**
-是**按设计意图**写的（「逐项探测宿主支持情况」）；后半截才是实际行为，已用
-`BEGIN-OSCAP-WIRING-STATUS-YAML` 标记圈出。改动那里之前先读本段。
-（此处**故意不写行号**：行号会随上下文增删而腐烂，用标记名 grep 才是稳定的定位方式。）
+> **历史**：v0.2.0 时仅 2/6（`CapXattr` + `CapNamedStream`），其余四项无产品调用点、
+> `filesystem_mode` 对其无运行期效果。此为 v0.2.0 历史说明，v0.3.0 起已 6/6。
 <!-- END-OSCAP-WIRING-STATUS-AGENTS -->
 
 **前置要求（portable 必须在 CI 里真跑）—— 已满足，原文保留作为判据说明**：
@@ -249,16 +222,12 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 结果行下界）。后两个变异体值得单独记住：它们是「报绿但什么都没跑」的两种形态，
 只统计 FAIL 数的门禁对它们完全无感。
 
-**⚠️ 同型缺口仍在，不要以为门禁已经没有死角**：
-`test/ci/check-test-compile.sh:104` 的平台列表是
-`linux/amd64 linux/arm64 darwin/arm64 windows/amd64`，**没有一个满足
-`!linux && !darwin && !windows`**，于是本仓库 6 个带该约束的文件
+**✅ freebsd 编译缺口已闭合（v0.3.0）**：`test/ci/check-test-compile.sh` 的平台列表已包含
+`freebsd/amd64`，本仓库 6 个带 `!linux && !darwin && !windows` 约束的文件
 （`internal/oscap/native/native_other.go`、`internal/oscap/probe_other.go`、
 `internal/vfs/attr_other.go`、`internal/vfs/sparse_other.go`、`internal/vfs/sys_other.go`、
-`internal/oscap/probe_helper_other_test.go`）**从进仓库起一行都没被编译过**。
-手工补跑 `GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet -tags <全部已注册 tag> ./...` → rc=0，
-说明它们**当前**能编译；但 CI 不看，就随时会在无人察觉时坏掉。
-修法是往那份平台列表末尾**追加**一项 `freebsd/amd64`（照 §7.1 的共享文件规矩，只追加、不重排）。
+`internal/oscap/probe_helper_other_test.go`）已在 CI 中编译验证（`GOOS=freebsd CGO_ENABLED=0 go vet` rc=0）。
+**不要**从那份平台列表删掉 `freebsd/amd64`（它是「非三大平台」的代表档，专门兜这类文件；换 openbsd/solaris 等价）。
 
 **门禁**：C9 由 `scripts/check-constraints.sh` 的 C9 段做机器校验（扫描禁用符号与 import），
 配 `test/ci/negative-verify.sh` 做**反向对照**（故意塞一段违规代码，确认门禁真的会红）。
