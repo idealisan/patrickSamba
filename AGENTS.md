@@ -728,8 +728,33 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
 | `git reset --hard` / `git clean -fd` | CRITICAL | 用临时 worktree 取干净基线（§10.3 第 7 条） |
 | `sudo` / `chmod 777` / `find -delete` / `find -exec rm` / `\| xargs rm` | HIGH | 视情况改写；一般本项目用不到 |
 
+> **⚠️ 项目所有者硬性要求（2026-08-10 口述）：非到磁盘真的满了，一律不要做任何删除/清理类操作。**
+> `rm` / `rm -rf` / `git restore` / `git worktree remove` / `git worktree prune` /
+> `git reset --hard` / `git clean` / `git branch -D` 这类「删东西」的命令会命中 CodeBuddy
+> 高危确认面板，该面板一旦超时卡死会连带拖垮整个并行团队（见上）。**实测影响：
+> 避开删除类操作可节省 20%~50% 以上的工期。**
+> 与其事后清理，不如事先规避：
+> - 需要干净基线？新开一个 worktree（`git worktree add /work/<新名> ...`），**不要** `reset --hard` 或 `clean`。
+> - 验证代码要回滚？用 `git checkout HEAD -- <file>`（实测 SAFE），**不要** `git restore`。
+> - 临时文件 / 旧 worktree 用完了？**留在原地**，不要 `rm` / `worktree remove`。
+> 这条规定与本文件 §7.5 的「禁止命令表」同源、且更高优先 —— 它不是「建议」，是「除非磁盘满否则不做」。
+
 **验证代码时不要靠"改一下再改回来"**（那需要 `git restore`）。
 用 `go test -overlay=<json>` 注入变异体，工作树全程零修改 —— 这也是本项目做变异测试的标准做法。
+
+> **⚠️ 项目所有者硬性要求（2026-08-10 口述）：非到磁盘真的满了，一律不要做任何删除/清理类操作。**
+> `rm` / `git restore` / `git worktree remove` / `git worktree prune` / `git reset --hard` /
+> `git clean` / `git branch -D` 这类「删东西」的命令会命中 CodeBuddy 高危确认面板，
+> 该面板超时后会卡死主 TUI（见上），而本项目并行团队一旦卡死，10 个 agent 同时归零。
+> **实测影响：避开删除类操作可节省 20%~50% 以上的工期** —— 与其事后清理，不如事先规避：
+> - 验证代码要回滚？用 `git checkout HEAD -- <file>`（实测 SAFE），不要用 `git restore`。
+> - 要干净基线？新开一个 worktree（`git worktree add /work/<新名> ...`），**不要** `reset --hard`
+>   或 `clean` 去抹掉现有工作树的改动。
+> - worktree / 临时目录 / 文件用完了？**留在原地**，不要 `rm` / `worktree remove` / `prune`
+>   （本仓库 §7.3.1 与 §10.3 第 7 条本来就要求留着不删，不要与这条对着干）。
+> - 切换分支 / 丢弃某次提交？优先 `git checkout`（SAFE）或新开分支，不要 `--force` 删。
+> 一句话：**能「新建/追加」解决的，绝不「删除/清理」。** 只有磁盘确实不够用、且由人类操作者
+> 明确确认时，才允许删除。agent 工作流里把这条当成与 §7.5 那张表同等优先级的硬约束。
 
 ### 7.6 每个命令前先 `date` 看时间（环境不稳，时间戳是证据）
 
