@@ -10,6 +10,7 @@ package vfs
 //   - 只读共享在**入口**就拒绝所有写意图，不依赖宿主机的权限位。
 
 import (
+	"errors"
 	"hash/fnv"
 	"io/fs"
 	"os"
@@ -478,11 +479,70 @@ func (l *LocalFS) statHost(host, name string) (*Attr, error) {
 		}
 	}
 	a := attrFromFileInfo(fi, name, l.cfg.ReadOnly)
-	if bt, ok := statCreateTime(host); ok {
+	if bt, ok := l.creationTimeAt(host, nil); ok {
 		a.CreateTime = bt
 	}
+	// 用 caps 的稳定 FileID 覆盖 fillSysAttr 填的 st.Ino：native 档直接给
+	// 原生稳定 ID，builtin 档给 inode / 旁路分配号；拿不到时回落 st.Ino。
+	a.FileID = l.fileIDAt(host, nil, a.FileID)
+	// 把客户端显式设置过的 DOS 位 OR 进合成后的 base（DIRECTORY/SPARSE/
+	// REPARSE 与「点开头 → HIDDEN」「属主无写权限 → READONLY」都不归 caps 管，
+	// 由本文件其它逻辑负责）。
+	l.mergeStoredDOS(host, nil, a)
 	l.applyMetadata(host, a)
 	return a, nil
+}
+
+// creationTimeAt 返回 host 对应的创建时间（birth time）。
+//
+// 优先用 oscap.Times()：builtin 旁路能给出**写入**时记下的真实值
+// （POSIX 宿主大多没有 btime，statx 也未必拿得到），native 档在支持的文件系统
+// 上给真值。
+//
+// 拿不到时（ErrNotSupported，典型的 POSIX 宿主无 btime）回落到平台的
+// statCreateTime（statx STATX_BTIME / macOS Birthtimespec）：那是 fillSysAttr
+// 之外唯一能补出真实创建时间的来源。两者都没有时返回 ok=false，调用方保留
+// attrFromFileInfo 填的兜底值（Linux 上是 ctime，macOS/Windows 上已是真值）。
+//
+// 其它错误不打断 Stat：回落 statCreateTime，再不行就保留兜底值。创建时间读不出
+// 不该让整次属性查询失败。
+func (l *LocalFS) creationTimeAt(host string, f *os.File) (time.Time, bool) {
+	ct, err := l.caps.Times().CreationTime(oscap.Ref{Path: host, Handle: f})
+	if err == nil {
+		return ct, true
+	}
+	if errors.Is(err, oscap.ErrNotSupported) {
+		return statCreateTime(host)
+	}
+	return statCreateTime(host)
+}
+
+// fileIDAt 返回 host 的稳定 FileID。
+//
+// 优先用 oscap.IDs()（native 档给原生稳定 ID，builtin 档给 inode 或旁路分配号，
+// 跨重命名稳定）。拿不到时返回 fallback —— 调用方传入 fillSysAttr 已填好的
+// st.Ino，保证任何情况下 Attr.FileID 都有合理值。
+func (l *LocalFS) fileIDAt(host string, f *os.File, fallback uint64) uint64 {
+	if id, err := l.caps.IDs().FileID(oscap.Ref{Path: host, Handle: f}); err == nil {
+		return id
+	}
+	return fallback
+}
+
+// mergeStoredDOS 把客户端**显式设置过**的 DOS 属性位 OR 进 a.FileAttributes。
+//
+// 边界（ports.go 已划清）：由文件系统客观事实推导的位（DIRECTORY / SPARSE /
+// REPARSE_POINT）与 POSIX 约定合成的位（点开头 → HIDDEN、属主无写权限 →
+// READONLY）由 vfs 层负责合成，caps.DOS() 只回答「有没有人显式设置过、设的是什么」。
+//
+// 没人设置过（ErrNotFound）就跳过；其它错误忽略 —— 读属性失败不该让整次
+// Stat 失败。
+func (l *LocalFS) mergeStoredDOS(host string, f *os.File, a *Attr) {
+	bits, err := l.caps.DOS().DOSAttributes(oscap.Ref{Path: host, Handle: f})
+	if err != nil {
+		return
+	}
+	a.FileAttributes |= bits
 }
 
 // applyMetadata 用旁路存储里的 POSIX 属主/权限覆盖 Attr。
