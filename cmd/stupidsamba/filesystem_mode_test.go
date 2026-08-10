@@ -15,6 +15,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/finalappstore/stupidsamba/internal/config"
@@ -80,6 +81,48 @@ func TestAutoModeIsNotPortable(t *testing.T) {
 	if len(m.Caps(oscap.KindNative)) == 0 {
 		t.Errorf("auto 档在本宿主上一项 native 都没选中（矩阵: %s）—— "+
 			"若宿主确实一项可选能力都不支持这是合理的，但更可能是矩阵被写死成了 builtin", m)
+	}
+}
+
+// TestPortableModeFromYAML：从**真正的 YAML 字节**出发，证明「YAML 里写
+// filesystem_mode: portable」能一路穿透到共享实际落到的能力矩阵。
+//
+// 与 TestPortableModeReachesTheShare 的区别：那条用例直接捏一个
+// config.Config 结构体传进 buildShares，跳过了 YAML 反序列化这一层。
+// 本用例把配置文件当成字节流喂给 config.Parse（与进程启动时走的同一条路），
+// 专门堵"YAML 字段没接进结构体 / 解析层丢字段"这一类更靠前的失败 ——
+// 那种失败会让 TestPortableModeReachesTheShare 全绿而真实配置文件完全不生效。
+func TestPortableModeFromYAML(t *testing.T) {
+	doc := fmt.Sprintf(`filesystem_mode: portable
+shares:
+  - name: data
+    path: %s
+`, t.TempDir())
+
+	cfg, err := config.Decode([]byte(doc))
+	if err != nil {
+		t.Fatalf("config.Decode: %v", err)
+	}
+	if cfg.FilesystemMode != "portable" {
+		t.Fatalf("解析后 FilesystemMode = %q，期望 portable", cfg.FilesystemMode)
+	}
+
+	shares, err := buildShares(cfg)
+	if err != nil {
+		t.Fatalf("buildShares: %v", err)
+	}
+	t.Cleanup(func() { closeShares(shares) })
+
+	fs, ok := shares[0].FS.(*vfs.LocalFS)
+	if !ok {
+		t.Fatalf("shares[0].FS 类型 = %T，期望 *vfs.LocalFS", shares[0].FS)
+	}
+
+	m := fs.CapabilityMatrix()
+	for _, c := range oscap.Capabilities() {
+		if got := m.Kind(c); got != oscap.KindBuiltin {
+			t.Errorf("YAML 配 portable 但 %s 落到 %s（矩阵: %s）", c, got, m)
+		}
 	}
 }
 
