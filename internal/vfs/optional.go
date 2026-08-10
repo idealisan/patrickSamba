@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 // pathSeparator 是宿主机路径分隔符的字符串形式（"/" 或 "\\"）。
@@ -346,7 +348,7 @@ func (h *localHandle) PunchHole(off, length int64) error {
 	if length == 0 {
 		return nil
 	}
-	return platformPunchHole(h.f, off, length)
+	return mapOscapError(h.fs.caps.Sparse().PunchHole(oscap.Ref{Path: h.host, Handle: h.f}, off, length))
 }
 
 // Preallocate 实现 SparseFile。
@@ -360,7 +362,7 @@ func (h *localHandle) Preallocate(off, length int64) error {
 	if length == 0 {
 		return nil
 	}
-	return platformPreallocate(h.f, off, length)
+	return mapOscapError(h.fs.caps.Sparse().Preallocate(oscap.Ref{Path: h.host, Handle: h.f}, off, length))
 }
 
 // AllocatedRanges 实现 SparseFile。
@@ -396,7 +398,15 @@ func (h *localHandle) AllocatedRanges(off, length int64) ([]Range, error) {
 	if off >= end {
 		return nil, nil
 	}
-	return platformAllocatedRanges(f, off, end)
+	rs, err := h.fs.caps.Sparse().AllocatedRanges(oscap.Ref{Path: h.host, Handle: f}, off, end)
+	if err != nil {
+		return nil, mapOscapError(err)
+	}
+	out := make([]Range, len(rs))
+	for i, r := range rs {
+		out[i] = Range{Offset: r.Offset, Length: r.Length}
+	}
+	return out, nil
 }
 
 // SetSparse 实现 SparseFile。
@@ -404,7 +414,7 @@ func (h *localHandle) SetSparse(v bool) error {
 	if err := h.checkWritable(); err != nil {
 		return err
 	}
-	return platformSetSparse(h.f, v)
+	return mapOscapError(h.fs.caps.Sparse().SetSparse(oscap.Ref{Path: h.host, Handle: h.f}, v))
 }
 
 // dataFile 取出句柄背后的 *os.File，顺带做关闭检查。
