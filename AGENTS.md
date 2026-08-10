@@ -183,7 +183,7 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
 | builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
 | portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
-| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **部分有**（截至 2026-08-09 19:10 CST）。PR #159 把 `CapXattr`（6 处）与 `CapNamedStream`（4 处）接进了 `internal/vfs` 的真实数据路径，`cmd/stupidsamba` 的装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**（接线前 1）。**但六项能力只接了两项**，`CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 仍无消费方。见下方「已建成 ≠ 已生效」 |
+| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **全部已接进数据路径（v0.3.0）**。PR #159 把 `CapXattr`/`CapNamedStream` 接进 `internal/vfs` 真实路径；v0.3.0 的 `CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 由 `vfs-sparse`/`vfs-attr` 经 `caps.*()` 接进同一路径，`cmd/stupidsamba` 装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**。见下方「OSCAP 接线状态」 |
 
 上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
 
