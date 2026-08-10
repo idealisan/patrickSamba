@@ -43,6 +43,49 @@ v0.3.0 第一优先级，也是当前 doc-honesty 的最大缺口（文档写「
 | `vfs-sparse` | CapSparse 接数据路径 | `internal/vfs/sparse_*.go`、`internal/vfs/oscap_sparse.go`(新)、`internal/smb/command/ioctl.go`(sparse FSCTL) |
 | `vfs-attr` | CapCreationTime + CapDOSAttributes + CapStableFileID + metadata_other 兜底 | `internal/vfs/oscap_attr.go`(新)、`internal/vfs/local.go`、`internal/vfs/attr.go`、`internal/vfs/time.go`、`internal/vfs/metadata*.go`、`internal/smb/command/query_info.go`、`internal/smb/command/set_info.go`、`internal/smb/command/aapl.go`、`internal/smb/command/create_context_qfid.go` |
 | `config` | 把 FilesystemMode 逐共享正确下传到 LocalConfig | `internal/config/*.go`（不碰 `configs/example.yaml`，那是 docs-release 的） |
+
+### 3.4 CapDOSAttributes（vfs-attr）
+- `l.caps.DOSAttributes()` / `SetDOSAttributes()`。
+- 接线点：`attr.go` 的 `attrFromFileInfo` 现在**合成** DOS 属性（DIRECTORY/SPARSE/
+  REPARSE_POINT + 点开头→HIDDEN + 无写权限→READONLY）。本能力只回答「有没有人显式
+  设过」（见 ports.go 注释：客观事实位与合成位不归本能力管）。
+- 接线：`statHost`/`attrFromFileInfo` 先调 `caps.DOSAttributes()`，拿到值则与合成位合并；
+  `ErrNotFound`（从未设置）走纯合成逻辑。`set_info` 的 `FileBasicInformation` 写路径调
+  `SetDOSAttributes`（只传客户端可设位，DIRECTORY/SPARSE 由上层剔除）。
+
+---
+
+## 4. 里程碑（建议，非强制排期）
+
+- **M1 接线**：vfs-sparse / vfs-attr 完成四项能力接入 + 单测；config 完成下传；均独立 PR 入 main。
+- **M2 校验**：ci 补 freebsd；qa 三客户端验收 + portable 门禁覆盖新能力。
+- **M3 文档**：docs-release 把四处 OSCAP-WIRING-STATUS 同步为 6/6 + 版本号 + 发布说明。
+- **M4 发布**：tag v0.3.0，更新 CHANGELOG，关里程碑。
+
+## 5. 已知风险 / 注意
+
+- **绝不**在接线里写 `if 窄平台 { 走另一套 }`（AGENTS.md §5 P7 铁律）；`l.caps` 恒非 nil，
+  能力不足由 builtin 兜，不回退到「老代码」。
+- 错误一律过 `mapOscapError`，不要泄漏 oscap sentinel 到 SMB 层（否则 `STATUS_UNSUCCESSFUL`）。
+- 非 Windows 的 `metadata_other.go` 改造：builtin MetadataStore 必须实现 `CreationTime`
+  持久化，且只读共享下写类方法返回 `ErrReadOnly`（见 oscap.Options.ReadOnly）。
+- 任何删除/清理命令（rm / git restore / worktree remove / reset --hard / clean）一律禁止
+  （见 AGENTS.md §7.5 追加条款）：要干净基线就新开 worktree，不要抹现有工作树。
+
+---
+
+## 6. 进度板（PM 维护，每次状态变化更新）
+
+| Agent | 分支 | 状态 | 备注 |
+|---|---|---|---|
+| pm | — | 进行中 | 本文件 |
+| vfs-sparse | `vfs/sparse-wiring` | 待开工 | — |
+| vfs-attr | `vfs/attr-wiring` | 待开工 | 含 metadata_other 兜底 |
+| config | `config/fsmode-downflow` | 待开工 | — |
+| ci | `ci/freebsd-gap` | 待开工 | — |
+| qa | `qa/v030-acceptance` | 待开工 | — |
+| docs-release | `docs/v030-release` | 待开工 | 四处块同步 |
+
 | `ci` | 补 freebsd 平台列表死角 + 跨平台编译校验 | `test/ci/check-test-compile.sh`、`test/ci/negative-verify.sh`（如需） |
 | `qa` | 验收 / 集成测试 / 三客户端矩阵 | `test/integration/*`(新)、验收脚本 |
 | `docs-release` | 四处 OSCAP-WIRING-STATUS 块 + 版本号 + 发布说明 | `CHANGELOG.md`、`README.md`、`AGENTS.md`(OSCAP-WIRING-STATUS 块)、`configs/example.yaml`(OSCAP-WIRING-STATUS-YAML 块)、版本常量 |

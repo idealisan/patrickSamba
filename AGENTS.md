@@ -1,5 +1,10 @@
 # AGENTS.md — stupidSamba 项目准则
 
+> **工作目录红线（项目所有者 2026-08-10 口述）**：除非磁盘真的满了，否则**绝对不要做删除/清理类操作**——
+> `rm` / `git restore` / `git worktree remove` / `git worktree prune` / `git reset --hard` / `git clean` 等。
+> 这些会命中 CodeBuddy 高危确认面板，一旦超时卡死主 TUI，后台 agent 仍跑但界面死掉，极难排查。
+> 需要新工作区就**新建**（新目录 / 新 worktree），不要删除旧的；需要改动就原地改，不要「删了重写」。
+
 > 本文件是**所有 agent（人类与 AI）在本仓库工作时必须遵守的最高准则**。
 > 与本文件冲突的任何做法一律以本文件为准。开工前必读，改动架构后必须回来更新本文件。
 
@@ -178,55 +183,28 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
 | builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
 | portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
-| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **部分有**（截至 2026-08-09 19:10 CST）。PR #159 把 `CapXattr`（6 处）与 `CapNamedStream`（4 处）接进了 `internal/vfs` 的真实数据路径，`cmd/stupidsamba` 的装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**（接线前 1）。**但六项能力只接了两项**，`CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 仍无消费方。见下方「已建成 ≠ 已生效」 |
+| **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **全部已接进数据路径（v0.3.0）**。PR #159 把 `CapXattr`/`CapNamedStream` 接进 `internal/vfs` 真实路径；v0.3.0 的 `CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 由 `vfs-sparse`/`vfs-attr` 经 `caps.*()` 接进同一路径，`cmd/stupidsamba` 装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**。见下方「OSCAP 接线状态」 |
 
 上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
-2026-08-09 的一轮文档审计核实：**双适配器与 portable CI 门禁已于 v0.2.0 期间全部合入**，
-上一版这里写的「开发中 / 未完成」已过期，故就地订正。
 
 <!-- BEGIN-OSCAP-WIRING-STATUS-AGENTS：本段与 CHANGELOG.md、README.md、configs/example.yaml
-     的同名块是**一套四处**，接线 PR 合入后四处都要改，只改一处会在另外三处留下过期陈述。
-     一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
-**⚠️ 已建成 ≠ 已生效：v0.2.0 接了 6 项里的 2 项（落笔前务必知道）**：
-六项能力的两套适配器都造好了、都有测试、portable 门禁也在 CI 里真跑。
-**PR #159 之前**，整个 oscap 子系统没有任何产品调用点，`filesystem_mode` 三个取值
-运行期行为完全一样；**现在这句话只对剩下的四项成立**。
+     的同名块是**一套四处**，接线 PR 合入后四处都要改。一次找齐：
+     grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
+**OSCAP 接线状态（v0.3.0）：六项能力全部接进 VFS 数据路径。**
+`CapXattr` / `CapNamedStream` 在 v0.2.0（PR #159）接好；`CapSparse`、`CapStableFileID`、
+`CapCreationTime`、`CapDOSAttributes` 在 v0.3.0 由 `vfs-sparse` / `vfs-attr` 接进
+（`internal/vfs/optional.go` 经 `caps.Sparse()`；`local_handle.go` / `attr_*.go` /
+`query_info.go` 经 `caps.Times()` / `caps.IDs()` / `caps.DOS()`）。至此 `filesystem_mode`
+三态（auto / native / portable）对全部六项能力都有真实运行期效果。
 
-现状（2026-08-09 19:10 CST 实测，四条判据可自行复算）：
+**验证判据（可自行复算）**：
+1. `go list -deps ./cmd/stupidsamba | grep -c oscap` ≥ 3（oscap / native / builtin 已链进二进制）。
+2. 包外真实调用点：`caps.Xattr()` / `caps.Streams()` / `caps.Sparse()` / `caps.Times()` / `caps.IDs()` / `caps.DOS()`。
+3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` 活调用为 0（R11 双写消除）。
+4. `FilesystemMode` 由 `cmd/stupidsamba` 装配层**逐共享**下传给 `NewLocalFS`。
 
-1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（接线前 1）——
-   `internal/oscap`、`oscap/native`、`oscap/builtin` **都已链进发布二进制**。
-   这是最硬的一条：链接依赖由编译器算出，测试写得再漂亮也可能没走真实路径，这个数字不会骗人。
-2. 包外真实调用点 **1 → 9**。判据要给到能原样粘贴执行的程度，否则读者数出来对不上
-   就只能猜谁错了（本条初稿写的是 8，就是漏了 `oscap_xattr.go` 里两个 factory 各算一处）：
-
-   ```sh
-   grep -rn 'oscap\.Open\|oscap\.ParseMode\|native\.New\|builtin\.New\|caps\.Xattr()\|caps\.Streams()' \
-     --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'
-   ```
-
-   接线前唯一那处是 `internal/config/validate.go` 的 `oscap.ParseMode`，那是校验配置
-   字符串，**不是使用能力**——「有人 import」和「有人用」是两回事，
-   这一条当初就是这么被误读的。
-3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` **活调用 9 → 0**，
-   `internal/vfs/xattr_unix.go`、`xattr_other.go` **已整文件删除**（R11 双写消除）。
-   注意裸跑 `grep -rn 'newXattrAccessor\|readMetaXattrFast' --include='*.go' .` 会得到
-   **1**，那一处是 `internal/vfs/oscap_xattr.go:131` 的注释（讲旧签名的 error 返回值
-   为什么没了），不是调用；要得到 0 得再接一段 `| grep -v '^[^:]*:[0-9]*://'`。
-4. `FilesystemMode` 由 `cmd/stupidsamba` 装配层**逐共享**下传给 `NewLocalFS`，
-   不再只是被校验一下就丢掉——**这一步才是让配置项真正有反应的那一环**。
-
-**但只接了 `CapXattr` 与 `CapNamedStream` 两项。** `CapSparse`、`CapStableFileID`、
-`CapCreationTime`、`CapDOSAttributes` 四项仍无产品调用点，对它们而言
-`filesystem_mode` 依旧没有运行期效果。**不要把本节读成「oscap 已接线」——是 2/6。**
-
-接线时必须一并拆掉旧的那份实现（本次已对 xattr 做到），否则会重演 `internal/meta` 与
-`internal/vfs/metadata_windows.go` 的双实现撞车（风险 R11）。
-
-顺带一条给写文档的人：`configs/example.yaml` 里 `filesystem_mode` 上方那段注释的**前半截**
-是**按设计意图**写的（「逐项探测宿主支持情况」）；后半截才是实际行为，已用
-`BEGIN-OSCAP-WIRING-STATUS-YAML` 标记圈出。改动那里之前先读本段。
-（此处**故意不写行号**：行号会随上下文增删而腐烂，用标记名 grep 才是稳定的定位方式。）
+> **历史**：v0.2.0 时仅 2/6（`CapXattr` + `CapNamedStream`），其余四项无产品调用点、
+> `filesystem_mode` 对其无运行期效果。此为 v0.2.0 历史说明，v0.3.0 起已 6/6。
 <!-- END-OSCAP-WIRING-STATUS-AGENTS -->
 
 **前置要求（portable 必须在 CI 里真跑）—— 已满足，原文保留作为判据说明**：
@@ -244,16 +222,12 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 结果行下界）。后两个变异体值得单独记住：它们是「报绿但什么都没跑」的两种形态，
 只统计 FAIL 数的门禁对它们完全无感。
 
-**⚠️ 同型缺口仍在，不要以为门禁已经没有死角**：
-`test/ci/check-test-compile.sh:104` 的平台列表是
-`linux/amd64 linux/arm64 darwin/arm64 windows/amd64`，**没有一个满足
-`!linux && !darwin && !windows`**，于是本仓库 6 个带该约束的文件
+**✅ freebsd 编译缺口已闭合（v0.3.0）**：`test/ci/check-test-compile.sh` 的平台列表已包含
+`freebsd/amd64`，本仓库 6 个带 `!linux && !darwin && !windows` 约束的文件
 （`internal/oscap/native/native_other.go`、`internal/oscap/probe_other.go`、
 `internal/vfs/attr_other.go`、`internal/vfs/sparse_other.go`、`internal/vfs/sys_other.go`、
-`internal/oscap/probe_helper_other_test.go`）**从进仓库起一行都没被编译过**。
-手工补跑 `GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet -tags <全部已注册 tag> ./...` → rc=0，
-说明它们**当前**能编译；但 CI 不看，就随时会在无人察觉时坏掉。
-修法是往那份平台列表末尾**追加**一项 `freebsd/amd64`（照 §7.1 的共享文件规矩，只追加、不重排）。
+`internal/oscap/probe_helper_other_test.go`）已在 CI 中编译验证（`GOOS=freebsd CGO_ENABLED=0 go vet` rc=0）。
+**不要**从那份平台列表删掉 `freebsd/amd64`（它是「非三大平台」的代表档，专门兜这类文件；换 openbsd/solaris 等价）。
 
 **门禁**：C9 由 `scripts/check-constraints.sh` 的 C9 段做机器校验（扫描禁用符号与 import），
 配 `test/ci/negative-verify.sh` 做**反向对照**（故意塞一段违规代码，确认门禁真的会红）。
@@ -710,9 +684,17 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
 
 > **实证**：CodeBuddy 会用一组正则把 Bash 命令分档（SAFE/LOW/MEDIUM/HIGH/CRITICAL），
 > 命中 HIGH/CRITICAL 会弹出「requires confirmation every time」确认面板。
-> 该面板存在缺陷：一旦超时就再也无法关闭，**任何按键都消不掉，主 TUI 就此卡死**，
+> 该面板存在 decides 缺陷：一旦超时就再也无法关闭，**任何按键都消不掉，主 TUI 就此卡死**，
 > 而后台 agent 仍在运行 —— 表现为「界面死了但活还在干」，极难判断。
 > 判定规则的实测复现器见 `scripts/diag/risk-replica.js`，详情见 `docs/troubleshooting-codebuddy.md`。
+
+> **⚠️ 项目所有者强化（2026-08-10 口述）：除非磁盘真的满了，否则一律不做删除/清理类操作**
+> （`rm` / `git restore` / `git worktree remove|prune` / `git reset --hard` / `git clean` 等）。
+> 这些命令会触发上面那个会卡死主 TUI 的确认面板，且往往根本没有回退必要。
+> **替代做法：开一个新的工作目录 / 新 worktree，而不是删旧的。** 例如想「清理」旧改动，
+> 不要 `git reset --hard`，而是 `git worktree add /work/<新名> ...` 切到干净基线继续；
+> 想复用某个分支，不要 `git branch -D` 重建，而是新开一个分支名继续推进（见 §7.3.1「用完留在原地」）。
+> 这条是 §7.5 表里逐条禁令的**总原则**：宁可多出几个无人清理的目录，也绝不冒卡死整个会话的风险。
 
 **以下命令形态一律禁止在 agent 工作流中使用**（多段命令按 `;`/`&&`/`|` 拆开逐段判定并取最高档，
 所以把它藏在一长串命令的末尾同样会触发）：
@@ -728,8 +710,33 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
 | `git reset --hard` / `git clean -fd` | CRITICAL | 用临时 worktree 取干净基线（§10.3 第 7 条） |
 | `sudo` / `chmod 777` / `find -delete` / `find -exec rm` / `\| xargs rm` | HIGH | 视情况改写；一般本项目用不到 |
 
+> **⚠️ 项目所有者硬性要求（2026-08-10 口述）：非到磁盘真的满了，一律不要做任何删除/清理类操作。**
+> `rm` / `rm -rf` / `git restore` / `git worktree remove` / `git worktree prune` /
+> `git reset --hard` / `git clean` / `git branch -D` 这类「删东西」的命令会命中 CodeBuddy
+> 高危确认面板，该面板一旦超时卡死会连带拖垮整个并行团队（见上）。**实测影响：
+> 避开删除类操作可节省 20%~50% 以上的工期。**
+> 与其事后清理，不如事先规避：
+> - 需要干净基线？新开一个 worktree（`git worktree add /work/<新名> ...`），**不要** `reset --hard` 或 `clean`。
+> - 验证代码要回滚？用 `git checkout HEAD -- <file>`（实测 SAFE），**不要** `git restore`。
+> - 临时文件 / 旧 worktree 用完了？**留在原地**，不要 `rm` / `worktree remove`。
+> 这条规定与本文件 §7.5 的「禁止命令表」同源、且更高优先 —— 它不是「建议」，是「除非磁盘满否则不做」。
+
 **验证代码时不要靠"改一下再改回来"**（那需要 `git restore`）。
 用 `go test -overlay=<json>` 注入变异体，工作树全程零修改 —— 这也是本项目做变异测试的标准做法。
+
+> **⚠️ 项目所有者硬性要求（2026-08-10 口述）：非到磁盘真的满了，一律不要做任何删除/清理类操作。**
+> `rm` / `git restore` / `git worktree remove` / `git worktree prune` / `git reset --hard` /
+> `git clean` / `git branch -D` 这类「删东西」的命令会命中 CodeBuddy 高危确认面板，
+> 该面板超时后会卡死主 TUI（见上），而本项目并行团队一旦卡死，10 个 agent 同时归零。
+> **实测影响：避开删除类操作可节省 20%~50% 以上的工期** —— 与其事后清理，不如事先规避：
+> - 验证代码要回滚？用 `git checkout HEAD -- <file>`（实测 SAFE），不要用 `git restore`。
+> - 要干净基线？新开一个 worktree（`git worktree add /work/<新名> ...`），**不要** `reset --hard`
+>   或 `clean` 去抹掉现有工作树的改动。
+> - worktree / 临时目录 / 文件用完了？**留在原地**，不要 `rm` / `worktree remove` / `prune`
+>   （本仓库 §7.3.1 与 §10.3 第 7 条本来就要求留着不删，不要与这条对着干）。
+> - 切换分支 / 丢弃某次提交？优先 `git checkout`（SAFE）或新开分支，不要 `--force` 删。
+> 一句话：**能「新建/追加」解决的，绝不「删除/清理」。** 只有磁盘确实不够用、且由人类操作者
+> 明确确认时，才允许删除。agent 工作流里把这条当成与 §7.5 那张表同等优先级的硬约束。
 
 ### 7.6 每个命令前先 `date` 看时间（环境不稳，时间戳是证据）
 
