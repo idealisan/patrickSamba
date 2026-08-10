@@ -1,5 +1,10 @@
 # AGENTS.md — stupidSamba 项目准则
 
+> **工作目录红线（项目所有者 2026-08-10 口述）**：除非磁盘真的满了，否则**绝对不要做删除/清理类操作**——
+> `rm` / `git restore` / `git worktree remove` / `git worktree prune` / `git reset --hard` / `git clean` 等。
+> 这些会命中 CodeBuddy 高危确认面板，一旦超时卡死主 TUI，后台 agent 仍跑但界面死掉，极难排查。
+> 需要新工作区就**新建**（新目录 / 新 worktree），不要删除旧的；需要改动就原地改，不要「删了重写」。
+
 > 本文件是**所有 agent（人类与 AI）在本仓库工作时必须遵守的最高准则**。
 > 与本文件冲突的任何做法一律以本文件为准。开工前必读，改动架构后必须回来更新本文件。
 
@@ -710,9 +715,17 @@ git push -u origin "$(git branch --show-current)"   # ← 不要跳过，理由�
 
 > **实证**：CodeBuddy 会用一组正则把 Bash 命令分档（SAFE/LOW/MEDIUM/HIGH/CRITICAL），
 > 命中 HIGH/CRITICAL 会弹出「requires confirmation every time」确认面板。
-> 该面板存在缺陷：一旦超时就再也无法关闭，**任何按键都消不掉，主 TUI 就此卡死**，
+> 该面板存在 decides 缺陷：一旦超时就再也无法关闭，**任何按键都消不掉，主 TUI 就此卡死**，
 > 而后台 agent 仍在运行 —— 表现为「界面死了但活还在干」，极难判断。
 > 判定规则的实测复现器见 `scripts/diag/risk-replica.js`，详情见 `docs/troubleshooting-codebuddy.md`。
+
+> **⚠️ 项目所有者强化（2026-08-10 口述）：除非磁盘真的满了，否则一律不做删除/清理类操作**
+> （`rm` / `git restore` / `git worktree remove|prune` / `git reset --hard` / `git clean` 等）。
+> 这些命令会触发上面那个会卡死主 TUI 的确认面板，且往往根本没有回退必要。
+> **替代做法：开一个新的工作目录 / 新 worktree，而不是删旧的。** 例如想「清理」旧改动，
+> 不要 `git reset --hard`，而是 `git worktree add /work/<新名> ...` 切到干净基线继续；
+> 想复用某个分支，不要 `git branch -D` 重建，而是新开一个分支名继续推进（见 §7.3.1「用完留在原地」）。
+> 这条是 §7.5 表里逐条禁令的**总原则**：宁可多出几个无人清理的目录，也绝不冒卡死整个会话的风险。
 
 **以下命令形态一律禁止在 agent 工作流中使用**（多段命令按 `;`/`&&`/`|` 拆开逐段判定并取最高档，
 所以把它藏在一长串命令的末尾同样会触发）：
