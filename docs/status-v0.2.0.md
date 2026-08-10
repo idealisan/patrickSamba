@@ -3444,3 +3444,63 @@ rc=1 需人动手：#171（4 文件，见上）   #172（memory 4 文件）
 
 另：`oscap-verify/pr159-audit`（`dd53467`）与 `docs-sync/v020-doc-gaps`（`87e83df`）
 都动了 `memory/MEMORY.md`，合入后各自会与 #172 再撞 1 个文件。已分别通知本人。
+
+---
+
+## 21. 发布执行与收尾（2026-08-10）
+
+> 本节把进度板从「进行中」闭环到「已发布」。**证据分档同 §0**：
+> **已实测**（PM 亲自复算，命令附后）／**只交叉编译**／**仅代码推断**。
+> 未经真机证实的功能一律不写成「已支持」。PM 本人**未执行任何发布/推送动作**，
+> 本节全部为对已发布结果的**只读独立复核**（`cnb` OpenAPI + git，2026-08-10 10:22–10:31 CST）。
+
+### 21.1 发布已执行（PM 已逐条独立复核，非仅采信 team-lead 转述）
+
+| 事实 | 值 | PM 复核手段 | 档位 |
+|---|---|---|---|
+| tag `v0.2.0` 指向 | 附注 tag `05e595f` → commit **`ccc4302`** | `git rev-parse v0.2.0^{commit}` | 已实测 |
+| tag 已推 origin | 是（`git fetch --tags` 可见） | `git fetch --tags origin` | 已实测 |
+| CNB Release 渠道 | `tag_name=v0.2.0`、`draft=false`、`prerelease=false`、`is_latest=true` | `cnb releases get-release-by-tag --repo finalappstore/stupidSamba --tag v0.2.0` | 已实测 |
+| 发布时间 | `created_at=published_at=2026-08-10T01:40:27Z` | 同上 | 已实测 |
+| 资产：**5 个** | `SHA256SUMS` + `linux_amd64.tar.gz` + `linux_arm64.tar.gz` + `darwin_arm64.tar.gz` + **`windows_amd64.zip`** | 同上（列 `name`/`size`） | 已实测 |
+| docker `:latest` 与 `:v0.2.0` 同一份 | index digest `sha256:2e7c8fade9fab98b9a11e1705e8c79f3b35d7da50132797c6bc0798fb155d784`（两 tag 相等），多架构 **linux/amd64 + linux/arm64** | index digest 由 **qa agent** 用 `docker buildx imagetools inspect` 实测两 tag 相等；PM 另经 `cnb registries list-package-tags` 复核两 tag 的 **per-arch digest 完全相同**（amd64 `b8a8a9b8…`、arm64 `325b8ef9…`）且 `annotations.revision` 均为 `ccc4302` | 已实测（双人双手段） |
+| `tag_push` pipeline | 该 commit **`success=1 fail=0`**（sn `cnb-khg-1jvkl2cha`，与镜像 push 的 sn 一致） | `cnb build get-build-logs --event tag_push --sha ccc4302…` | 已实测 |
+
+> **一处如实订正（不掩盖）**：交办口径写的是「SHA256SUMS + **4 平台 tar.gz**」，
+> 实测资产是 **SHA256SUMS + 3 个 tar.gz + 1 个 Windows `.zip`**（数量仍为 5，Windows 按惯例打 zip）。
+> 此处按实测写，不沿用「4 tar.gz」。
+
+### 21.2 独立验证（发布 commit `ccc4302` 上复跑，非只看发布页面）
+
+> 以下结论来自 **各自独立工作树/分支、`checkout v0.2.0` 后复跑**的 agent，
+> 是对**被发布的那个 commit** 的复算，不是读发布页面的转述。PM 已逐份读取其报告原文。
+
+| Agent | 分支（报告文件） | 结论摘要 | 计数 |
+|---|---|---|---|
+| **qa** | `qa/v020-verify`（`RELEASE_VERIFY_REPORT.md`，`f953891`） | 发布链路：Release 渠道 / `tag_push`(`success 1 0`) / 镜像双 tag 同 manifest 双架构 / `check-test-compile.sh` rc=0 / `check-constraints.sh`(C1–C9) rc=0 | **5/5 PASS** |
+| **vfs** | `vfs/v020-tag-verify`（`VFS_TAG_REPORT.md`，`d343191`） | `vfs`+`oscap`+`oscap/builtin`+`oscap/native` 全 PASS，`go build ./...` rc=0；oscap「2/6 接线」口径 3 条判据 3/3 相符；portable 门禁在位（定义+push/PR 双引用+脚本存在） | **4 pkg / 304 子测试 PASS / 0 SKIP / 0 FAIL** |
+| **server** | `server/v020-tag-verify`（`SERVER_TAG_REPORT.md`，`b28995d`） | `server`/`smb/*`/`auth` 全 PASS，`go build ./...` rc=0；CHANGELOG「协议与功能」5 项服务端声明逐项与代码一致；`crypto`/`auth`/`dialect` 自 v0.1.0 零改动 | **7 pkg PASS / 0 FAIL；声明 5/5 一致** |
+| **release-eng** | `release-eng/v020-assets` | **待回填**（截至 2026-08-10 10:31 CST 该分支尚无独立报告提交，本人仍在验证）；由 team-lead 合并时补入 | 待回填 |
+
+**未做（如实列出，超出本轮范围）**：真机 SMB 客户端往返测试、pipeline stage 级逐条红绿人工核、
+Time Machine 真机备份/恢复验收——均**未执行**，不在上述 PASS 计数内。
+
+### 21.3 已知未变项（诚实列出，不掩盖）
+
+1. **`main` 在 tag 之后还有 2 个 doc-only 提交**（`c2fd360`、`66fb32f`，均 `docs(memory):` 的 v0.2.1 连贯修）。
+   PM 实测 `git diff --stat v0.2.0..origin/main` 仅动 3 个 `memory/*.md`、**0 个代码/二进制文件**，
+   **不影响已发布的 v0.2.0 二进制与镜像**（发布物锁定在 `ccc4302`）。
+2. **`filesystem_mode` 仍只有 2/6 能力接线**：PM 实测 `go list -deps ./cmd/stupidsamba | grep -c oscap`=**3**；
+   消费点 `caps.Xattr()`=1、`caps.Streams()`=4，而 `caps.Sparse()`/`StableFileID()`/`CreationTime()`/`DOSAttributes()`=**0**。
+   即 CapXattr + CapNamedStream 已接，其余 4 项对 `filesystem_mode` **无运行期效果**（留 v0.3.0）。vfs agent 独立复核同结论。
+3. **Time Machine 仍 C 档、未真机验收**：Apple 扩展代码（AAPL create context、ADS、`_adisk._tcp` 广播、稀疏 FSCTL 等）存在且有单测，
+   但**尚未在真机上验收**。按 §2 决定 TM 为 v0.2.0 可选项，非发布阻塞。**不写「支持 Time Machine」「TM 验收通过」。**
+4. **`native` 档当前无平台可用**（文档已记）：`filesystem_mode: native` 要求逐项 native 支持否则启动报错，
+   当前开发环境无满足平台，故该档实际不可用；不影响 `auto`（默认）与 `portable`。
+
+### 21.4 收尾结论
+
+**v0.2.0 发版目标达成：发布已上线（Release 正式版 + 多架构镜像 + 5 资产 + `tag_push` 成功），
+且经 qa / vfs / server 三个独立 agent 在发布 commit `ccc4302` 上复跑验证通过
+（发布链路 5/5、vfs/oscap 304 子测试全绿、server 7 包全绿且声明 5/5 一致）；
+release-eng 的资产完整性复核待回填。上述未变项均为已知、已记录、不影响已发布产物。**
