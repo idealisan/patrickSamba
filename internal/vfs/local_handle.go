@@ -11,6 +11,7 @@ package vfs
 //     游标，用 mutex 保护。
 
 import (
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 type localHandle struct {
@@ -186,10 +189,13 @@ func (h *localHandle) Stat() (*Attr, error) {
 		// 例如 DELETE_ON_CLOSE 还没触发）也能拿到正确属性。
 		if fi, err := h.f.Stat(); err == nil {
 			a := attrFromFileInfo(fi, h.name, h.fs.cfg.ReadOnly)
-			if bt, ok := statCreateTime(h.host); ok {
+			if bt, ok := h.fs.creationTimeAt(h.host, h.f); ok {
 				a.CreateTime = bt
 			}
+			// 用 caps 的稳定 FileID 覆盖 fillSysAttr 填的 st.Ino。
+			a.FileID = h.fs.fileIDAt(h.host, h.f, a.FileID)
 			fillSysAttrFromFile(h.f, a)
+			h.fs.mergeStoredDOS(h.host, h.f, a)
 			h.fs.applyMetadata(h.host, a)
 			return a, nil
 		}
@@ -234,9 +240,21 @@ func (h *localHandle) SetAttr(attr *Attr, mask AttrMask) error {
 		}
 	}
 	if mask&AttrCreateTime != 0 && !attr.CreateTime.IsZero() {
-		// POSIX 没有设置 btime 的接口；Windows 有（SetFileTime）。
-		// 失败一律忽略，见函数头的说明。
-		_ = platformSetCreateTime(h.f, h.host, attr.CreateTime)
+		// 优先走 oscap.Times()：builtin 旁路能真实记下创建时间，
+		// native 档在支持的文件系统上调用 SetFileTime。
+		// 拿不到（ErrNotSupported，典型的 POSIX 宿主无 btime）回落到平台接口；
+		// 其它错误按 oscap 错误映射上报（创建时间落不进旁路是真实失败，
+		// 不应静默吞掉）。
+		ref := oscap.Ref{Path: h.host, Handle: h.f}
+		if err := h.fs.caps.Times().SetCreationTime(ref, attr.CreateTime); err != nil {
+			if errors.Is(err, oscap.ErrNotSupported) {
+				// 平台没有设置 btime 的接口（POSIX），尽力而为，失败忽略
+				// （见函数头：无法表达的属性静默忽略，避免 Windows 复制失败）。
+				_ = platformSetCreateTime(h.f, h.host, attr.CreateTime)
+			} else {
+				return mapOscapError(err)
+			}
+		}
 	}
 
 	if mask&AttrFileAttributes != 0 {
@@ -266,6 +284,24 @@ func (h *localHandle) SetAttr(attr *Attr, mask AttrMask) error {
 // TODO: 阶段二可以像 Samba 那样存到 user.DOSATTRIB 扩展属性里，
 // 那样 Windows 客户端设置的隐藏属性就能持久化。
 func (h *localHandle) setDOSAttributes(attrs uint32) error {
+	// 优先走 oscap.DOS()：builtin 旁路真实记下客户端设置的 DOS 位，
+	// native 档在 Windows 上写 NTFS 原生属性。
+	// 拿不到（ErrNotSupported）回落到平台逻辑；其它错误按 oscap 错误映射上报。
+	ref := oscap.Ref{Path: h.host, Handle: h.f}
+	if err := h.fs.caps.DOS().SetDOSAttributes(ref, attrs); err != nil {
+		if errors.Is(err, oscap.ErrNotSupported) {
+			return h.setDOSAttributesPlatform(attrs)
+		}
+		return mapOscapError(err)
+	}
+	return nil
+}
+
+// setDOSAttributesPlatform 是 caps 不支持 DOS 属性写入时的回落。
+//
+// POSIX 上唯一有真实对应物的是 READONLY（写权限位），其余位只能忽略——
+// 与旧实现一致。Windows 上 platformSetDOSAttributes 直接写 NTFS 原生位。
+func (h *localHandle) setDOSAttributesPlatform(attrs uint32) error {
 	if err := platformSetDOSAttributes(h.host, attrs); err == nil {
 		return nil
 	} else if err != ErrNotSupported {
