@@ -17,6 +17,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/finalappstore/stupidsamba/internal/oscap/builtin"
+	"github.com/finalappstore/stupidsamba/internal/oscap/native"
 )
 
 // sparseBlk 取 1 MiB：空洞探测的粒度是文件系统块（ext4 通常 4 KiB，
@@ -313,5 +317,105 @@ func TestWholeRange(t *testing.T) {
 	got := wholeRange(4, 10)
 	if len(got) != 1 || got[0] != (Range{Offset: 4, Length: 6}) {
 		t.Errorf("wholeRange(4,10) = %+v；期望 [{4 6}]", got)
+	}
+}
+
+// --------------------------------------------------------------------- 接线证明
+
+// countingSparseFile 是 oscap.SparseFile 的**计数包装**：它把每个方法调用
+// 记进计数器后转发给真实实现。用途只有一个 —— 证伪「vfs 真的把稀疏能力
+// 委托给了 caps.Sparse()」。没有这层包装，「测试通过」只证明代码路径没崩，
+// 证明不了接线成立（AGENTS.md：验收判据必须可证伪）。
+type countingSparseFile struct {
+	oscap.SparseFile
+	punch    *int64
+	prealloc *int64
+	alloc    *int64
+	setSpar  *int64
+}
+
+func (c countingSparseFile) PunchHole(ref oscap.Ref, off, length int64) error {
+	*c.punch++
+	return c.SparseFile.PunchHole(ref, off, length)
+}
+func (c countingSparseFile) Preallocate(ref oscap.Ref, off, length int64) error {
+	*c.prealloc++
+	return c.SparseFile.Preallocate(ref, off, length)
+}
+func (c countingSparseFile) AllocatedRanges(ref oscap.Ref, off, length int64) ([]oscap.Range, error) {
+	*c.alloc++
+	return c.SparseFile.AllocatedRanges(ref, off, length)
+}
+func (c countingSparseFile) SetSparse(ref oscap.Ref, v bool) error {
+	*c.setSpar++
+	return c.SparseFile.SetSparse(ref, v)
+}
+
+// countingCaps 是 oscap.Provider 的**薄包装**：除 Sparse 换成计数版外，
+// 其余五个访问器、Matrix、Close 全部转发给被包裹的真实 Provider。
+// 这样 vfs 的其他能力（xattr / 命名流等）仍能正常工作。
+type countingCaps struct {
+	oscap.Provider
+	sf countingSparseFile
+}
+
+func (p countingCaps) Sparse() oscap.SparseFile { return p.sf }
+
+// newSparseTestFS 造一个注入了计数 Provider 的共享。
+func newSparseTestFS(t *testing.T) (fs *LocalFS, punch, alloc, setSpar *int64) {
+	t.Helper()
+	root := t.TempDir()
+	real, err := oscap.Open(oscap.ModeAuto, oscap.Options{Root: root}, native.New, builtin.New)
+	if err != nil {
+		t.Fatalf("oscap.Open: %v", err)
+	}
+	var cp, ca, cs int64
+	cc := countingCaps{
+		Provider: real,
+		sf: countingSparseFile{
+			SparseFile: real.Sparse(),
+			punch:      &cp,
+			alloc:      &ca,
+			setSpar:    &cs,
+		},
+	}
+	fs, err = NewLocalFS(LocalConfig{Root: root, CaseInsensitive: true, Caps: cc})
+	if err != nil {
+		t.Fatalf("NewLocalFS: %v", err)
+	}
+	t.Cleanup(func() { _ = fs.Close() })
+	return fs, &cp, &ca, &cs
+}
+
+// TestSparseDelegatesToCaps 证明 vfs 的 SparseFile 四个方法确实委托到了
+// caps.Sparse()，而不是自己直接调平台系统调用 —— 这是 v0.3.0 把 CapSparse
+// 接进 oscap 抽象层的验收核心。
+func TestSparseDelegatesToCaps(t *testing.T) {
+	fs, punch, alloc, setSpar := newSparseTestFS(t)
+	writeFile(t, fs, "f", "hello world")
+	_, sf := openSparse(t, fs, "f", true)
+
+	// PunchHole：无论底层文件系统是否支持打洞，计数都已 +1 证明被调用。
+	if err := sf.PunchHole(0, 4096); err != nil && !errors.Is(err, ErrNotSupported) {
+		t.Fatalf("PunchHole: %v", err)
+	}
+	if *punch == 0 {
+		t.Error("caps.Sparse().PunchHole 未被调用")
+	}
+
+	// AllocatedRanges：只读能力即可触发，无需 writable。
+	if _, err := sf.AllocatedRanges(0, 4096); err != nil {
+		t.Fatalf("AllocatedRanges: %v", err)
+	}
+	if *alloc == 0 {
+		t.Error("caps.Sparse().AllocatedRanges 未被调用")
+	}
+
+	// SetSparse(true)：POSIX 上是无操作，必须成功且被调用。
+	if err := sf.SetSparse(true); err != nil {
+		t.Fatalf("SetSparse(true): %v", err)
+	}
+	if *setSpar == 0 {
+		t.Error("caps.Sparse().SetSparse 未被调用")
 	}
 }
