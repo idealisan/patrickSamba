@@ -605,7 +605,7 @@ sh test/ci/check-test-compile.sh
 ---
 
 ## 相关文档
-
+- [`codebuddy-files/readme.md`](codebuddy-files/readme.md) —— 必须执行落实的操作，否则一定会带来巨大的代价
 - [`configs/example.yaml`](configs/example.yaml) —— 逐字段注释的完整配置示例
 - [`CHANGELOG.md`](CHANGELOG.md) —— 各版本变更记录
 - [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md) —— v0.1.0 多客户端验收报告（smbclient / impacket / go-smb2 实测矩阵、加密 fail-closed 验证方法）
