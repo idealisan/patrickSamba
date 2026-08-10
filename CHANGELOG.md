@@ -5,6 +5,43 @@
 
 ---
 
+## v0.3.0（2026-08-10，正式版）
+
+> **写作纪律同 v0.2.0**（详见下方 v0.2.0 段开头的说明）：功能没合入 `main` 之前不写、
+> 打折写在句子主干里、区分三档置信度（已实测 / 只交叉编译 / 仅代码推断）、PR 号逐条核对。
+> 本节按证据强度分档陈述，不夸大。
+
+### 发布亮点
+
+- **OS 能力抽象（oscap）六项能力全部接进 VFS 数据路径（6/6）**。v0.2.0 时只有扩展属性
+  （xattr）与命名流两项真正生效；本版本由 vfs-sparse / vfs-attr 角色把剩余四项——稀疏文件、
+  稳定 FileID、创建时间、DOS 属性位——也接进 `internal/vfs` 的真实读写路径。接线口径与
+  可复算判据见下方 v0.2.0 段保留的 `BEGIN-OSCAP-WIRING-STATUS` 块（已同步更新为 6/6）。
+  **证据强度分档**：xattr / 命名流 / 稀疏文件 / DOS 属性位经 impacket 低阶 SMB2 客户端
+  **协议级实测**；稳定 FileID / 创建时间目前以**单测 + 代码核实**为准，真机大目录吞吐与
+  FileID 稳定性验证待补，不属于「已实测」。
+- **`filesystem_mode` 三档（auto / native / portable）现在对全部六项能力都有真实运行期效果**。
+  `portable` 整机不碰宿主可选能力、数据落自带旁路存储；`auto` 逐项优先原生并降级；
+  `native` 强制全走原生（某项不支持即启动报错）。
+- **freebsd CI 缺口补上**：`test/ci/check-test-compile.sh` 的平台列表追加 `freebsd/amd64`，
+  此前 6 个带 `!linux && !darwin && !windows` 约束的文件从未被任何 CI 平台编译过
+  （AGENTS.md §1.2 已记录此历史缺口）。补上后 `GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go vet
+  ./...` 进入 CI 门禁；手工补跑 rc=0 已确认当前能编译。
+- **至少三种第三方 SMB 客户端验收**：smbclient + impacket + go-smb2 三家均通过端到端，
+  满足 AGENTS.md §3 门槛（`mount.cifs` 在容器内仍 skip，rc=77，由另三家补足）。
+
+### 已知问题 / 未实现（v0.3.0）
+
+- **`native` 档在 linux / darwin / windows 上仍恒定启动失败**（与文件系统无关）：
+  各平台均有至少一项能力被源码硬编码为不支持，而 `native` 契约要求六项全原生，三家相乘
+  无任何平台可用。默认 `auto`，未显式写 `native` 的用户不受影响。报错文案归因仍有误
+  （见 v0.2.0 段 OSCAP 块）。
+- **Time Machine 仍未经真机验收**：Apple 扩展（AAPL / 命名流 / 稀疏文件 / `_adisk._tcp`）
+  已实现，部分经协议级实测，但**端到端 Time Machine 备份与恢复尚未在真实 macOS 上跑过**，
+  定级维持 C 档，请勿用于唯一备份。详见 README「Time Machine 状态」段。
+
+---
+
 ## v0.2.0（2026-08-09，正式版）
 
 > **写作纪律**（v0.1.0 的 README 在这上面栽过跟头，改了两轮才诚实；本节保留作为历史）：
@@ -191,7 +228,7 @@
   监听照常拉起（退出 0）。文档此前写作「会被忽略」是被读成「随便填」，
   现已在「配置」段与 README 共享表写明 non-Windows 上的唯一出口是那条 WARN。
 
-### 内部：OS 能力抽象（**六项能力的两套适配器都已建成，其中 2 项已接进数据路径**）
+### 内部：OS 能力抽象（**六项能力的两套适配器都已建成；v0.2.0 时其中 2 项已接进数据路径，v0.3.0 起 6 项全部接进，见 v0.3.0 段**）
 
 > **一句话结论**：port 层 + native 适配器 + builtin 适配器 + portable 模式 CI 门禁
 > 四块**全部已在 `main`**，测试是真跑的、门禁是有牙的；
@@ -249,59 +286,48 @@
        按「有没有 BEGIN」去分类就永远看不见它，而 grep 照样会把它捞出来。）
      （初版写「三处」，漏了 AGENTS.md —— 漏的那处恰好是 oscap-wire 点名要改的。
        所以「一套 N 处」这个数字本身也要核，别照抄。） -->
-**已接线 2 项 / 共 6 项**（接线由 PR #159 落地）。
-下面三条判据在**合入前最后一次 rebase 之后**原样复算过：2026-08-09 20:46 CST，
-分别得 **3 / 9 / 1→0**，与正文写的数字一致。**读者不必信这个时间戳，命令可原样粘贴复跑**——
-写时间只是为了让「数字对不上」时能判断是代码变了还是断言从一开始就错了：
+**已接线 6 项 / 共 6 项**（v0.3.0 起全部接进 `internal/vfs` 数据路径；v0.2.0 时仅 2/6，
+见下方「历史」段）。下面判据**命令可原样粘贴复跑**，不依赖任何时间戳：
 
-- ✅ **oscap 已进入真实数据路径**，`filesystem_mode` 对已接线的那两项**真的有运行期效果**。
+- ✅ **oscap 已进入真实数据路径**，`filesystem_mode` 对**全部六项**能力**都有真实运行期效果**。
   三条互相独立、可一行复算的判据：
-  1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（接线前是 1）——
+  1. `go list -deps ./cmd/stupidsamba | grep -c oscap` = **3**（自 v0.2.0 接线起即为 3，未变）——
      `internal/oscap`、`oscap/native`、`oscap/builtin` 三个包**都真被链进发布二进制**。
      这是最硬的一条：链接依赖是编译器算出来的事实，测试可以写得很漂亮却测不到真实路径，
      而这个数字伪造不了。
-  2. 包外真实调用点由 **1 → 9**（接线前唯一那处还是 `internal/config/validate.go`
-     为了 `ParseMode` 而引，属于校验字符串，不是使用能力）。原样可粘贴：
-     `grep -rn 'oscap\.Open\|oscap\.ParseMode\|native\.New\|builtin\.New\|caps\.Xattr()\|caps\.Streams()' --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'`
-  3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` 的**活调用清零**（9 → 0），
-     `internal/vfs/xattr_unix.go`(-211) 与 `xattr_other.go`(-23) **已整文件删除**。
-     注意裸跑 `grep -rn 'newXattrAccessor\|readMetaXattrFast' --include='*.go' .` 得到的是
-     **1** —— 那唯一一处是 `internal/vfs/oscap_xattr.go:131` 的注释，讲「旧签名那个 error
-     返回值为什么没了」，不是调用；要复算出 0 得再接 `| grep -v '^[^:]*:[0-9]*://'`。
-     判据写到能原样粘贴为止，否则读者跑出 1 只会以为本块在撒谎。
-- ✅ **已接的两项**：`CapXattr`（A 组 6 处调用点）与 `CapNamedStream`（B 组 4 处）。
-  B 组走 `Streams()` 而不是 `Xattr()`，是因为 `oscap/native/posix.go` 的
-  `reservedStreamPrefix="DosStream."` 会拒掉 `DosStream.<name>:$DATA` 这种键。
-- ⚠️ **仍未接线的四项**：`CapSparse` / `CapStableFileID` / `CapCreationTime` /
-  `CapDOSAttributes`。对这四项而言，`filesystem_mode` **依然没有运行期效果**。
-  不要把本条读成「oscap 已接线」——**是 2/6，不是 6/6**。
-- ⚠️ **行为变更，显式配置 `native` 的用户会受影响**：接线前 `native` 是 no-op 所以能
-  正常启动；接线后它在 **linux / darwin / windows 三个平台上都会恒定启动失败，与文件
-  系统无关**（探测代码不看任何文件系统，是无条件 `return false`）。**真二进制 + `-config`
-  成对黑盒对照**（2026-08-09 19:42 CST，同一份配置只改 `filesystem_mode` 一个字段）：
-
-  | 二进制 | `native` | `auto` | `portable` |
-  |---|---|---|---|
-  | main `762e335`（未接线） | 启动成功 | 成功 | 成功 |
-  | 本版 `37f0c0f`（已接线） | **启动失败** | 成功 | 成功 |
-
-  上排三格全绿 = 接线前三档行为完全一样（排除「探针恒真」的假阳性）；下排 `native` 那格
-  进程**直接退出**，日志里没有「SMB 服务已监听」那行，报：
-
-  ```
-  stupidsamba: shares[0] "s": oscap: filesystem_mode: native 要求全部能力走原生实现，
-  但 "…" 所在的文件系统不支持: dos_attributes
-  ```
-
-  根因是每个平台都有至少一项能力被源码**硬编码**为不支持（linux/darwin 的
-  `dos_attributes`、darwin 还有 `sparse_file`、windows 的 `xattr` ——
-  `internal/oscap/probe_windows.go:24` 无条件 `return false`），而 `native` 的契约是
-  「有一项不支持就报错、不降级」，三家相乘即没有任何平台可用。**默认值是 `auto`**
-  （`internal/oscap/mode.go:30` `DefaultMode = ModeAuto`），所以没有显式写 `native` 的
+  2. 包外真实调用点覆盖**全部六项能力**：`CapXattr`、`CapNamedStream`（v0.2.0 PR #159）、
+     `CapSparse`、`CapStableFileID`、`CapCreationTime`、`CapDOSAttributes`
+     （后四项由 vfs-sparse / vfs-attr 角色在 v0.3.0 落地）。原样可粘贴核查：
+     `grep -rn 'caps\.\(Xattr\|Streams\|Sparse\|StableFileID\|CreationTime\|DOSAttributes\)()' --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'`
+     ⚠️ 此 grep 只证明「有调用点」，不证明「端到端跑通」；端到端验证强度见 v0.3.0 段「3 客户端验收」。
+  3. 旧实现 `newXattrAccessor` / `readMetaXattrFast` 的**活调用清零**（v0.2.0 已完成，R11 双写消除），
+     `internal/vfs/xattr_unix.go`(-211) 与 `xattr_other.go`(-23) **已整文件删除**；
+     v0.3.0 接后四项时，各自的旧平台专属实现也一并拆除，不再与 oscap 双份实现撞车。
+- ✅ **六项能力全部接进数据路径**：`CapXattr`（6 处）、`CapNamedStream`（4 处）、
+  `CapSparse`（稀疏文件 FSCTL：`FSCTL_SET_SPARSE` / `SET_ZERO_DATA` / `QUERY_ALLOCATED_RANGES`）、
+  `CapStableFileID`、`CapCreationTime`、`CapDOSAttributes`（SET_INFO 落 DOS 属性位）。
+  **证据强度分档**（按 AGENTS.md 要求，不混为一谈）：xattr / 命名流 / 稀疏文件 / DOS 属性位
+  经 impacket 低阶 SMB2 客户端**协议级实测**通过；`CapStableFileID` / `CapCreationTime`
+  目前以**单测 + 代码核实**为准，真机大目录吞吐与 FileID 稳定性验证待补，不属于「已实测」。
+- ✅ **`filesystem_mode` 三档（auto / native / portable）现在对全部六项能力都有真实运行期效果**：
+  `portable` 整机不碰宿主可选能力（数据落自带旁路存储），`auto` 逐项优先原生并降级，
+  `native` 强制全走原生（某项不支持即启动报错、不降级）。
+- ⚠️ **`native` 档在 linux / darwin / windows 上仍会恒定启动失败**（与文件系统无关，v0.3.0 未修）：
+  根因是**每个平台都有至少一项能力被源码硬编码为不支持**（linux/darwin 的 `dos_attributes`、
+  darwin 还有 `sparse_file`、windows 的 `xattr`——`internal/oscap/probe_windows.go:24`
+  无条件 `return false`），而 `native` 的契约是「有一项不支持就报错、不降级」，三家相乘即没有任何平台可用。
+  **默认值是 `auto`**（`internal/oscap/mode.go` `DefaultMode = ModeAuto`），没有显式写 `native` 的
   用户不受影响；撞上的人改用 `auto`（逐项降级）或 `portable`（全部 builtin）。
-- ⚠️ **当前报错文案的归因是错的**：它说「所在的**文件系统**不支持 dos_attributes」，
+- ⚠️ **当前报错文案的归因仍有误**：它说「所在的**文件系统**不支持 dos_attributes」，
   而真相是**本平台压根没有 native 实现**，换任何文件系统都无效。照这句话去换盘是白折腾。
-  修复归属 oscap-wire，排在 v0.2.0 之后（改它要动 `oscap.UnsupportedError` 的结构）。
+  修复排在 v0.3.0 之后（改 `oscap.UnsupportedError` 的结构）。
+
+> **历史（v0.2.0 时仅 2/6，v0.3.0 起已 6/6）**：本节初版写作于 v0.2.0，当时只有
+> `CapXattr` 与 `CapNamedStream` 两项接进数据路径，其余四项在 `internal/vfs` /
+> `internal/server` / `cmd/` 里**无调用点**，`filesystem_mode` 对那四项没有运行期效果——
+> 那才是「已建成 ≠ 已生效」的真实状态。v0.3.0 由 vfs-sparse / vfs-attr 角色把剩下四项
+> 也接进数据路径后，本块整体更新为 6/6。保留这段是为了让「为什么曾经 2/6」与「判据怎么
+> 数出来」可追溯，**请勿把本段当成当前状态**。
 <!-- END-OSCAP-WIRING-STATUS -->
 
 ### 内部（已合入但**尚未接线**，本版本二进制行为不受影响）
@@ -334,13 +360,12 @@
   **降的是验收要求，不是功能**：Apple 扩展代码全部保留、单测与协议级用例继续跑。
   反过来说，这条也意味着**该定级短期内不会有新证据**——不要因为版本号往前走
   就推断它变可靠了。
-- **`filesystem_mode` 只对已接线的两项生效，另外四项仍然等价**
-  （接线状态见上节 `BEGIN-OSCAP-WIRING-STATUS` 块，那是单一真相块；本行不再重复判据）：
-  `CapXattr` 与 `CapNamedStream` 已接进 `internal/vfs` 的真实数据路径，改这个开关**会**
-  改变这两项的行为；而 `CapSparse` / `CapStableFileID` / `CapCreationTime` /
-  `CapDOSAttributes` 四项**尚无产品调用点**，对它们而言三档跑起来仍旧完全一样。
-  也就是说，**「设成 `portable` 就整机不碰宿主特性」这个结论目前还不成立**——
-  只有那两项真的换了实现。剩余四项无版本承诺，以真正合入 `main` 的那一版为准。
+- **`filesystem_mode` 只对已接线的两项生效（v0.2.0 时）；v0.3.0 起六项全部生效，本条已解决**。
+  历史口径（v0.2.0）：当时仅 `CapXattr` 与 `CapNamedStream` 接进 `internal/vfs` 真实数据路径，
+  改开关只对这两项有运行期效果，`CapSparse` / `CapStableFileID` / `CapCreationTime` /
+  `CapDOSAttributes` 四项尚无产品调用点、三档跑起来完全一样，故「设成 `portable` 就整机
+  不碰宿主特性」彼时**不成立**。v0.3.0 把四项全部接进后（见 v0.3.0 段与上方
+  `BEGIN-OSCAP-WIRING-STATUS` 块），三档现在对全部六项能力都有真实效果。
 - **D-native（待决）：接线落地后 `native` 档在任何平台都启动不了。**
   **先说清适用范围**：本条描述的是**接线之后**的行为，而接线已由 PR #159 在本版本落地 ——
   也就是说它**现在就成立**，不再是「将要发生」。（写这条时接线尚未合入，当时 `native`
