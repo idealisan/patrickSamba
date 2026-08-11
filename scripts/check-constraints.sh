@@ -233,9 +233,16 @@ if [ "$c9bad" = "0" ]; then
 fi
 
 # ---------------------------------------------------------------- C6 禁止 AGPL 依赖
+#
+# 用依赖图判定（go list -m all），**不要**用裸文本 grep 扫 .go 文件 —— 否则
+# test/integration/gosmb2_test.go 里那句「绝不能用 AGPL-3.0 的 macos-fuse-t/go-smb2」
+# 的说明性注释会被当成违规，制造假阳性，把 tag_push 卡死在发版前
+# （v0.3.0 首次打 tag 就栽在这：gate_constraints 红掉，Release/附件全没产出）。
+# 真实依赖只可能出现在模块图里；注释里写这个词完全正常（约束文档本身就要写它），
+# 见本脚本开头的「设计要点」。C1 段的 go list -deps 已经证明该环境 go list 可用。
 
-if grep -rn 'macos-fuse-t/go-smb2' --include='go.mod' --include='*.go' . ; then
-    fail "引入了 AGPL-3.0 的 macos-fuse-t/go-smb2，违反依赖政策（只可阅读参考，不得 import）"
+if go list -m all 2>/dev/null | grep -q 'macos-fuse-t/go-smb2'; then
+    fail "go.mod 依赖图中出现 AGPL-3.0 的 macos-fuse-t/go-smb2，违反依赖政策（只可阅读参考，不得 import）"
 else
     pass "无 AGPL 依赖"
 fi
