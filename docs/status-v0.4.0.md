@@ -132,11 +132,11 @@ CNB），并完成认证安全审计与 Apple 扩展的真机/协议级验证收
 | R11 | 区域计划名 `oscap-wiring` 与已闭合的接线缺口语义冲突，易误导范围（原 R4） | 低/流程 | OD-1 | 原状态板 R4 |
 
 ### 4.2 Open Decisions（待团队 lead / 项目所有者拍板）
-| # | 决策点 | 选项 | 现状 / **Step 2 推荐决议** |
+| # | 决策点 | 选项 | 现状 / 决议（team-lead sign-off @ 2026-08-12） |
 |---|---|---|---|
-| OD-1 | `oscap-wiring` 区域计划的实际范围 | (a) 重命名为 `oscap-robustness`，专注 builtin 锁/多进程可靠性；(b) 仍含其他 oscap 增强 | **Step 2 决议（建议 (a)，待 team-lead sign-off）**：因 v0.3.0 接线缺口已闭合（AGENTS.md §1.2），区域计划名由 `oscap-wiring` → **`oscap-robustness`**；实际范围 = M1（A2 产品修复 + A3 harness 防御）。区域计划文件未单独产出，但内容已由 plan A2/A3 代表。 |
-| OD-2 | v0.4.0 是否以「多进程共享 share 的 acceptance 通过」为发布门槛 | 是 / 否（降级为 Should） | **Step 2 决议（建议「是」）**：plan A4 将「3 客户端 acceptance（其本身起 3 个 server 进程共享一个 share）」设为必需 status check，因此多进程 acceptance 实质即发布门禁——**但**该门禁以 A2(跨进程锁修复) 落地为前提。即：多进程 acceptance 是门槛（OD-2=是），前提 A2 必须先合。待 team-lead 在 A4 落地时确认分支保护配置。 |
-| OD-3 | Apple 验证证据强度门槛（仅协议级实测即可，还是必须真机） | 协议级实测即可 / 必须真机 | 待定（当前 TM 仍可选，O1）。plan 未给出明确决议；建议沿用 AGENTS.md §2 阶段二「TM 真机降为可选」口径，协议级实测即可视为达标，真机为加分项。 |
+| OD-1 | `oscap-wiring` 区域计划的实际范围 | (a) 重命名为 `oscap-robustness`，专注 builtin 锁/多进程可靠性；(b) 仍含其他 oscap 增强 | **✅ RESOLVED（APPROVED (a)）**：因 v0.3.0 接线缺口已闭合（AGENTS.md §1.2），区域计划名由 `oscap-wiring` → **`oscap-robustness`**；实际范围 = M1（A2 产品修复 + A3 harness 防御）。区域计划文件未单独产出，但内容已由 plan A2/A3 代表。`vfs` 已使用分支 `vfs/oscap-robustness`，命名一致。 |
+| OD-2 | v0.4.0 是否以「多进程共享 share 的 acceptance 通过」为发布门槛 | 是 / 否（降级为 Should） | **✅ RESOLVED（APPROVED "是"）**：多进程共享 share 的 acceptance 为发布门禁——经 A4 把「3 客户端 acceptance（其本身起 3 个 server 进程共享一个 share）」设为必需 status check 实现；该门禁**以 A2（vfs 跨进程锁修复）先合为前提**。行动项：`qa` 将 A4 设为必需检查。**⚠️ 镜像仓 `github.com/idealisan/patrickSamba` 的分支保护须配置才能真正 enforce** —— 这是 repo-owner 动作，超出本团队直接控制范围，须在 PR 描述/向用户显式 flag。 |
+| OD-3 | Apple 验证证据强度门槛（仅协议级实测即可，还是必须真机） | 协议级实测即可 / 必须真机 | **✅ RESOLVED（APPROVED）**：沿用 AGENTS.md §2 阶段二口径 —— Time Machine 真机验收**保持 OPTIONAL**；协议级实测证据即视为 M5 达标，真机为加分项。行动项：`mdns` 按证据强度分档汇报，不阻塞于真机。 |
 
 ### 4.3 Owner Mapping（模块角色，AGENTS.md §7.1）+ v0.4.0 backlog 列
 | 角色 | 负责范围 | v0.4.0 预期职责 | v0.4.0 backlog 项（A1–A5/B1–B5） |
@@ -154,7 +154,8 @@ CNB），并完成认证安全审计与 Apple 扩展的真机/协议级验证收
 
 ## 5. Next Step（PM 待办）
 - [x] **Step 2（consolid 进 §3 Scope、§4 Risks/Decisions、§4.3 Owner）**：由 PM 基于 plan-v0.4.0-ci-release.md（A1–A5/B1–B5）+ OI-1/2/3 + Must/Should/Optional 推导填充（区域计划文件未单独产出）。
-- [ ] **OD-1 sign-off**：请 team-lead 确认 `oscap-wiring` → `oscap-robustness` 重命名决议（已写入 §4.2）。
-- [ ] **OD-2 / A4**：team-lead 在落地 A4 时确认镜像仓分支保护把 3 客户端 acceptance 设为必需检查。
-- [ ] 跟踪 OI-1/2/3 各 Owner 的 backlog 落地与 PR 进度（状态见 §3）。
+- [x] **OD-1（RESOLVED）**：`oscap-wiring` → `oscap-robustness` 重命名已 sign-off（team-lead @ 2026-08-12）；`vfs` 分支命名一致。
+- [x] **OD-2（RESOLVED "是"）**：多进程 shared-share acceptance 为发布门禁（经 A4 必需检查），前提 A2 先合。`qa` 行动项：把 A4 设为必需检查。**待 repo-owner 配置镜像仓分支保护（repo-owner 动作，已在 PR 描述 flag）。**
+- [x] **OD-3（RESOLVED）**：TM 真机保持 OPTIONAL，协议级证据即达标。`mdns` 行动项：按证据强度分档汇报。
+- [ ] 跟踪 A1–A5 / B1–B5 各 Owner 的落地与 PR 进度，按角色 agent 回报更新 §3 状态列（TODO→IN-PROGRESS→DONE）。
 - [ ] 待 auth-security / apple-tm 区域计划补齐后，回填 M4/M5/O1 的验收准则（当前 TODO，阻塞于区域计划）。
