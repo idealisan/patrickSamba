@@ -343,7 +343,6 @@ func TestPathTraversal(t *testing.T) {
 		"bad\x00name",
 		"con",
 		"AUX.txt",
-		"na:me",
 		"na|me",
 		"na*me",
 	}
@@ -363,6 +362,38 @@ func TestPathTraversal(t *testing.T) {
 	// 确认探针文件没被改动
 	if b, err := os.ReadFile(outside); err != nil || string(b) != "TOP SECRET" {
 		t.Fatalf("共享外的文件被改动了: %q %v", b, err)
+	}
+}
+
+// TestColonPathCreatesBaseNotEscape："na:me" 是**合法**的
+// 「文件 na + 流 me」语法（SplitStreamPath 在 Resolve 之前剥掉流名，
+// macOS 客户端就是这么发扩展属性的）。
+//
+// 基础文件不存在时，创建性打开会按 Samba 语义建出基础文件再开流
+// （open.c:6508 "We may be creating the basefile as part of creating
+// the stream"）。曾经它进上面的穿越向量表 —— 那时能通过靠的是 F2 缺陷
+// （基础文件不存在一律 NOT_FOUND），不是真的有防御。这里钉住真正的
+// 安全断言：不逃逸。共享根里只允许出现文件 "na"，绝不能出现名为
+// "na:me" 的条目。
+func TestColonPathCreatesBaseNotEscape(t *testing.T) {
+	fs := newTestFS(t, false)
+
+	h, action, err := fs.Open(&OpenRequest{Path: "na:me", Flags: OpenWrite, Disposition: OpenAlways})
+	if err != nil {
+		t.Fatalf("创建 na:me（文件 na + 流 me）不应失败: %v", err)
+	}
+	if action != ActionCreated {
+		t.Errorf("action = %d, 期望 ActionCreated", action)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := os.Lstat(filepath.Join(fs.Root(), "na")); err != nil {
+		t.Errorf("基础文件 na 应被创建: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(fs.Root(), "na:me")); err == nil {
+		t.Errorf("共享根里出现了名为 na:me 的条目 —— 冒号没有被当成流分隔符")
 	}
 }
 

@@ -189,6 +189,78 @@ func putBE32(b []byte, v uint32) {
 
 // ---------------------------------------------------------------- 枚举
 
+// RemoveStream 实现 StreamRemover：只删 base 对象上的这一个流，
+// 基础对象与其余流一概不动。
+//
+// 这是流句柄 delete-on-close 的正确粒度（Samba streams_xattr_unlinkat()
+// 语义，见 StreamRemover 接口注释）。三种流的存储形态不同，
+// 删除动作由 removeStreamStorage 统一分派。
+func (l *LocalFS) RemoveStream(base, stream string) error {
+	if l.cfg.ReadOnly {
+		return ErrReadOnly
+	}
+	if stream == "" {
+		// 主数据流不是「一个流」，它就是文件本身 —— 走 FileSystem.Remove。
+		return ErrInvalidPath
+	}
+	host, err := l.res.Resolve(base)
+	if err != nil {
+		return err
+	}
+	return l.removeStreamStorage(host, canonicalStreamName(stream))
+}
+
+// removeStreamStorage 删掉一个流的底层存储，按 openStream 的三种形态分派。
+// 流本来就不存在时返回 nil（幂等，见 StreamRemover 接口注释）。
+func (l *LocalFS) removeStreamStorage(host, slot string) error {
+	switch slot {
+	case StreamAFPInfo:
+		// AFP_AfpInfo 落 netatalk metadata xattr：删 xattr 即删流。
+		if err := l.xattrAt(host, nil).Remove(netatalkMetaXattr); err != nil && err != ErrNotFound {
+			return err
+		}
+		return nil
+	case StreamAFPResource:
+		// AFP_Resource 落 ._ 旁路文件：整个 ._ 文件就是这个流的容器
+		// （FinderInfo 在另一个 xattr 上，不受影响）。
+		if err := os.Remove(dotUnderscoreName(host)); err != nil && !os.IsNotExist(err) {
+			return mapError(err)
+		}
+		return nil
+	}
+	if err := validateDosStreamName(slot); err != nil {
+		return err
+	}
+	return l.removeDosStream(host, slot)
+}
+
+// clearAlternateStreams 丢弃对象上的**全部** alternate data stream。
+//
+// SUPERSEDE / OVERWRITE* 打开基础文件时必须调用：覆盖写之后旧对象的
+// FinderInfo / 资源派生 / 通用流都属于「前世」，残留会让 Finder 显示
+// 旧的颜色标签、让流清单与真机不符。
+//
+// Samba 对照：clear_ads()（source3/smbd/open.c:3584-3598）对 SUPERSEDE /
+// OVERWRITE_IF / OVERWRITE 返回 true，open.c:4436-4446 据此调
+// delete_all_streams()。NTFS 同语义。
+//
+// 尽力而为：单项清理失败不阻断打开 —— 与 Samba 的容错一致，
+// 打开新文件不该因为旧元数据清不掉而整体失败。
+func (l *LocalFS) clearAlternateStreams(host string) {
+	// FinderInfo（netatalk metadata xattr）。
+	if err := l.xattrAt(host, nil).Remove(netatalkMetaXattr); err != nil && err != ErrNotFound {
+		return // 连 xattr 都删不掉，后面多半也做不成，别再折腾。
+	}
+	// 资源派生（._ 旁路文件）。不存在是常态，忽略 ENOENT。
+	_ = os.Remove(dotUnderscoreName(host))
+	// 通用流（user.DosStream.* xattr），逐条删。
+	if infos, err := l.caps.Streams().ListStreams(l.streamRef(host)); err == nil {
+		for _, si := range infos {
+			_ = l.removeDosStream(host, si.Name)
+		}
+	}
+}
+
 // streamsOf 列出一个对象的所有流，供 FileStreamInformation 使用。
 //
 // 必须与 openStream 的可用范围**严格一致**：列出一个打不开的流，
