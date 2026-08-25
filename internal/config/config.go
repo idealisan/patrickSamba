@@ -15,17 +15,19 @@ type Config struct {
 	// FilesystemMode 决定 OS 能力（扩展属性、稀疏文件、命名流、稳定 FileID、
 	// 创建时间、DOS 属性）走原生实现还是本项目自带实现（AGENTS.md §1.2 C9）。
 	//
-	// 三态，默认 auto：
+	// 两态，默认 auto：
 	//   auto     —— 逐项探测宿主能力，能 native 就 native，不能就落到 builtin
-	//   native   —— 强制全部走 native；探测到某项不支持就**启动即报错**，不静默降级
 	//   portable —— 强制全部走 builtin，完全不碰 OS 的可选能力
+	//
+	// （"native" 档已在 v0.5 开发版移除：原契约「全部能力原生」在任何平台
+	// 都无法满足。旧配置写了 native 会启动报错，请改 auto 或 portable。）
 	//
 	// 是**全局策略**而非逐共享设置：它表达的是"这台机器上我们信不信任宿主能力"。
 	// 各共享的落点仍然逐个决定 —— 同一次运行里 /srv/ext4 可以走 native、
 	// /mnt/exfat 落到 builtin，因为探测是按共享根目录做的（oscap.SelectMatrix）。
 	//
-	// native 为什么要报错而不是降级：它的用途是在测试里**钉死走的是哪条路**，
-	// 一个会偷偷降级的 native 等于没有。
+	// 取值**大小写敏感**：ParseMode 刻意不做 ToLower / trim，
+	// 写成 "Auto" 会被拒绝而不是被悄悄纠正。
 	FilesystemMode string `yaml:"filesystem_mode"`
 }
 

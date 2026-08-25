@@ -159,18 +159,18 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
    **builtin 是唯一底座** —— 缺一项就等于那个平台整个不可用，而且往往到现场才发现。
    因此：**新增一项能力的 native 实现时，必须同时给出 builtin 实现**，不许赊账。
 
-配置三态 `filesystem_mode`：
+配置两态 `filesystem_mode`：
 
 | 取值 | 含义 |
 |---|---|
 | `auto`（默认） | 逐项探测宿主能力，能 native 就 native，不能就自动落到 builtin |
-| `native` | 强制全部走 native；探测到某项不支持就**启动即报错**，不静默降级 |
 | `portable` | 强制全部走 builtin，完全不碰 OS 的可选能力。可移植性/可预测性最高，性能最低 |
+| ~~`native`~~ | **已于 v0.5 开发版移除**：原契约「强制全部走 native、缺一项启动即报错」要求全部能力都有原生实现，而每个平台都至少有一项能力被源码硬编码为不支持，该契约在任何平台上都无法满足（三平台恒定启动失败）。旧配置写了 `native` 会在启动时报错并建议改 auto/portable |
 
-`native` 为什么要「不支持就报错」而不是降级：它的用途是**在测试里钉死走的是哪条路**。
-一个会偷偷降级的 `native` 等于没有 —— 这个亏本项目已经吃过：
-某个策略开关只测了「允许」这条路径，全绿，而「拒绝」那条路径压根没接线，
-测试从头到尾都在验证同一条路。
+> 历史：被移除的 `native` 档当初「不支持就报错而不降级」的理由是**在测试里钉死走的哪条路**
+> （一个会偷偷降级的开关等于没有——本项目吃过同型的亏）。但它从未有过可用场景，
+> 「钉死原生路径」的需求由 `auto` + 矩阵断言覆盖（见 vfs 测试的 requireKind 做法）。
+> 现在这类钉路径的做法是：`filesystem_mode: auto` 配上对生效矩阵的逐项断言。
 
 **实现进度（2026-08-09 更新，原文写的「都还不存在」已过时）**：
 本节最初写就时，`internal/oscap` 与 `filesystem_mode` 都只是规划，排期 v0.3.0。
@@ -392,8 +392,8 @@ internal/mdns            进程内 mDNS/DNS-SD responder（与 SMB 层无耦合�
   平台特有代码依然用 build tag 隔离，**不要让兼容层污染主路径**。
 
   **逐项选择，不是整体二选一**：同一次运行里命名流可以走 native、创建时间走 builtin。
-  `filesystem_mode: portable` 时全部指向 builtin；`native` 时某项不支持就启动报错，
-  不静默降级。
+  `filesystem_mode` 只有两态（v0.5 起）：`portable` 时全部指向 builtin；
+  `auto` 时逐项探测，支持就选 native、探测说支持但实际拿不到实现也落 builtin。
 
   NTFS 原生就支持 alternate data stream、稀疏文件、稳定 FileID、真实创建时间和 DOS 属性，
   这些在 Windows 上**走 native、不需要旁路存储** —— Windows 上真正缺的只有 POSIX

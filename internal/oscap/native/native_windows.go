@@ -44,8 +44,7 @@ func newSet(o oscap.Options) (oscap.Set, error) {
 	// 注意这一项与 probe_windows.go 的 probeADS **判据不同**且刻意如此：
 	// probeADS 只试着打开一条流（用的是 CreateFile，不碰这三个导出），
 	// 所以在缺导出的宿主上它会报 true 而这里是 nil。后果是安全的 ——
-	// auto 模式落 builtin，native 模式在启动时报 UnsupportedError，
-	// 两条路都不会跑到运行期才 panic。
+	// auto 模式落 builtin，两条路都不会跑到运行期才 panic。
 	return newSetProcs(o, streamProcsAvailable() == nil)
 }
 
