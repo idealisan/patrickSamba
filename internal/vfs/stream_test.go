@@ -616,3 +616,176 @@ func TestAppleInfoCapability(t *testing.T) {
 		t.Error("穿越向量应被拒绝")
 	}
 }
+
+// TestSupersedeClearsAlternateStreams：SUPERSEDE / OVERWRITE* 打开基础文件后，
+// 旧对象上的全部 ADS 必须被丢弃（bh5 F3）。
+//
+// Samba 对照：clear_ads()（source3/smbd/open.c:3584-3598）对 SUPERSEDE /
+// OVERWRITE_IF / OVERWRITE 返回 true，open.c:4436-4446 据此调
+// delete_all_streams()。NTFS 同语义 —— 覆盖写一个旧文件后，Finder 不能
+// 还看到「前世的」FinderInfo / 颜色标签 / 资源派生。
+func TestSupersedeClearsAlternateStreams(t *testing.T) {
+	cases := []struct {
+		name    string
+		disp    Disposition
+		wantAct Action
+	}{
+		{"Supersede", Supersede, ActionSuperseded},
+		{"Overwrite", TruncateExisting, ActionOverwritten},
+		{"OverwriteIf", TruncateAlways, ActionOverwritten},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newTestFS(t, false)
+			writeFile(t, fs, "f.bin", "old-content")
+
+			// 造齐三种流：FinderInfo（netatalk xattr）、资源派生（._ 文件）、
+			// 通用流（DosStream xattr）。
+			h, _, err := fs.Open(&OpenRequest{
+				Path: "f.bin", Stream: StreamAFPInfo,
+				Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+			})
+			if err != nil {
+				t.Fatalf("打开 AfpInfo 流: %v", err)
+			}
+			ai := NewAfpInfo()
+			copy(ai.FinderInfo[:], finderInfoPattern())
+			if _, err := h.WriteAt(ai.Marshal(), 0); err != nil {
+				t.Fatalf("写 FinderInfo: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				t.Fatalf("Close AfpInfo: %v", err)
+			}
+
+			h, _, err = fs.Open(&OpenRequest{
+				Path: "f.bin", Stream: StreamAFPResource,
+				Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+			})
+			if err != nil {
+				t.Fatalf("打开资源派生: %v", err)
+			}
+			if _, err := h.WriteAt([]byte("rsrc-data"), 0); err != nil {
+				t.Fatalf("写资源派生: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				t.Fatalf("Close 资源派生: %v", err)
+			}
+
+			h, _, err = fs.Open(&OpenRequest{
+				Path: "f.bin", Stream: "Meta",
+				Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+			})
+			if err != nil {
+				t.Fatalf("打开通用流: %v", err)
+			}
+			if _, err := h.WriteAt([]byte("meta"), 0); err != nil {
+				t.Fatalf("写通用流: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				t.Fatalf("Close 通用流: %v", err)
+			}
+
+			// 前置自检：三种流此刻都可见，别让后面的断言空转。
+			list, err := fs.Streams("f.bin")
+			if err != nil {
+				t.Fatalf("Streams: %v", err)
+			}
+			for _, want := range []string{":AFP_AfpInfo:$DATA", ":AFP_Resource:$DATA", ":Meta:$DATA"} {
+				found := false
+				for _, si := range list {
+					if si.Name == want {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("前置失败：%s 不在流清单里，测试前提不成立: %v", want, list)
+				}
+			}
+
+			// SUPERSEDE / OVERWRITE* 重开基础文件并写入新内容。
+			h, action, err := fs.Open(&OpenRequest{
+				Path: "f.bin", Flags: OpenRead | OpenWrite, Disposition: tc.disp,
+			})
+			if err != nil {
+				t.Fatalf("重开基础文件: %v", err)
+			}
+			if action != tc.wantAct {
+				t.Errorf("action = %d, 期望 %d", action, tc.wantAct)
+			}
+			if _, err := h.WriteAt([]byte("new"), 0); err != nil {
+				t.Fatalf("写新内容: %v", err)
+			}
+			if err := h.Close(); err != nil {
+				t.Fatalf("Close 基础文件: %v", err)
+			}
+
+			// 新内容在。
+			data, err := os.ReadFile(filepath.Join(fs.Root(), "f.bin"))
+			if err != nil || string(data) != "new" {
+				t.Fatalf("基础文件内容 = %q (err=%v)，期望 new", data, err)
+			}
+
+			// ADS 全没了：只剩主数据流。
+			list, err = fs.Streams("f.bin")
+			if err != nil {
+				t.Fatalf("Streams(重开后): %v", err)
+			}
+			for _, si := range list {
+				if si.Name != DefaultStreamName {
+					t.Errorf("覆盖后残留流 %s，期望只剩 ::$DATA", si.Name)
+				}
+			}
+
+			// ._ 旁路文件也不能留在目录里。
+			if _, err := os.Lstat(filepath.Join(fs.Root(), "._f.bin")); !os.IsNotExist(err) {
+				t.Errorf("覆盖后 ._-旁路文件仍存在: %v", err)
+			}
+		})
+	}
+}
+
+// TestPlainOpenKeepsAlternateStreams：普通打开（ActionOpened）绝不能清 ADS
+// —— 防止把清除逻辑挂错位置导致每次读都毁元数据。
+func TestPlainOpenKeepsAlternateStreams(t *testing.T) {
+	fs := newTestFS(t, false)
+	writeFile(t, fs, "f.bin", "x")
+
+	h, _, err := fs.Open(&OpenRequest{
+		Path: "f.bin", Stream: "Meta",
+		Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.WriteAt([]byte("keep"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	h, action, err := fs.Open(&OpenRequest{Path: "f.bin", Flags: OpenRead, Disposition: OpenExisting})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action != ActionOpened {
+		t.Fatalf("action = %d, 期望 ActionOpened", action)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := fs.Streams("f.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, si := range list {
+		if si.Name == ":Meta:$DATA" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("普通打开不该清掉既有流: %v", list)
+	}
+}

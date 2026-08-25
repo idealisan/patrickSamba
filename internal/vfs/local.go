@@ -440,6 +440,12 @@ func (l *LocalFS) openFile(req *OpenRequest, host, name string, exists bool) (Ha
 		// 创建时间与 DOS 位，是跨对象元数据泄漏的又一入口（B5/B3 同源）。
 		l.forgetPathMetadata(host)
 	}
+	if action == ActionSuperseded || action == ActionOverwritten {
+		// SUPERSEDE / OVERWRITE* 成功后旧对象的全部 ADS 一并丢弃。
+		// Samba 对照：clear_ads()（open.c:3584）+ delete_all_streams()
+		// （open.c:4436），见 clearAlternateStreams 的注释。
+		l.clearAlternateStreams(host)
+	}
 	l.applyCreateDOSAttrs(req.FileAttributes, host, f, false, action)
 	if action == ActionCreated || action == ActionSuperseded {
 		l.stampCreationTime(host, f)
