@@ -85,9 +85,12 @@ server:
   # 这只是 MS-SMB2 §3.3.5.3.1 的协商入口：客户端先发 SMB1 SMB_COM_NEGOTIATE、
   # 方言表里带 "SMB 2.???"，我们直接用 SMB2 响应把它升级到 SMB2。
   # 本服务**不提供任何 SMB1 文件操作**，因此没有 SMB1 那些历史漏洞的攻击面。
+  # （纯 SMB1 方言表的请求会被拒绝并记 WARN。）
   #
-  # 默认开启是为了兼容：impacket 等客户端默认先发 SMB1 协商，关掉就连不上。
-  # 只有在你确信所有客户端都直接发 SMB2 时才需要设成 false。
+  # 开着它对直接发 SMB2 的客户端没有任何影响；2026-08-25 实测，常见第三方客户端
+  # （新版 smbclient / impacket）都直发 SMB2，走不到这条入口——该路径目前只有
+  # 单测档证据（docs/protocol-notes.md §4）。只有在你确信不需要兼容真正的老客户端
+  # 时才需要设成 false。
   # smb1: true
   # 强制 SMB 签名（防中间人篡改）。不强制时会有一条启动 WARN。
   signing_required: false
