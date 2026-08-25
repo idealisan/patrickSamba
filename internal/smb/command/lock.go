@@ -69,6 +69,30 @@ func (t *lockTable) conflict(path string, o *Open, off, length uint64, exclusive
 	return false
 }
 
+// checkIO 在 READ/WRITE 入口做字节范围锁强制检查（strict locking）。
+//
+// write 为 true 表示写操作：与任何重叠的外句柄锁（独占或共享）冲突；
+// false 表示读操作：只与重叠的独占锁冲突。规则就是 conflict() 的矩阵
+// （MS-FSA §2.1.4.10 / MS-SMB2 §3.3.5.14）：
+//
+//	        对方独占   对方共享
+//	本方读    冲突       放行
+//	本方写    冲突       冲突
+//
+// Samba 对照：smb2_read.c:584 / smb2_write.c:392 的同步路径先做
+// SMB_VFS_STRICT_LOCK_CHECK，冲突即 NT_STATUS_FILE_LOCK_CONFLICT。
+// 同一句柄自己的锁不与自己冲突 —— 豁免单位是句柄，与 LOCK 命令一致。
+//
+// path 必须与加锁时的键一致（handleLock 用 open.Path，这里同样用 open.Path）。
+func (t *lockTable) checkIO(path string, o *Open, off, length uint64, write bool) status.Status {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.conflict(path, o, off, length, write) {
+		return status.LockConflict
+	}
+	return status.Success
+}
+
 // lock 原子地授予一组锁。
 //
 // MS-SMB2 §3.3.5.14：一条 LOCK 请求里的多个 LockElement 是**全有或全无**的，
