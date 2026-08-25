@@ -44,6 +44,14 @@ RO="$WORK/readonly"
 LOG="$WORK/server.log"
 LOG_STRICT="$WORK/server-strict.log"
 LOG_ENC="$WORK/server-enc.log"
+# 每个服务实例自己的旁路元数据目录（按各自的监听端口推导）。
+# 三个实例共享同一个 $SHARE，而 builtin 旁路存储的默认落点由**共享根哈希**
+# 决定 —— 不显式分开的话，三个进程会去 flock 同一个 bbolt 库文件，
+# 后到的卡满 5 秒超时报「是否已被另一个实例占用？」。这是 harness 自身的
+# 纵深防御：即使产品侧将来换了默认策略，这里也不再依赖跨进程共享。
+META_MAIN="$WORK/meta-$PORT"
+META_GUEST="$WORK/meta-$PORT_GUEST"
+META_STRICT="$WORK/meta-$PORT_STRICT"
 SRVPIDS=""
 
 PASSED=""
@@ -75,7 +83,10 @@ go build -o "$WORK/stupidsamba" ./cmd/stupidsamba
 echo "  OK"
 
 say "准备共享目录与配置"
-mkdir -p "$SHARE/subdir" "$RO"
+# meta 目录必须**先建好**：装配层把配置里的 metadata_path 折算给 builtin 时，
+# 对「已存在的目录」原样透传，对「不存在的路径」按文件解释取其父目录 ——
+# 后者会让三个实例又落回同一个 $WORK，隔离就白做了。
+mkdir -p "$SHARE/subdir" "$RO" "$META_MAIN" "$META_GUEST" "$META_STRICT"
 echo "hello from stupidsamba" > "$SHARE/hello.txt"
 head -c 1048576 /dev/urandom > "$SHARE/blob.bin"
 echo "nested" > "$SHARE/subdir/nested.txt"
@@ -107,9 +118,12 @@ shares:
   - name: public
     path: $SHARE
     read_only: false
+    # 同一实例的两个共享共用同一个 meta 目录没有问题：库文件名按共享根哈希区分。
+    metadata_path: $META_MAIN
   - name: ro
     path: $RO
     read_only: true
+    metadata_path: $META_MAIN
 mdns:
   enabled: false
 log:
@@ -138,6 +152,7 @@ shares:
     path: $SHARE
     read_only: false
     guest_ok: true
+    metadata_path: $META_GUEST
 mdns:
   enabled: false
 log:
@@ -168,6 +183,7 @@ shares:
   - name: secure
     path: $SHARE
     read_only: false
+    metadata_path: $META_STRICT
 mdns:
   enabled: false
 log:
