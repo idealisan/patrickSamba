@@ -626,6 +626,7 @@ func (l *LocalFS) Remove(p string) error {
 		return mapError(err)
 	}
 	l.forgetMetadata(host)
+	l.forgetPathMetadata(host)
 	return nil
 }
 
@@ -707,6 +708,7 @@ func (l *LocalFS) Rename(oldPath, newPath string, replace bool) error {
 		return mapError(err)
 	}
 	l.renameMetadata(src, dst)
+	l.migratePathMetadata(src, dst)
 	return nil
 }
 
@@ -887,6 +889,30 @@ func (l *LocalFS) renameMetadata(src, dst string) {
 		return
 	}
 	_ = l.meta.Rename(filepath.ToSlash(relSrc), filepath.ToSlash(relDst))
+}
+
+// migratePathMetadata / forgetPathMetadata 是 caps 侧旁路账本
+// （oscap builtin 的 btime/dosattr/xattr/stream/holes/fileid 六桶）的
+// 同类伴随维护（B5）。meta 与 caps 是**两套**按路径记账的存储，
+// rename/remove 必须两边都搬/都清，漏一边就等于没修。
+//
+// 错误刻意吞掉：宿主上的 rename/unlink 已经发生，此时把失败回给客户端
+// 只会让它认为操作没成功，从而做出与服务端状态相悖的后续动作 ——
+// 比「一条旁路记录暂时错位」伤害更大。这与上面 meta.Rename 的既有取舍一致。
+func (l *LocalFS) migratePathMetadata(src, dst string) {
+	m := l.caps.Migration()
+	if m == nil {
+		return
+	}
+	_ = m.RenameMetadata(src, dst)
+}
+
+func (l *LocalFS) forgetPathMetadata(host string) {
+	m := l.caps.Migration()
+	if m == nil {
+		return
+	}
+	_ = m.DeleteMetadata(host)
 }
 
 // setTimes 设置访问/修改时间。未指定的一方保持原值。

@@ -566,6 +566,7 @@ func (h *localHandle) Close() error {
 			firstErr = mapError(err)
 		} else if err == nil {
 			h.fs.forgetMetadata(h.host)
+			h.fs.forgetPathMetadata(h.host)
 		}
 	}
 	return firstErr
