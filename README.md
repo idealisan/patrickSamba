@@ -456,8 +456,9 @@ done
 
 ## Time Machine 状态 <a name="timemachine"></a>
 
-> **截至 v0.2.0，本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
-> 开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过。
+> **截至 v0.4.0（含），本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
+> 开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过（v0.2.0 时如此，
+> 此后三个版本也没有补上这个验证）。
 > 下面列的是「服务端前置能力已实现并实测」，**不等于「Time Machine 能用」**：前者是
 > 对服务端行为的探针，后者需要真机端到端验证。
 >
@@ -557,31 +558,30 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
      同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
      别只改 CHANGELOG 那一处。
      全部落点一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
-7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6）**：
-   配置里可以填 `auto` / `native` / `portable`，填错会启动报错（校验是真的）。
-   **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
-   现在都已接进 VFS 数据路径**，三档行为对全部六项**确实不同**：
+7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6），
+   取值为 `auto` / `portable` 两态**：
+    **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
+   都已接进 VFS 数据路径**，两态行为对全部六项**确实不同**：
    `portable` 整机不碰宿主可选能力（数据落自带旁路存储），`auto` 在支持的宿主上逐项优先走原生并降级。
    自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `3`
    —— `internal/oscap`、`oscap/native`、`oscap/builtin` 都被链进了二进制（v0.2.0 接线前是 `1`）。
    六项调用点核查：`grep -rn 'caps\.\(Xattr\|Streams\|Sparse\|StableFileID\|CreationTime\|DOSAttributes\)()' --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'`
    （只证明有调用点，不证明端到端跑通；端到端验证强度见 CHANGELOG v0.3.0 段）。
 
+   ⚠️ **第三态 `native` 已在 v0.5 开发版移除**（项目所有者 2026-08-25 拍板）：旧配置写了
+   `filesystem_mode: native` 会启动报错并建议改用 `auto` 或 `portable`。移除原因是它的契约
+   「全部能力强制走原生、缺一项启动即报错」在任何平台都无法满足——每个平台都至少有一项能力被
+   源码硬编码为不支持（linux/darwin 的 DOS 属性位、darwin 另缺稀疏文件、windows 缺 xattr、
+   其余平台六项全无），三平台恒定启动失败，「钉死原生路径」的测试需求由 `auto` +
+   生效矩阵断言覆盖（见 vfs 测试的 requireKind 做法）。默认值本来就是 `auto`，
+   未显式写过 `native` 的用户不受影响。
+   详见 [`CHANGELOG.md`](CHANGELOG.md) 的 Unreleased 段与 `BEGIN-OSCAP-WIRING-STATUS` 块。
+
    > **历史（v0.2.0 时仅 2/6）：** 彼时只有扩展属性（xattr）与命名流两项接进数据路径，
-   > 其余四项（稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）三个取值跑起来行为完全一样，
+   > 其余四项（稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）各取值跑起来行为完全一样，
    > 在 FAT32/exFAT 外置盘、`nouser_xattr` 挂载、只读根这类宿主上照旧静默丢失。
    > v0.3.0 由 vfs-sparse / vfs-attr 角色把四项也接进后，本段更新为 6/6；请勿把本历史段
    > 当成当前状态。
-
-   ⚠️ **`native` 在 linux / darwin / windows 三个平台上都会恒定启动失败**，
-   与文件系统无关（v0.3.0 未修）。`native` 的契约是「有一项不支持就报错、不降级」，而
-   **每个平台都有至少一项能力被源码硬编码为不支持**——linux/darwin 的 `dos_attributes`、
-   darwin 还有 `sparse_file`、**windows 的 `xattr`**（`internal/oscap/probe_windows.go:24`
-   无条件 `return false`，因为不拿 NTFS ADS 冒充 xattr 语义），三家相乘即没有任何平台能让
-   `native` 起来。默认 `auto`，未显式写 `native` 的用户不受影响；撞上了改用 `auto` 或 `portable`。
-   **那句报错的归因是错的**——真相是本平台压根没有这一项的原生实现，换个文件系统一样失败；
-   文案修正排在 v0.3.0 之后。
-   详见 [`CHANGELOG.md`](CHANGELOG.md) 的 `BEGIN-OSCAP-WIRING-STATUS` 块（位于 v0.2.0 段，已同步更新为 6/6）。
 <!-- END-OSCAP-WIRING-STATUS-README -->
 
 ---
