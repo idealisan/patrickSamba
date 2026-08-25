@@ -36,9 +36,9 @@ var modeNames = map[Mode]string{
 // 每个平台都至少有一项能力没有原生实现，该契约在任何平台上都无法满足，
 // 三平台恒定启动失败，从未有过可用场景。
 var errNativeRemoved = fmt.Errorf(
-	"oscap: filesystem_mode \"native\" 已在 v0.5 开发版移除："+
-		"原契约要求全部能力走原生实现，但每个平台都至少有一项能力没有原生实现，"+
-		"该契约在任何平台上都无法满足；"+
+	"oscap: filesystem_mode \"native\" 已在 v0.5 开发版移除：" +
+		"原契约要求全部能力走原生实现，但每个平台都至少有一项能力没有原生实现，" +
+		"该契约在任何平台上都无法满足；" +
 		"请改用 auto（逐项探测，原生优先、缺失自动落到 builtin）或 portable（全部 builtin）")
 
 func (m Mode) String() string {
