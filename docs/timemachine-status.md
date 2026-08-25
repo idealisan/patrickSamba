@@ -2,6 +2,16 @@
 
 > 本文由 `tmverify` 出具，是 v0.1.0 对 Time Machine 支持程度的**唯一权威定级依据**。
 > README 与 CHANGELOG 的相关表述以本文为准。
+>
+> **⚠️ 时间锚点刷新（2026-08-25，v0.4.0 发布后）**：正文是 v0.1.0 时点的定级记录
+> （被测 HEAD `c7e98e3`），按原文保留，不随后续版本改写。此后与本文缺口清单相关的变化：
+>
+> - **durable / persistent handle 已实现**（v0.2.0 头号新增，PR #20，缺陷修复 PR #40；
+>   现为 `internal/smb/command/durable.go`、`create_context_durable.go`）——
+>   正文「已知缺口」表与「为什么是 C」里的第 1 条已不再是现行事实。
+> - **oplock / lease 仍未实现**（`internal/smb/command/create.go` 对 oplock 恒回 NONE）。
+> - **macOS 真机端到端备份/恢复仍未做过**——本文的核心结论「未真机验证」与 C 档定级
+>   **不变**（CHANGELOG v0.4.0 已知问题重申：维持可选项、定级维持 C 档）。
 
 ## 结论
 

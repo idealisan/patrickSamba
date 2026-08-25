@@ -199,6 +199,12 @@ sh scripts/docker-build.sh --tag v0.2.0 --skip-build
 
 ## 6. 标签策略
 
+> **制品库现状（2026-08-25 实测，`docker buildx imagetools inspect`）**：
+> `v0.4.0` 与 `latest` 均已存在，且指向**同一个** manifest index
+> （digest `sha256:7f271f2e…`，仅 `linux/amd64` + `linux/arm64` 两个平台，
+> 无 `unknown/unknown` attestation）——即 latest 正确地停在当前最新正式版 v0.4.0 上，
+> 与本节约定一致。下文为策略原文。
+
 **默认只打版本号标签，不打 `latest`。** 想打必须显式加 `--latest`，
 `docker-build.sh` 才会额外打一个 `:latest`。
 

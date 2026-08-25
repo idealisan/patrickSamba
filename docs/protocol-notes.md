@@ -247,7 +247,11 @@ RequestedOplockLevel：`NONE=0x00`、`II=0x01`、`EXCLUSIVE=0x08`、`BATCH=0x09`
 
 `FILE_DIRECTORY_FILE=0x01`（否则 `STATUS_NOT_A_DIRECTORY 0xC0000103`）、`FILE_WRITE_THROUGH=0x02`、`FILE_SEQUENTIAL_ONLY=0x04`、`FILE_NO_INTERMEDIATE_BUFFERING=0x08`、`FILE_NON_DIRECTORY_FILE=0x40`（否则 `STATUS_FILE_IS_A_DIRECTORY 0xC00000BA`）、`FILE_DELETE_ON_CLOSE=0x1000`（**必须实现**）、`FILE_OPEN_BY_FILE_ID=0x2000`（回 NOT_SUPPORTED）、`FILE_OPEN_FOR_BACKUP_INTENT=0x4000`（忽略）、`FILE_OPEN_REPARSE_POINT=0x200000`（`O_NOFOLLOW`）。
 
-ShareAccess：`READ=0x1`、`WRITE=0x2`、`DELETE=0x4`。一期可不做冲突检测；二期按 (inode, DesiredAccess, ShareAccess) 检查，冲突回 `STATUS_SHARING_VIOLATION (0xC0000043)`。
+ShareAccess：`READ=0x1`、`WRITE=0x2`、`DELETE=0x4`。
+
+> **实现现状（2026-08-25）**：share-mode 冲突检测**已实现** —— 按 (FileID, 流名) 键控，
+> 在 CREATE 的 open 登记处做原子检查（`internal/smb/command/create.go` 的
+> `shareModes.check` / `shareModes.add`），冲突回 `STATUS_SHARING_VIOLATION (0xC0000043)`。
 
 ### Create Contexts
 
@@ -297,6 +301,25 @@ FILETIME = (unixNanos / 100) + 116444736000000000
 FILE_ATTRIBUTE：`READONLY=0x01`、`HIDDEN=0x02`、`SYSTEM=0x04`、`DIRECTORY=0x10`、`ARCHIVE=0x20`、`NORMAL=0x80`、`TEMPORARY=0x100`、`SPARSE_FILE=0x200`、`REPARSE_POINT=0x400`、`COMPRESSED=0x800`、`OFFLINE=0x1000`、`NOT_CONTENT_INDEXED=0x2000`、`ENCRYPTED=0x4000`。
 
 POSIX 映射：目录 → DIRECTORY；点开头 → HIDDEN；无写权限 → READONLY；否则至少给 ARCHIVE 或 NORMAL（**不能返回 0**）。
+
+> **实现现状（2026-08-25，v0.5 开发版 bughunt B3/B4/bh3-F4/bh4-A 之后）**，
+> 与上文的合成基线并存，均可在代码里核对：
+>
+> - **客户端 CREATE 携带的 FileAttributes 按 Samba 语义落地**（`applyCreateDOSAttrs`）：
+>   只对 created / overwritten / superseded 生效，FILE_WAS_OPENED 不动属性；
+>   目录静默剥掉 DIRECTORY 位；普通文件叠 ARCHIVE；raw==0 的新建不落旁路记录
+>   （合成已报 ARCHIVE，避免 TM 十万级 band 目录的创建写库风暴）；覆盖时读改写补 ARCHIVE。
+>   （`internal/vfs`，commit `d873f72`）
+> - **创建时间（btime）在新建时真正落进旁路库**：挂在 openFile/openDir/Mkdir 的
+>   created 分支与 SUPERSEDE 作废旧账之后；能力矩阵把 CapCreationTime 交给 native 时
+>   跳过旁路写入（内核 birthtime 已是真值）。（commit `5795e3b`）
+> - **READONLY 属性目标的 WRITE 被拒绝**（`STATUS_ACCESS_DENIED`）：按打开时的属性快照判定，
+>   判据是配置与属性位，不读宿主 ACL。（commit `9177e6c`）
+> - **字节范围锁已接入 READ/WRITE 强制检查**（strict locking，对齐 Samba
+>   `smb2_read.c` / `smb2_write.c` 的 STRICT_LOCK_CHECK）：读只被外句柄独占锁阻挡，
+>   写被任何重叠的外句柄锁阻挡；豁免单位是句柄（同句柄自己的锁不妨碍自己）；
+>   句柄消失的全部路径统一释放锁。冲突回 `STATUS_FILE_LOCK_CONFLICT (0xC0000054)`。
+>   （commits `a4d3839`、`1791a43`、`d22fbd0`）
 
 ## 12. Credit 管理
 
