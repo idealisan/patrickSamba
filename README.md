@@ -41,10 +41,11 @@
 - **操作系统只当「文件系统 + 套接字」用**：不依赖内核 cifs 驱动、不依赖 `mount`、
   不依赖 namespace，也不假设宿主文件系统支持扩展属性、稀疏文件、稳定 inode 或创建时间。
   这条由 `scripts/check-constraints.sh` 的 C9 段机器校验。
-  ⚠️ 承诺的**后半句在 v0.2.0 只兑现到「代码已建成」这一步**：
-  不依赖可选文件系统能力所需的自带实现（`internal/oscap/builtin`）已经写完并有 CI 覆盖，
-  但**还没有接进真实数据路径**，所以宿主不支持扩展属性时这些元数据目前仍会静默丢失。
-  详见「[已知限制与说明](#notes)」第 7 条与 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.2.0 段。
+  承诺的后半句自 v0.3.0 起完整兑现：不依赖可选文件系统能力的自带实现
+  （`internal/oscap/builtin`）已接进真实数据路径（6 项能力全部生效），
+  宿主不支持某项能力时由旁路存储兜底，不再静默丢失；
+  取用策略由 `filesystem_mode` 控制（`auto` / `portable` 两态）。
+  详见「[已知限制与说明](#notes)」第 7 条与 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.3.0 段。
 
 ---
 
@@ -115,10 +116,12 @@ smb: \> rmdir subdir
 > 端口用 `-p` 指定（如 `-p 445`）。写成 `//127.0.0.1:445/share` 会被当成
 > NetBIOS 名字而解析失败。
 
-**关于 `mount.cifs`（Linux 内核客户端）**：本项目的开发 / CI 容器缺少
-`CAP_SYS_ADMIN`，因此在该容器内执行 `mount -t cifs` 会报
-`Unable to apply new capability set` 而失败。这是**环境限制，不是服务端不支持
-Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
+**关于 `mount.cifs`（Linux 内核客户端）**：本项目的开发 / CI 容器跑在
+**非初始 user namespace** 里（`cat /proc/self/uid_map` = `0 1000 1`），内核只放行带
+`FS_USERNS_MOUNT` 标志的文件系统，而 cifs 没有这个标志，于是 `mount -t cifs` 报
+`mount error(1): Operation not permitted`。这是**环境限制，不是服务端不支持
+Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capability 重跑仍然失败，
+同容器 `mount -t tmpfs` 却成功），在具备初始 namespace 的普通 Linux 主机上，
 `mount -t cifs //host/share /mnt -o user=alice,pass=...` 可以正常挂载。
 （本项目的客户端验收矩阵用 `smbclient` + `impacket` + 纯 Go `go-smb2` 三家覆盖，
 见下方「[客户端测试矩阵](#matrix)」。）
@@ -144,16 +147,16 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 > export CNB_TOKEN=<你的个人访问令牌>
 > ```
 
-最新版本 **v0.2.0** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
+最新版本 **v0.4.0** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
 发布渠道按 **tag 名的 SemVer** 判定 —— 带连字符的 tag（`v0.2.0-rc1`）才走预发布。
 **「正式版通道」说的是发布渠道，不是成熟度背书**，成熟度以下文各节的实测证据为准）：
 
 - **Release 页（推荐，普通用户点这里下载）**：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.2.0`
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.4.0`
   页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
 - **原始文件直链（给脚本 / CI 用）**：
-  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0/stupidsamba_v0.2.0_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.2.0/SHA256SUMS`）。
+  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0/stupidsamba_v0.4.0_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.4.0/SHA256SUMS`）。
   注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
   最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
   ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
@@ -163,32 +166,33 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 
 | 平台 | 文件 |
 |---|---|
-| Linux x86-64 | `stupidsamba_v0.2.0_linux_amd64.tar.gz` |
-| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.2.0_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `stupidsamba_v0.2.0_darwin_arm64.tar.gz` |
-| Windows x86-64 | `stupidsamba_v0.2.0_windows_amd64.zip` |
+| Linux x86-64 | `stupidsamba_v0.4.0_linux_amd64.tar.gz` |
+| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.4.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `stupidsamba_v0.4.0_darwin_arm64.tar.gz` |
+| Windows x86-64 | `stupidsamba_v0.4.0_windows_amd64.zip` |
 
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0
+BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0
 
 # 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
-  -o stupidsamba_v0.2.0_linux_amd64.tar.gz \
-  "$BASE/stupidsamba_v0.2.0_linux_amd64.tar.gz"
+  -o stupidsamba_v0.4.0_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_v0.4.0_linux_amd64.tar.gz"
 
 # 校验完整性
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
 
-tar -xzf stupidsamba_v0.2.0_linux_amd64.tar.gz
-./stupidsamba_v0.2.0_linux_amd64/stupidsamba -config stupidsamba_v0.2.0_linux_amd64/configs/example.yaml
+tar -xzf stupidsamba_v0.4.0_linux_amd64.tar.gz
+./stupidsamba_v0.4.0_linux_amd64/stupidsamba -config stupidsamba_v0.4.0_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
 
-> 说明：Release 页面上同时保留 `v0.1.0` 与 `v0.1.0-test` 条目。
-> `v0.1.0-test` 是发布流程的**验证记录**，**请勿下载使用**；`v0.1.0` 是上一个版本。
+> 说明：Release 页面上保留着历史条目 `v0.1.0` ~ `v0.3.0`，以及发布流程验证用的
+> `v0.1.0-test` / `v0.0.99-probe` / `v0.2.0-rc0`。后三个是**流程验证记录**，
+> **请勿下载使用**；`v0.1.0` ~ `v0.3.0` 是旧版本，新部署请用 v0.4.0。
 
 ### 方式一之二：Docker 镜像（NAS / 家庭服务器推荐）
 
@@ -210,7 +214,7 @@ docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
 docker run -d --name stupidsamba \
   -p 127.0.0.1:4445:445 \
   -v /你的目录:/data \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
 
 smbclient //127.0.0.1/public -p 4445 -N -m SMB3 -c ls
 ```
@@ -226,7 +230,7 @@ docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
   -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
 ```
 
 两点须知：
@@ -250,7 +254,7 @@ CGO_ENABLED=0 go build -o stupidsamba ./cmd/stupidsamba
 
 ```sh
 go build -trimpath \
-  -ldflags "-s -w -X main.version=v0.2.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -ldflags "-s -w -X main.version=v0.4.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o stupidsamba ./cmd/stupidsamba
 ```
 
