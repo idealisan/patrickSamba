@@ -353,6 +353,7 @@ func (l *LocalFS) openDir(req *OpenRequest, host, name string, exists bool) (Han
 	h := l.newHandle(req, host, name, true)
 	if action == ActionCreated {
 		l.applyCreateDOSAttrs(req.FileAttributes, host, nil, true, action)
+		l.stampCreationTime(host, nil)
 	}
 	if req.Flags&OpenAttrOnly != 0 {
 		return h, action, nil
@@ -440,7 +441,27 @@ func (l *LocalFS) openFile(req *OpenRequest, host, name string, exists bool) (Ha
 		l.forgetPathMetadata(host)
 	}
 	l.applyCreateDOSAttrs(req.FileAttributes, host, f, false, action)
+	if action == ActionCreated || action == ActionSuperseded {
+		l.stampCreationTime(host, f)
+	}
 	return h, action, nil
+}
+
+// stampCreationTime 在**真正创建出新对象**时把 btime 落进旁路库（B4）。
+//
+// builtin/times.go 的注释描述的就是这一步 —— 此前它并不存在，新建对象的
+// 创建时间永远查不到存储值。跳过条件与 caps 探测口径一致：矩阵已把
+// CapCreationTime 交给 native 时（macOS birthtimespec / Windows / Linux statx
+// BTIME），内核自己维护且读得到真值，旁路记录纯属浪费 —— Time Machine 的
+// band 目录动辄十万级创建，能省一次库写入就省。
+//
+// SUPERSEDE 走到这里时旧记录已被 forgetPathMetadata 作废，
+// 这里写下的就是新对象的起点，语义正确。
+func (l *LocalFS) stampCreationTime(host string, f *os.File) {
+	if l.caps.Matrix().Kind(oscap.CapCreationTime) == oscap.KindNative {
+		return
+	}
+	_ = l.caps.Times().SetCreationTime(oscap.Ref{Path: host, Handle: f}, time.Now())
 }
 
 // applyCreateDOSAttrs 把 CREATE 请求携带的 FileAttributes 按 Samba 语义落库
@@ -702,8 +723,10 @@ func (l *LocalFS) Mkdir(p string, attrs uint32) error {
 		_ = os.Chmod(host, l.cfg.DirMode&^0o222)
 	}
 	// 与 CREATE 建目录同语义：剥 DIRECTORY、其余位经 settable 过滤后存档
-	//（applyCreateDOSAttrs 内部不叠 ARCHIVE —— 目录不该有 ARCHIVE 位）。
+	//（applyCreateDOSAttrs 内部不叠 ARCHIVE —— 目录不该有 ARCHIVE 位）；
+	// btime 同步落库。
 	l.applyCreateDOSAttrs(attrs, host, nil, true, ActionCreated)
+	l.stampCreationTime(host, nil)
 	return nil
 }
 
