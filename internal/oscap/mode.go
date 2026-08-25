@@ -1,6 +1,6 @@
 package oscap
 
-// mode.go —— 配置项 filesystem_mode 的三态（AGENTS.md §1.2）。
+// mode.go —— 配置项 filesystem_mode 的两态（AGENTS.md §1.2）。
 
 import "fmt"
 
@@ -12,15 +12,6 @@ const (
 	// 零值即默认值。
 	ModeAuto Mode = iota
 
-	// ModeNative 强制全部走 native；探测到某项不支持就**启动即报错**，
-	// 不静默降级。
-	//
-	// 为什么必须报错而不是降级：它的用途是**在测试里钉死走的是哪条路**。
-	// 一个会偷偷降级的 native 等于没有 —— 这个亏本项目已经吃过：
-	// 某个策略开关只测了「允许」那条路径，全绿，而「拒绝」那条路径压根
-	// 没接线，测试从头到尾都在验证同一条路。
-	ModeNative
-
 	// ModePortable 强制全部走 builtin，完全不碰 OS 的可选能力。
 	// 可移植性/可预测性最高，性能最低。
 	ModePortable
@@ -29,12 +20,26 @@ const (
 // DefaultMode 是未配置时的取值。
 const DefaultMode = ModeAuto
 
-// modeNames 是三态的稳定字符串名，与 YAML 里写的值一一对应。
+// modeNames 是两态的稳定字符串名，与 YAML 里写的值一一对应。
 var modeNames = map[Mode]string{
 	ModeAuto:     "auto",
-	ModeNative:   "native",
 	ModePortable: "portable",
 }
+
+// errNativeRemoved 是 ParseMode("native") 的专门错误。
+//
+// 它必须与普通非法值的报错分开：写 native 的用户多半是从旧版本文档抄来的，
+// 报一句「非法取值」会让人去检查拼写，而不是意识到这一档已经没了、必须改配置。
+//
+// 历史档案："native" 档在 v0.4 及以前与 auto/portable 并列，
+// 契约是「强制全部走 native、缺一项启动即报错」。它已于 v0.5 开发版移除：
+// 每个平台都至少有一项能力没有原生实现，该契约在任何平台上都无法满足，
+// 三平台恒定启动失败，从未有过可用场景。
+var errNativeRemoved = fmt.Errorf(
+	"oscap: filesystem_mode \"native\" 已在 v0.5 开发版移除：" +
+		"原契约要求全部能力走原生实现，但每个平台都至少有一项能力没有原生实现，" +
+		"该契约在任何平台上都无法满足；" +
+		"请改用 auto（逐项探测，原生优先、缺失自动落到 builtin）或 portable（全部 builtin）")
 
 func (m Mode) String() string {
 	if s, ok := modeNames[m]; ok {
@@ -47,7 +52,6 @@ func (m Mode) String() string {
 func ModeNames() []string {
 	return []string{
 		modeNames[ModeAuto],
-		modeNames[ModeNative],
 		modeNames[ModePortable],
 	}
 }
@@ -57,7 +61,13 @@ func ModeNames() []string {
 // **刻意严格**：不做 ToLower、不 trim 空白、不认空串。
 // 配置项拼错却被静默"纠正"是运维灾难（用户以为设的是 A，服务在按 B 跑），
 // 与 config.Load 的严格模式（未知字段直接报错）保持同一种态度。
+//
+// "native" 是已移除的取值（v0.5），返回专门的移除提示而不是普通非法值报错，
+// 见 errNativeRemoved。
 func ParseMode(s string) (Mode, error) {
+	if s == "native" {
+		return DefaultMode, errNativeRemoved
+	}
 	for m, name := range modeNames {
 		if name == s {
 			return m, nil

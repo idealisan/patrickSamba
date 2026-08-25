@@ -71,29 +71,6 @@ func (m Matrix) String() string {
 	return b.String()
 }
 
-// UnsupportedError 表示 filesystem_mode: native 下有能力拿不到原生实现。
-//
-// 这是**启动期**错误，必须让进程起不来。见 ModeNative 的注释：
-// 会偷偷降级的 native 等于没有。
-type UnsupportedError struct {
-	Mode Mode
-	Root string
-	// Caps 是不支持的能力列表，按声明顺序，一次报全 ——
-	// 用户改一项跑一次是最没必要的折磨。
-	Caps []Capability
-}
-
-func (e *UnsupportedError) Error() string {
-	return fmt.Sprintf(
-		"oscap: filesystem_mode: %s 要求全部能力走原生实现，但 %q 所在的文件系统不支持: %s"+
-			"（改成 filesystem_mode: auto 可对这些项自动降级到 builtin，"+
-			"改成 portable 则全部走 builtin）",
-		e.Mode, e.Root, capList(e.Caps))
-}
-
-// Unwrap 让调用方能用 errors.Is(err, ErrNotSupported) 判定这一类失败。
-func (e *UnsupportedError) Unwrap() error { return ErrNotSupported }
-
 // Prober 探测某项能力在 o.Root 所在的宿主文件系统上是否被原生支持。
 //
 // 必须**不 panic**、不修改任何用户数据（临时探测文件要在返回前清理干净）。
@@ -104,7 +81,7 @@ type Prober func(c Capability, o Options) bool
 // SelectMatrix 按模式与探测结果算出能力矩阵。
 //
 // probe 为 nil 时用 ProbeNative（真实探测）。
-// 只有 ModeAuto / ModeNative 会调用 probe；ModePortable 一次都不调 ——
+// 只有 ModeAuto 会调用 probe；ModePortable 一次都不调 ——
 // portable 的承诺是「完全不碰 OS 的可选能力」，连探测都不该碰。
 func SelectMatrix(mode Mode, o Options, probe Prober) (Matrix, error) {
 	if err := o.Validate(); err != nil {
@@ -126,20 +103,6 @@ func SelectMatrix(mode Mode, o Options, probe Prober) (Matrix, error) {
 			if probe(c, o) {
 				m.kind[c] = KindNative
 			}
-		}
-		return m, nil
-
-	case ModeNative:
-		var missing []Capability
-		for c := Capability(0); c < capCount; c++ {
-			if probe(c, o) {
-				m.kind[c] = KindNative
-				continue
-			}
-			missing = append(missing, c)
-		}
-		if len(missing) > 0 {
-			return Matrix{}, &UnsupportedError{Mode: mode, Root: o.Root, Caps: missing}
 		}
 		return m, nil
 

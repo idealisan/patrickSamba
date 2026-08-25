@@ -1,8 +1,6 @@
 package oscap
 
 import (
-	"errors"
-	"strings"
 	"testing"
 )
 
@@ -71,68 +69,30 @@ func TestSelectMatrixAutoIsPerCapability(t *testing.T) {
 	}
 }
 
-func TestSelectMatrixNativeAllSupported(t *testing.T) {
-	p := &countingProbe{native: allCaps()}
-
-	m, err := SelectMatrix(ModeNative, testOptions(t), p.probe)
-	if err != nil {
-		t.Fatalf("全部支持时 native 模式不该报错: %v", err)
-	}
-	for _, c := range Capabilities() {
-		if got := m.Kind(c); got != KindNative {
-			t.Errorf("native 模式下 %s = %s，应当全部为 native", c, got)
-		}
-	}
-}
-
-// TestSelectMatrixNativeFailsClosed 是 native 模式的立身之本：
-// 探测到某项不支持就**启动即报错**，不静默降级。
+// TestNoModeForcesAllNative 钉住 v0.5 移除 native 档后的不变量：
+// **不存在任何模式**会因「某项能力没有原生实现」而拒绝启动，
+// 也不存在任何模式能构造出「全部能力强制走原生」的语义。
 //
-// 为什么这条必须有：一个会偷偷降级的 native 等于没有 ——
-// 它的唯一用途就是在测试里钉死走的是哪条路。本项目吃过同型的亏
-// （某策略开关只测了"允许"这条路径，"拒绝"那条压根没接线）。
-func TestSelectMatrixNativeFailsClosed(t *testing.T) {
-	p := &countingProbe{native: map[Capability]bool{
-		CapXattr:        true,
-		CapNamedStream:  true,
-		CapStableFileID: true,
-		CapSparseFile:   true,
-		// creation_time 与 dos_attributes 不支持
-	}}
-	o := testOptions(t)
-
-	m, err := SelectMatrix(ModeNative, o, p.probe)
-	if err == nil {
-		t.Fatalf("native 模式下有能力不支持却没报错，矩阵为: %s", m)
-	}
-
-	var ue *UnsupportedError
-	if !errors.As(err, &ue) {
-		t.Fatalf("错误类型应为 *UnsupportedError，实际 %T: %v", err, err)
-	}
-	if !errors.Is(err, ErrNotSupported) {
-		t.Errorf("应当可被 errors.Is(err, ErrNotSupported) 判定: %v", err)
-	}
-	if ue.Root != o.Root {
-		t.Errorf("UnsupportedError.Root = %q, 期望 %q", ue.Root, o.Root)
-	}
-
-	// 必须**一次报全**，而不是报第一个就返回：用户改一项跑一次是最没必要的折磨。
-	want := []Capability{CapCreationTime, CapDOSAttributes}
-	if len(ue.Caps) != len(want) {
-		t.Fatalf("UnsupportedError.Caps = %v, 期望 %v（要一次报全）", ue.Caps, want)
-	}
-	for i := range want {
-		if ue.Caps[i] != want[i] {
-			t.Fatalf("UnsupportedError.Caps = %v, 期望 %v", ue.Caps, want)
+// native 档曾承诺「缺一项就启动报错」，但每个平台都至少有一项能力
+// 被源码硬编码为不支持，该契约在任何平台上都无法满足（三平台恒定
+// 启动失败），因此被整体移除。这条用例防止它以任何形式回来：
+// 若将来有人重新引入一个「全原生强制」档，这里对全部合法取值做的
+// 「探测全 false 也必须成功且全落 builtin」断言会当场变红。
+func TestNoModeForcesAllNative(t *testing.T) {
+	never := func(Capability, Options) bool { return false }
+	for _, name := range ModeNames() {
+		mode, err := ParseMode(name)
+		if err != nil {
+			t.Fatalf("ParseMode(%q) 失败: %v", name, err)
 		}
-	}
-
-	// 错误信息必须点出是哪几项，否则用户拿到一句"不支持"无从下手。
-	msg := err.Error()
-	for _, c := range want {
-		if !strings.Contains(msg, c.String()) {
-			t.Errorf("错误信息里没有提到 %s: %s", c, msg)
+		m, err := SelectMatrix(mode, testOptions(t), never)
+		if err != nil {
+			t.Fatalf("mode %s 在六项能力全部无原生实现时报错: %v", name, err)
+		}
+		for _, c := range Capabilities() {
+			if got := m.Kind(c); got != KindBuiltin {
+				t.Errorf("mode %s 下探测全失败时 %s = %s，应当落 builtin（安全侧）", name, c, got)
+			}
 		}
 	}
 }
@@ -174,15 +134,15 @@ func TestMatrixStringGolden(t *testing.T) {
 }
 
 func TestMatrixKindRejectsInvalidCapability(t *testing.T) {
-	m := NewMatrix(ModeNative, map[Capability]Kind{CapXattr: KindNative})
+	m := NewMatrix(ModeAuto, map[Capability]Kind{CapXattr: KindNative})
 	if got := m.Kind(Capability(-1)); got != KindBuiltin {
 		t.Errorf("非法 Capability 应返回 builtin（安全侧），实际 %s", got)
 	}
 	if got := m.Kind(capCount); got != KindBuiltin {
 		t.Errorf("越界 Capability 应返回 builtin（安全侧），实际 %s", got)
 	}
-	if m.Mode() != ModeNative {
-		t.Errorf("Matrix.Mode() = %v, 期望 native", m.Mode())
+	if m.Mode() != ModeAuto {
+		t.Errorf("Matrix.Mode() = %v, 期望 auto", m.Mode())
 	}
 }
 

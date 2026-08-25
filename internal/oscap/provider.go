@@ -108,46 +108,27 @@ func New(m Matrix, o Options, native, builtin Factory) (Provider, error) {
 	p := &provider{eff: Matrix{mode: m.mode}}
 
 	// --- 1. 只在真正需要时才向 native 侧索取实现。
-	var (
-		nativeSet Set
-		nativeErr error
-	)
+	var nativeSet Set
 	if len(m.Caps(KindNative)) > 0 && native != nil {
-		nativeSet, nativeErr = native(o)
-		if nativeErr != nil {
-			if m.mode == ModeNative {
-				// native 模式下不许降级，如实把构造失败抛出去。
-				return nil, fmt.Errorf("oscap: 构造 native 适配器失败: %w", nativeErr)
-			}
-			// auto 模式：native 侧整体不可用，全部落到 builtin。
-			// 不是静默吞掉 —— 调用方能从 Provider.Matrix() 看到结果是 builtin，
-			// 装配方应当把 nativeErr 记进启动日志（New 不做日志，见包分层）。
-			nativeSet = Set{}
+		ns, err := native(o)
+		if err != nil {
+			// native 侧整体不可用，全部落到 builtin。不是静默吞掉 ——
+			// 调用方能从 Provider.Matrix() 看到结果是 builtin，
+			// 装配方应当把 err 记进启动日志（New 不做日志，见包分层）。
+			ns = Set{}
 		}
+		nativeSet = ns
 	}
 
-	// --- 2. 逐项挑选，native 拿不到就退到 builtin（native 模式除外）。
-	var (
-		wantBuiltin []Capability
-		missNative  []Capability
-	)
+	// --- 2. 逐项挑选，native 拿不到就退到 builtin。
+	var wantBuiltin []Capability
 	for c := Capability(0); c < capCount; c++ {
 		if m.Kind(c) == KindNative && nativeSet.has(c) {
 			p.eff.kind[c] = KindNative
 			continue
 		}
-		if m.Kind(c) == KindNative {
-			missNative = append(missNative, c)
-		}
 		p.eff.kind[c] = KindBuiltin
 		wantBuiltin = append(wantBuiltin, c)
-	}
-
-	// native 模式下矩阵说 native 却拿不到实现，说明**探测与实现不一致**
-	// （probe 说支持、adapter 却没做这一项）。这在任何模式下都是 bug，
-	// 但只有 native 模式承诺了「不降级」，所以只在这里硬失败。
-	if m.mode == ModeNative && len(missNative) > 0 {
-		return nil, &UnsupportedError{Mode: m.mode, Root: o.Root, Caps: missNative}
 	}
 
 	// --- 3. builtin 侧必须能补齐剩下的全部。

@@ -25,7 +25,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -254,61 +253,29 @@ func TestPortableUsesBuiltinMatrix(t *testing.T) {
 	}
 }
 
-// TestNativeModeFailsFastOnPosix 钉住 native 档在 POSIX 上的**真实**行为。
+// TestRemovedNativeModeUnreachable 钉住 v0.5 移除 native 档后的边界：
+// 字符串 "native" 在 ParseMode 就被拒（带移除说明与替代取值），到不了 LocalFS；
+// 越过解析层塞进来一个未知 Mode，NewLocalFS 也必须报错而不是当成 auto/portable。
 //
-// 这不是缺陷而是设计：POSIX 没有 DOS 属性位（oscap/probe_linux.go 里
-// CapDOSAttributes 无条件为 false），而 native 档承诺「不静默降级」，
-// 于是启动即报 UnsupportedError。
-//
-// 把它写成断言而不是留给用户去撞，是因为反过来更危险：哪天有人给
-// native 档加了「探测不到就退 builtin」的兜底，`filesystem_mode: native`
-// 会立刻退化成一个**看起来在用却在偷偷降级**的开关 —— 而它存在的全部
-// 意义就是在测试里钉死走的是哪条路。那种改动必须让这条用例红。
-func TestNativeModeFailsFastOnPosix(t *testing.T) {
-	if !hostXattrSupported(t.TempDir()) {
-		// 宿主连扩展属性都没有时失败原因会混进 CapXattr，
-		// 断言就不再是「只因为 DOS 属性位而失败」了。
-		t.Skip("宿主不支持扩展属性，本用例要钉的是「仅 DOS 属性位缺席」这一种失败")
-	}
-	_, err := NewLocalFS(LocalConfig{Root: t.TempDir(), FilesystemMode: oscap.ModeNative})
+// native 档曾承诺「缺一项原生实现就启动报错」，但每个平台都至少有一项能力
+// 没有原生实现，该契约在任何平台上都无法满足（v0.4 及以前三平台恒定启动失败），
+// 因此整档移除。这条用例防止两条退化路径：
+//  1. ParseMode 把 "native" 静默映射到某个现存档 —— 用户以为在跑 native，
+//     实际行为无人知道；
+//  2. NewLocalFS 对未知 Mode 悄悄按默认档跑 —— 与「不静默纠正」的严格解析
+//     姿态相悖。
+func TestRemovedNativeModeUnreachable(t *testing.T) {
+	_, err := oscap.ParseMode("native")
 	if err == nil {
-		t.Fatal("native 档在 POSIX 上应当启动即失败（DOS 属性位无原生实现），却成功了")
+		t.Fatal("ParseMode(\"native\") 应当报错（该档已在 v0.5 移除）")
 	}
-	var ue *oscap.UnsupportedError
-	if !errors.As(err, &ue) {
-		t.Fatalf("期望 *oscap.UnsupportedError，得到 %T: %v", err, err)
+	msg := err.Error()
+	if !strings.Contains(msg, "auto") || !strings.Contains(msg, "portable") {
+		t.Errorf("ParseMode(\"native\") 的错误应给出替代取值 auto/portable:\n%s", msg)
 	}
-	if !strings.Contains(err.Error(), "DOS") && !strings.Contains(err.Error(), "dos") {
-		t.Errorf("错误信息应指名是 DOS 属性位缺席，实际: %v", err)
-	}
-}
 
-// TestNativeModeHasNoUsablePlatform 是上一条的补全：native 档在**任何**平台
-// 上都启动即失败，不是只有 POSIX。
-//
-// 上一条用例名字里的 "OnPosix" 没写错，但会让人以为 Windows 是可用的那一家。
-// 不是：每个平台各自都有至少一项能力被源码无条件判为不支持 ——
-// linux/darwin 的 CapDOSAttributes、darwin 还有 CapSparseFile、
-// windows 的 CapXattr（probe_windows.go 拒绝拿 NTFS ADS 冒充 xattr，
-// 语义不等价），非三大平台走 probe_other.go 六项全 false。
-// 而 native 档要求六项全部走原生（oscap/matrix.go 的 UnsupportedError）。
-//
-// 这条用例是 CHANGELOG / README / configs/example.yaml / AGENTS.md 四处
-// 「native 接线后在三个平台上都会恒定启动失败，与文件系统无关」这句断言的
-// **唯一门禁**。哪天有人补齐了本平台缺的原生实现，或给 native 加了静默降级，
-// 它会当场变红 —— 提醒改的人同步去改那四处，别让文档腐烂成谎话。
-//
-// 它刻意**不**断言是哪一项能力缺席：那是平台相关的，钉死就只能在 POSIX 上跑，
-// 也就重新退回上一条用例的覆盖面。
-func TestNativeModeHasNoUsablePlatform(t *testing.T) {
-	_, err := NewLocalFS(LocalConfig{Root: t.TempDir(), FilesystemMode: oscap.ModeNative})
-	if err == nil {
-		t.Fatalf("native 档在 %s 上应当启动即失败（本平台至少有一项能力无原生实现），却成功了。"+
-			"若这是有意为之，请同步改掉 CHANGELOG / README / configs/example.yaml / AGENTS.md 四处的断言", runtime.GOOS)
-	}
-	var ue *oscap.UnsupportedError
-	if !errors.As(err, &ue) {
-		t.Fatalf("期望 *oscap.UnsupportedError（fail-fast 而非静默降级），得到 %T: %v", err, err)
+	if _, err := NewLocalFS(LocalConfig{Root: t.TempDir(), FilesystemMode: oscap.Mode(200)}); err == nil {
+		t.Fatal("未知 Mode 应当让 NewLocalFS 失败，而不是被当成 auto/portable 悄悄放行")
 	}
 }
 
@@ -495,14 +462,13 @@ func TestAppleFastPathGoesThroughProvider(t *testing.T) {
 	}
 }
 
-// TestBothModesSameBehaviour 让**同一张行为表**在两档下各跑一遍。
+// TestBothModesSameBehaviour 让**同一张行为表**在两侧各跑一遍。
 //
 // 只测默认档是假阳性温床：builtin 存在的全部理由就是「与 native 语义一致」，
 // 而两份各自为政的用例会让它们慢慢长歪且无人察觉。
 //
-// native 那一侧用 ModeAuto + 矩阵断言，而不是 ModeNative：POSIX 上
-// CapDOSAttributes 没有原生实现，ModeNative 必然启动失败（见
-// TestNativeModeFailsFastOnPosix），用它根本建不出 LocalFS。
+// native 那一侧用 ModeAuto + 矩阵断言，而不是某个「全原生强制」档：
+// 这样的档不存在（v0.5 已把 filesystem_mode 收敛为 auto/portable 两态）。
 // ModeAuto 走的是**产品装配路径**，配上 requireKind 同样能钉死走的哪条路。
 func TestBothModesSameBehaviour(t *testing.T) {
 	for _, tc := range []struct {
