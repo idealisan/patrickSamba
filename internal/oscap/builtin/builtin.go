@@ -89,7 +89,12 @@ func New(o oscap.Options) (oscap.Set, error) {
 		IDs:     a,
 		Times:   a,
 		DOS:     a,
-		Close:   st.close,
+
+		// rename/remove 的旁路账本迁移/清理（B5）：账本在本侧，
+		// 伴随义务也在本侧。
+		Migration: a,
+
+		Close: st.close,
 	}, nil
 }
 

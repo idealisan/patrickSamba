@@ -74,6 +74,10 @@ func newSetProcs(o oscap.Options, procsOK bool) (oscap.Set, error) {
 		Times:   &winTimes{readOnly: o.ReadOnly},
 		DOS:     &winDOS{readOnly: o.ReadOnly},
 
+		// 元数据迁移是无操作：NTFS 的属性字/ADS/btime 全部长在文件上，
+		// 随 rename/unlink 自动跟随/消失（migration.go 有逐项清单）。
+		Migration: noopMigration{},
+
 		Close: nil,
 	}, nil
 }

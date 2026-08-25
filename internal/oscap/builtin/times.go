@@ -13,7 +13,10 @@ package builtin
 //
 // 一个诱人的写法是：首次查询时把当前 mtime 记成创建时间。别这么做 ——
 // 那等于把冒充值变成了持久事实，而且读路径会突然产生写入（只读共享上直接违约）。
-// 创建时间由 vfs 在**真正创建对象**时调 SetCreationTime 落下来。
+// 创建时间由 vfs 在真正创建对象时调 SetCreationTime 落下来
+// （internal/vfs/local.go 的 stampCreationTime，挂在 openFile/openDir/Mkdir
+// 的 created/superseded 分支上；矩阵把 CapCreationTime 交给 native 时跳过 ——
+// 内核 birthtime 已是真值）。
 
 import (
 	"encoding/binary"

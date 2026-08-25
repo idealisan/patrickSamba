@@ -34,6 +34,10 @@ func newSet(o oscap.Options) (oscap.Set, error) {
 		// 同一份语义」，而 Linux 内核对 DOSATTRIB 一无所知。
 		DOS: nil,
 
+		// 元数据迁移是无操作：native 元数据长在宿主对象上，随 rename/unlink
+		// 自动跟随/消失（migration.go 有逐项清单）。
+		Migration: noopMigration{},
+
 		// 无需释放任何资源：本平台的实现都是无状态的（每个方法自带 Ref），
 		// 不持有 fd、不开旁路存储。Close 留 nil 即可。
 		Close: nil,

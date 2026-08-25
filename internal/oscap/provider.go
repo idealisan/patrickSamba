@@ -25,6 +25,15 @@ type Set struct {
 	Times   CreationTime
 	DOS     DOSAttributes
 
+	// Migration 是 rename/remove 的旁路元数据迁移/清理实现。
+	//
+	// 与上面六项不同，它**不参与矩阵**（没有对应的 Capability，探测也不问它）：
+	// 它不是「宿主有没有这个能力」的问题，而是「谁在按路径记账」的伴随义务。
+	// builtin 必须提供真实现；native 的元数据长在宿主对象上，提供的是
+	// 文档化的无操作。留 nil 时 Provider.Migration() 会回退到另一侧或 nil，
+	// vfs 层对 nil 有防御。
+	Migration MetadataMigration
+
 	// Close 释放这套实现持有的资源（builtin 的旁路 KV 句柄等），可为 nil。
 	Close func() error
 }
@@ -57,7 +66,7 @@ type Factory func(Options) (Set, error)
 
 // Provider 是组装完成的能力集合，供 vfs 层使用。
 //
-// 六个访问器**保证非 nil** —— 这是本包对上层的核心承诺，也是
+// 六个能力访问器**保证非 nil** —— 这是本包对上层的核心承诺，也是
 // 「builtin 必须完整」那条铁律的兑现形式：拿到 Provider 之后调用方
 // 不需要判 nil，也不需要类型断言，直接用。
 // 缺项在 New 就已经硬失败了，绝不会漏到运行期变成一个空指针。
@@ -68,6 +77,14 @@ type Provider interface {
 	IDs() StableFileID
 	Times() CreationTime
 	DOS() DOSAttributes
+
+	// Migration 返回旁路元数据的迁移/清理实现，可能为 nil。
+	//
+	// 为什么允许 nil 而六个能力访问器不允许：Migration 不在矩阵里，
+	// 「两侧都没给」在语义上是合法的（比如测试注入的最小 Provider），
+	// 硬失败反而把一件「没有旁路账本就没有迁移义务」的事变成了错误。
+	// vfs 层的调用点全部做了 nil 防御。
+	Migration() MetadataMigration
 
 	// Matrix 返回**实际生效**的矩阵。
 	//
@@ -122,6 +139,7 @@ func New(m Matrix, o Options, native, builtin Factory) (Provider, error) {
 
 	// --- 2. 逐项挑选，native 拿不到就退到 builtin。
 	var wantBuiltin []Capability
+	var builtinSet Set
 	for c := Capability(0); c < capCount; c++ {
 		if m.Kind(c) == KindNative && nativeSet.has(c) {
 			p.eff.kind[c] = KindNative
@@ -136,10 +154,11 @@ func New(m Matrix, o Options, native, builtin Factory) (Provider, error) {
 		if builtin == nil {
 			return nil, &IncompleteBuiltinError{Caps: wantBuiltin}
 		}
-		builtinSet, err := builtin(o)
+		bs, err := builtin(o)
 		if err != nil {
 			return nil, fmt.Errorf("oscap: 构造 builtin 适配器失败: %w", err)
 		}
+		builtinSet = bs
 		var missing []Capability
 		for _, c := range wantBuiltin {
 			if !builtinSet.has(c) {
@@ -156,6 +175,13 @@ func New(m Matrix, o Options, native, builtin Factory) (Provider, error) {
 	}
 	p.fill(nativeSet, KindNative)
 	p.closers = append(p.closers, nativeSet.Close)
+
+	// Migration 不走矩阵：builtin 优先（账本在它手里），native 的无操作兜底。
+	// 见 provider.Migration 的注释。
+	p.mig = builtinSet.Migration
+	if p.mig == nil {
+		p.nativeMig = nativeSet.Migration
+	}
 
 	return p, nil
 }
@@ -187,6 +213,9 @@ type provider struct {
 	ids     StableFileID
 	times   CreationTime
 	dos     DOSAttributes
+
+	mig       MetadataMigration
+	nativeMig MetadataMigration
 
 	closers []func() error
 }
@@ -224,6 +253,19 @@ func (p *provider) IDs() StableFileID    { return p.ids }
 func (p *provider) Times() CreationTime  { return p.times }
 func (p *provider) DOS() DOSAttributes   { return p.dos }
 func (p *provider) Matrix() Matrix       { return p.eff }
+
+// Migration 返回迁移/清理实现。
+//
+// **builtin 优先**：旁路账本只有 builtin 有，native 的实现是无操作。
+// 混合矩阵下选 builtin 的不会多做事也不会少做事 —— native 那侧本来
+// 就没有账可迁。builtin 没给（理论上不可能，缺项在 New 已硬失败）
+// 才回退到 native 的无操作，再不行就是 nil，由调用方防御。
+func (p *provider) Migration() MetadataMigration {
+	if p.mig != nil {
+		return p.mig
+	}
+	return p.nativeMig
+}
 
 // Close 关闭两侧适配器。
 //

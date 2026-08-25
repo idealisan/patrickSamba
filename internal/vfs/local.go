@@ -351,6 +351,10 @@ func (l *LocalFS) openDir(req *OpenRequest, host, name string, exists bool) (Han
 	}
 
 	h := l.newHandle(req, host, name, true)
+	if action == ActionCreated {
+		l.applyCreateDOSAttrs(req.FileAttributes, host, nil, true, action)
+		l.stampCreationTime(host, nil)
+	}
 	if req.Flags&OpenAttrOnly != 0 {
 		return h, action, nil
 	}
@@ -430,7 +434,77 @@ func (l *LocalFS) openFile(req *OpenRequest, host, name string, exists bool) (Ha
 		return nil, 0, mapError(err)
 	}
 	h.f = f
+	if action == ActionSuperseded {
+		// SUPERSEDE 的既定语义是「删除重建」（见上面对 O_TRUNC 近似的 TODO）。
+		// 旧对象在旁路库里的记录必须整体作废 —— 否则新对象顶着前任的
+		// 创建时间与 DOS 位，是跨对象元数据泄漏的又一入口（B5/B3 同源）。
+		l.forgetPathMetadata(host)
+	}
+	l.applyCreateDOSAttrs(req.FileAttributes, host, f, false, action)
+	if action == ActionCreated || action == ActionSuperseded {
+		l.stampCreationTime(host, f)
+	}
 	return h, action, nil
+}
+
+// stampCreationTime 在**真正创建出新对象**时把 btime 落进旁路库（B4）。
+//
+// builtin/times.go 的注释描述的就是这一步 —— 此前它并不存在，新建对象的
+// 创建时间永远查不到存储值。跳过条件与 caps 探测口径一致：矩阵已把
+// CapCreationTime 交给 native 时（macOS birthtimespec / Windows / Linux statx
+// BTIME），内核自己维护且读得到真值，旁路记录纯属浪费 —— Time Machine 的
+// band 目录动辄十万级创建，能省一次库写入就省。
+//
+// SUPERSEDE 走到这里时旧记录已被 forgetPathMetadata 作废，
+// 这里写下的就是新对象的起点，语义正确。
+func (l *LocalFS) stampCreationTime(host string, f *os.File) {
+	if l.caps.Matrix().Kind(oscap.CapCreationTime) == oscap.KindNative {
+		return
+	}
+	_ = l.caps.Times().SetCreationTime(oscap.Ref{Path: host, Handle: f}, time.Now())
+}
+
+// applyCreateDOSAttrs 把 CREATE 请求携带的 FileAttributes 按 Samba 语义落库
+// （对照 source3/smbd/open.c 的 open_file_ntcreate 与 possibly_set_archive）：
+//
+//   - 只对 created / overwritten / superseded 三种动作生效；
+//     FILE_WAS_OPENED 一律不动属性（打开已存在文件时请求里的属性位被忽略）；
+//   - FILE_ATTRIBUTE_DIRECTORY 静默剥掉（open.c:3891-3894，Windows 同款行为），
+//     SPARSE/REPARSE 等客观事实位经 settableDOSAttributes 一并滤除；
+//   - 普通文件叠加 FILE_ATTRIBUTE_ARCHIVE（open.c:3896-3899 "this mode is
+//     only used if the file is created new"；possibly_set_archive 对
+//     OVERWRITTEN/SUPERSEDED 也补）；
+//   - 请求未携带属性位（raw==0）的新建**不落**记录：合成逻辑对普通文件本就
+//     报 ARCHIVE，可观测行为一致 —— 避免给 Time Machine 十万级 band 目录的
+//     每次创建都写一条旁路记录。覆盖/取代时若已有存储记录则读改写补 ARCHIVE，
+//     没有就同样跳过。
+//
+// 落库失败静默忽略：CREATE 本身已成功，Samba 的 file_set_dosmode 失败同样
+// 不回滚创建；把失败回给客户端只会让它误以为创建没发生。
+func (l *LocalFS) applyCreateDOSAttrs(raw uint32, host string, f *os.File, isDir bool, action Action) {
+	switch action {
+	case ActionCreated, ActionOverwritten, ActionSuperseded:
+	default:
+		return
+	}
+	ref := oscap.Ref{Path: host, Handle: f}
+	var eff uint32
+	switch {
+	case raw != 0:
+		eff = raw & settableDOSAttributes // DIRECTORY 等客观位不落地
+		if !isDir {
+			eff |= FileAttributeArchive
+		}
+	case !isDir:
+		bits, err := l.caps.DOS().DOSAttributes(ref)
+		if err != nil || bits&FileAttributeArchive != 0 {
+			return // 没有存储记录（合成兜底）或 ARCHIVE 已在，都无需写
+		}
+		eff = (bits | FileAttributeArchive) & settableDOSAttributes
+	default:
+		return
+	}
+	_ = l.caps.DOS().SetDOSAttributes(ref, eff)
 }
 
 // accessFlags 把 OpenFlags 的读写意图翻译成 O_RDONLY/O_WRONLY/O_RDWR。
@@ -626,6 +700,7 @@ func (l *LocalFS) Remove(p string) error {
 		return mapError(err)
 	}
 	l.forgetMetadata(host)
+	l.forgetPathMetadata(host)
 	return nil
 }
 
@@ -647,6 +722,11 @@ func (l *LocalFS) Mkdir(p string, attrs uint32) error {
 	if attrs&FileAttributeReadonly != 0 {
 		_ = os.Chmod(host, l.cfg.DirMode&^0o222)
 	}
+	// 与 CREATE 建目录同语义：剥 DIRECTORY、其余位经 settable 过滤后存档
+	//（applyCreateDOSAttrs 内部不叠 ARCHIVE —— 目录不该有 ARCHIVE 位）；
+	// btime 同步落库。
+	l.applyCreateDOSAttrs(attrs, host, nil, true, ActionCreated)
+	l.stampCreationTime(host, nil)
 	return nil
 }
 
@@ -707,6 +787,7 @@ func (l *LocalFS) Rename(oldPath, newPath string, replace bool) error {
 		return mapError(err)
 	}
 	l.renameMetadata(src, dst)
+	l.migratePathMetadata(src, dst)
 	return nil
 }
 
@@ -887,6 +968,30 @@ func (l *LocalFS) renameMetadata(src, dst string) {
 		return
 	}
 	_ = l.meta.Rename(filepath.ToSlash(relSrc), filepath.ToSlash(relDst))
+}
+
+// migratePathMetadata / forgetPathMetadata 是 caps 侧旁路账本
+// （oscap builtin 的 btime/dosattr/xattr/stream/holes/fileid 六桶）的
+// 同类伴随维护（B5）。meta 与 caps 是**两套**按路径记账的存储，
+// rename/remove 必须两边都搬/都清，漏一边就等于没修。
+//
+// 错误刻意吞掉：宿主上的 rename/unlink 已经发生，此时把失败回给客户端
+// 只会让它认为操作没成功，从而做出与服务端状态相悖的后续动作 ——
+// 比「一条旁路记录暂时错位」伤害更大。这与上面 meta.Rename 的既有取舍一致。
+func (l *LocalFS) migratePathMetadata(src, dst string) {
+	m := l.caps.Migration()
+	if m == nil {
+		return
+	}
+	_ = m.RenameMetadata(src, dst)
+}
+
+func (l *LocalFS) forgetPathMetadata(host string) {
+	m := l.caps.Migration()
+	if m == nil {
+		return
+	}
+	_ = m.DeleteMetadata(host)
 }
 
 // setTimes 设置访问/修改时间。未指定的一方保持原值。
