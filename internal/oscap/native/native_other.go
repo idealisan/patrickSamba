@@ -14,4 +14,10 @@ package native
 
 import "github.com/finalappstore/stupidsamba/internal/oscap"
 
-func newSet(oscap.Options) (oscap.Set, error) { return oscap.Set{}, nil }
+func newSet(oscap.Options) (oscap.Set, error) {
+	return oscap.Set{
+		// 本平台一项原生能力都没有，Migration 同样没有「宿主对象」可依托；
+		// 给无操作只是保持与其它平台一致的形状，语义上等价于留 nil。
+		Migration: noopMigration{},
+	}, nil
+}

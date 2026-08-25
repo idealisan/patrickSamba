@@ -38,6 +38,9 @@ func newSet(o oscap.Options) (oscap.Set, error) {
 		// 不能拿来充数。留 nil 交给 builtin。
 		DOS: nil,
 
+		// 元数据迁移是无操作（migration.go 有逐项清单）。
+		Migration: noopMigration{},
+
 		Close: nil,
 	}, nil
 }
