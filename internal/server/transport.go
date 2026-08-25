@@ -37,6 +37,17 @@ const (
 	DefaultMaxFrameSize = 1<<20 + 512
 )
 
+// deadlineSource 记录最近一次装载的读期限来自哪个约束。
+// 纯观测用途（测试据此区分「空闲超时」与「握手超时」两种断连），
+// 不参与任何业务判断；只在读 goroutine 内读写，无需加锁。
+type deadlineSource uint8
+
+const (
+	deadlineNone deadlineSource = iota // 未装载任何期限
+	deadlineIdle                       // 滑动空闲窗口（readTimeout）
+	deadlineHard                       // 认证前绝对期限（hardReadDeadline）
+)
+
 // 传输层错误。
 var (
 	// ErrFrameTooLarge 表示对端声明的帧长度超过本端上限，必须断连。
@@ -65,6 +76,11 @@ type Transport struct {
 	// hardReadDeadline 是一个**绝对**读期限，零值表示没有。
 	// 生效时与 readTimeout 取更早者，见 SetHardReadDeadline。
 	hardReadDeadline time.Time
+
+	// lastDeadlineSrc 记录最近一次 applyReadDeadline 装载的期限来源。
+	// 读超时发生时，阻塞中的那次读就是用它武装的期限，
+	// 据此可确定性地判断「是空闲超时还是握手超时」。
+	lastDeadlineSrc deadlineSource
 
 	// hdr 是复用的读头缓冲，避免每帧分配。
 	hdr [TransportHeaderSize]byte
@@ -158,12 +174,16 @@ func (t *Transport) ReadFrame() ([]byte, error) {
 // 所以一个把 1 MiB body 一个字节一个字节挤出来的客户端同样会被淘汰。
 func (t *Transport) applyReadDeadline() error {
 	var dl time.Time
+	src := deadlineNone
 	if t.readTimeout > 0 {
 		dl = time.Now().Add(t.readTimeout)
+		src = deadlineIdle
 	}
 	if !t.hardReadDeadline.IsZero() && (dl.IsZero() || t.hardReadDeadline.Before(dl)) {
 		dl = t.hardReadDeadline
+		src = deadlineHard
 	}
+	t.lastDeadlineSrc = src
 	// dl 为零值时 SetReadDeadline 语义就是"清除期限"，正是我们想要的。
 	return t.conn.SetReadDeadline(dl)
 }
