@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -165,26 +166,45 @@ func mustNegotiate(t *testing.T, addr string) {
 	}
 }
 
-// waitConnCount 等待活跃连接数达到 want，超时则失败。
-func waitConnCount(t *testing.T, s *Server, want int, within time.Duration) {
+// waitFor 轮询等待一个**确定性条件**成立，只有超时才失败。
+//
+// 这类等待只是等「事件已在别的 goroutine 发生」跨线程可见，
+// 断言依据是条件里的计数器/状态值，不是任何耗时测量；
+// 预算按「正常耗时 × 数十倍」取值，共享 runner 负载抖动下依然稳定。
+//
+// 本文件的所有用例都依赖进程全局计数器做 before/after 差值，
+// 因此**禁止 t.Parallel**（同 vfs 包 pathFullScans 先例）。
+func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		if s.ConnectionCount() == want {
+		if cond() {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("等待连接数 = %d 超时，实际 %d", want, s.ConnectionCount())
+	t.Fatalf("等待 %s 超时（预算 %v）", what, within)
+}
+
+// waitConnCount 等待活跃连接数达到 want，超时则失败。
+func waitConnCount(t *testing.T, s *Server, want int, within time.Duration) {
+	t.Helper()
+	waitFor(t, within,
+		fmt.Sprintf("活跃连接数 = %d（实际 %d）", want, s.ConnectionCount()),
+		func() bool { return s.ConnectionCount() == want })
 }
 
 // ---------------------------------------------------------------- 上限
 
 // TestMaxConnectionsEnforced：并发连接上限必须**真的**生效
 // （AGENTS.md §8）。超限的连接要被立刻关闭，而不是排队等着。
+//
+// 判据是 connRejected 计数（确定性事件），不是任何耗时测量。
 func TestMaxConnectionsEnforced(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) { o.MaxConnections = 2 })
 	addr := serverAddr(t, srv)
+
+	rejectedBase := connRejected.Load()
 
 	// 占满 2 个槽位。
 	for range 2 {
@@ -194,7 +214,7 @@ func TestMaxConnectionsEnforced(t *testing.T) {
 			t.Fatalf("占位连接协商失败: %v", err)
 		}
 	}
-	waitConnCount(t, srv, 2, 2*time.Second)
+	waitConnCount(t, srv, 2, 5*time.Second)
 
 	// 第三条：TCP 层能连上（内核 backlog），但服务端必须立刻关掉它。
 	third, err := net.DialTimeout("tcp", addr, 3*time.Second)
@@ -203,11 +223,17 @@ func TestMaxConnectionsEnforced(t *testing.T) {
 	}
 	defer third.Close()
 
-	_ = third.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = third.SetReadDeadline(time.Now().Add(10 * time.Second))
 	buf := make([]byte, 1)
 	if _, err := third.Read(buf); !errors.Is(err, io.EOF) {
 		t.Fatalf("超出并发上限的连接应当被立刻关闭（期望 EOF），实际 err=%v", err)
 	}
+
+	// 确定性断言 + 反向对照：第 N+1 个并发连接被拒
+	// ⇒ connRejected 恰好发生一次（计数 >0，防测试空转恒绿）。
+	waitFor(t, 5*time.Second, "超限拒绝计数 +1", func() bool {
+		return connRejected.Load()-rejectedBase == 1
+	})
 	if got := srv.ConnectionCount(); got != 2 {
 		t.Fatalf("超限连接不应被登记：连接数 = %d，期望 2", got)
 	}
@@ -217,6 +243,9 @@ func TestMaxConnectionsEnforced(t *testing.T) {
 //
 // 静默拒绝会让运维完全查不出"为什么连不上"；而一条连接一行日志，
 // 连接洪水就能顺带把磁盘写满，等于把一次拒绝服务放大成第二次。
+//
+// 判据是 connRejected / rejectLogSuppressed 计数（确定性事件）；
+// 日志行数断言保留（节流行为本身），其稳定性依据见下方注释。
 func TestRejectLogIsThrottled(t *testing.T) {
 	var buf syncBuffer
 	srv := newTestServer(t, func(o *Options) {
@@ -225,10 +254,14 @@ func TestRejectLogIsThrottled(t *testing.T) {
 	})
 	addr := serverAddr(t, srv)
 
+	rejectedBase := connRejected.Load()
+	suppressedBase := rejectLogSuppressed.Load()
+
 	dial(t, addr) // 占满唯一的槽位
-	waitConnCount(t, srv, 1, 2*time.Second)
+	waitConnCount(t, srv, 1, 5*time.Second)
 
 	const flood = 20
+	floodStart := time.Now()
 	for range flood {
 		c, err := net.DialTimeout("tcp", addr, 3*time.Second)
 		if err != nil {
@@ -238,11 +271,24 @@ func TestRejectLogIsThrottled(t *testing.T) {
 		_, _ = c.Read(make([]byte, 1)) // 等服务端把它关掉
 		_ = c.Close()
 	}
+	floodElapsed := time.Since(floodStart)
 
+	// 确定性断言：20 条超限连接必须每一条都被拒（计数恰好 +flood），
+	// 且每一条未写日志的拒绝都必须走了节流抑制分支。
+	if got := connRejected.Load() - rejectedBase; got != flood {
+		t.Fatalf("被拒连接计数 = %d，期望 %d", got, flood)
+	}
 	logged := strings.Count(buf.String(), "并发连接数已达上限")
+	if got := rejectLogSuppressed.Load() - suppressedBase; got != int64(flood-logged) {
+		t.Fatalf("抑制计数 = %d，与 拒绝总数 %d - 日志行数 %d 不一致", got, flood, logged)
+	}
+	// 反向对照：拒绝确实发生了，且至少留下一行日志（防测试空转恒绿）。
 	if logged == 0 {
 		t.Fatalf("超限拒绝必须留下日志，实际日志:\n%s", buf.String())
 	}
+	// 节流窗口是 rejectLogInterval（10s），洪水全程通常 <0.1s、有百倍余量，
+	// 因此「恰好一行」在负载抖动下依然稳定；若这里偶发 >1，先看
+	// t.Logf 输出的洪水耗时是否已逼近窗口再下结论。
 	if logged > 1 {
 		t.Fatalf("%d 次拒绝写了 %d 行日志，节流没生效:\n%s", flood, logged, buf.String())
 	}
@@ -250,6 +296,10 @@ func TestRejectLogIsThrottled(t *testing.T) {
 	if !strings.Contains(buf.String(), "rejected=") {
 		t.Fatalf("拒绝日志应当带上区间内的被拒次数:\n%s", buf.String())
 	}
+	// 诊断用，勿改回计时门禁：洪水耗时属墙钟测量，共享 runner 一抖就假红，
+	// 判据已换成上面的 connRejected / rejectLogSuppressed 计数。
+	t.Logf("诊断用，勿改回计时门禁：%d 次拒绝耗时 %v（节流窗口 %v）",
+		flood, floodElapsed, rejectLogInterval)
 }
 
 // syncBuffer 是并发安全的 bytes.Buffer（accept goroutine 与测试 goroutine 同时访问）。
@@ -272,9 +322,13 @@ func (b *syncBuffer) String() string {
 
 // TestOversizedFrameDropsOnlyThatConnection：声明超过单帧上限的长度前缀
 // 必须只断这一条连接，服务端本身要活着（AGENTS.md §8 单帧大小上限）。
+//
+// 判据是 frameTooLargeDrops 计数（确定性事件），不是任何耗时测量。
 func TestOversizedFrameDropsOnlyThatConnection(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) { o.MaxFrameSize = 4096 })
 	addr := serverAddr(t, srv)
+
+	dropsBase := frameTooLargeDrops.Load()
 
 	c := dial(t, addr)
 	// 声明 0xFFFFFF（16 MiB - 1）字节，远超 4096 上限，但一个字节的
@@ -282,10 +336,16 @@ func TestOversizedFrameDropsOnlyThatConnection(t *testing.T) {
 	if _, err := c.Write([]byte{0x00, 0xFF, 0xFF, 0xFF}); err != nil {
 		t.Fatalf("写超长帧头失败: %v", err)
 	}
-	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("超长帧应当导致断连（期望 EOF），实际 err=%v", err)
 	}
+
+	// 确定性断言 + 反向对照：慢输入必须真的触发「超长帧丢弃」计数 >0，
+	// 否则下面的「服务端还活着」检查会空转恒绿。
+	waitFor(t, 5*time.Second, "超长帧丢弃计数 +1", func() bool {
+		return frameTooLargeDrops.Load()-dropsBase == 1
+	})
 
 	// 服务端还活着。
 	mustNegotiate(t, addr)
@@ -293,6 +353,9 @@ func TestOversizedFrameDropsOnlyThatConnection(t *testing.T) {
 
 // TestMalformedFrameDropsOnlyThatConnection：畸形帧只断当前连接，
 // 不影响别的客户端（panic 逃逸会让整个进程死掉，那才是发布阻断项）。
+//
+// 判据是 malformedFrameDrops 计数（确定性事件）：5 个畸形帧必须
+// 每一个都触发致命协议错误断连，而不是靠客户端读超时去猜。
 func TestMalformedFrameDropsOnlyThatConnection(t *testing.T) {
 	srv := newTestServer(t, nil)
 	addr := serverAddr(t, srv)
@@ -312,11 +375,13 @@ func TestMalformedFrameDropsOnlyThatConnection(t *testing.T) {
 		{0xFF, 'S', 'M', 'B', 0x72, 0x00, 0x00}, // SMB1 魔数 + 截断
 		append(realNegotiate(t)[:20], 0xFF, 0xFF, 0xFF, 0xFF), // NextCommand 撒谎
 	}
+	badBase := malformedFrameDrops.Load()
 	for i, b := range bad {
 		c := dial(t, addr)
 		writeFrame(t, c, b)
-		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
-		// 断连或回一条错误响应都可以接受，唯独不能是超时（挂死）。
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		// 断连或回一条错误响应都可以接受，唯独不能是挂死；
+		// 「确实断连」由下面的计数断言兜底，这里只排挂死。
 		if _, err := c.Read(make([]byte, 512)); err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
@@ -324,6 +389,10 @@ func TestMalformedFrameDropsOnlyThatConnection(t *testing.T) {
 			}
 		}
 	}
+	// 确定性断言 + 反向对照：5 个畸形帧必须恰好触发 5 次协议错误断连。
+	waitFor(t, 10*time.Second, "畸形帧断连计数 +5", func() bool {
+		return malformedFrameDrops.Load()-badBase == int64(len(bad))
+	})
 
 	// 正常连接不受影响，服务端也还能接新连接。
 	writeFrame(t, good, realNegotiate(t))
@@ -334,20 +403,37 @@ func TestMalformedFrameDropsOnlyThatConnection(t *testing.T) {
 }
 
 // TestIdleTimeoutClosesConnection：读超时必须真的挂在 socket 上。
+//
+// 判据是 idleTimeoutCloses 计数（确定性事件），并反证它没有被
+// 误分类成握手超时；原「断开耗时 ≤ 2s」的计时门禁已降级为 t.Logf。
 func TestIdleTimeoutClosesConnection(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) { o.IdleTimeout = 150 * time.Millisecond })
 	addr := serverAddr(t, srv)
 
+	idleBase := idleTimeoutCloses.Load()
+	hsBase := handshakeTimeoutCloses.Load()
+
 	c := dial(t, addr)
-	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	start := time.Now()
 	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 		t.Fatalf("空闲连接应当被超时断开（期望 EOF），实际 err=%v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("断开耗时 %v，超时没有生效", elapsed)
+	elapsed := time.Since(start)
+
+	// 确定性断言 + 反向对照：空闲期限到期断连恰好发生一次（计数 >0）。
+	waitFor(t, 5*time.Second, "空闲超时断连计数 +1", func() bool {
+		return idleTimeoutCloses.Load()-idleBase == 1
+	})
+	// 本连接未认证，若期限来源分类有错会记到握手头上 —— 用 0 断言钉死。
+	if got := handshakeTimeoutCloses.Load() - hsBase; got != 0 {
+		t.Fatalf("空闲断连被误分类为握手超时 %d 次", got)
 	}
-	waitConnCount(t, srv, 0, 2*time.Second)
+	waitConnCount(t, srv, 0, 5*time.Second)
+
+	// 诊断用，勿改回计时门禁：断开耗时属墙钟测量，共享 runner 一抖就假红，
+	// 判据已换成上面的 idleTimeoutCloses 计数。
+	t.Logf("诊断用，勿改回计时门禁：空闲 150ms 断开耗时 %v", elapsed)
 }
 
 // TestSlowlorisCannotHoldAllSlots 覆盖一个真实的拒绝服务向量：
@@ -359,6 +445,9 @@ func TestIdleTimeoutClosesConnection(t *testing.T) {
 // 这里把 HandshakeTimeout 设成 150ms、并发上限设成 2，
 // 然后用 2 条一言不发的连接占满槽位：握手超时到期后槽位必须自动释放，
 // 正常客户端要能重新连上。
+//
+// 判据是 handshakeTimeoutCloses 计数（确定性事件）+ 连接数归零，
+// 并用 idleTimeoutCloses == 0 反证未认证连接没有吃空闲超时。
 func TestSlowlorisCannotHoldAllSlots(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) {
 		o.MaxConnections = 2
@@ -368,20 +457,31 @@ func TestSlowlorisCannotHoldAllSlots(t *testing.T) {
 	})
 	addr := serverAddr(t, srv)
 
+	hsBase := handshakeTimeoutCloses.Load()
+	idleBase := idleTimeoutCloses.Load()
+
 	for range 2 {
 		dial(t, addr) // 建链后一个字节都不发
 	}
-	waitConnCount(t, srv, 2, 2*time.Second)
+	waitConnCount(t, srv, 2, 5*time.Second)
 
-	// 握手超时到期后槽位应当被释放。
-	waitConnCount(t, srv, 0, 3*time.Second)
+	// 确定性断言 + 反向对照：两条一言不发的连接都必须由**握手绝对期限**清掉
+	//（计数 >0，且恰好 +2 —— 不是被别的路径断开的）。
+	waitFor(t, 5*time.Second, "握手超时断连计数 +2", func() bool {
+		return handshakeTimeoutCloses.Load()-hsBase == 2
+	})
+	// 计数只证「事件发生过」，这里补证槽位状态真的被回收了。
+	waitConnCount(t, srv, 0, 5*time.Second)
+	if got := idleTimeoutCloses.Load() - idleBase; got != 0 {
+		t.Fatalf("未认证连接不应由空闲超时清掉，误分类 %d 次", got)
+	}
 
 	// 正常客户端能连上并完成协商。
 	mustNegotiate(t, addr)
 }
 
 // TestSlowlorisPartialFrameCannotHoldSlot：只发半个帧头（经典 slowloris）
-// 同样必须在握手超时内被清掉。
+// 同样必须在握手超时内被清掉。判据同上，换成 handshakeTimeoutCloses 计数。
 func TestSlowlorisPartialFrameCannotHoldSlot(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) {
 		o.HandshakeTimeout = 150 * time.Millisecond
@@ -389,21 +489,36 @@ func TestSlowlorisPartialFrameCannotHoldSlot(t *testing.T) {
 	})
 	addr := serverAddr(t, srv)
 
+	hsBase := handshakeTimeoutCloses.Load()
+	idleBase := idleTimeoutCloses.Load()
+
 	c := dial(t, addr)
 	// 声明一个 1024 字节的帧，只发 2 字节头就装死。
 	if _, err := c.Write([]byte{0x00, 0x00}); err != nil {
 		t.Fatalf("写半个帧头失败: %v", err)
 	}
-	waitConnCount(t, srv, 1, 2*time.Second)
-	waitConnCount(t, srv, 0, 3*time.Second)
+	waitConnCount(t, srv, 1, 5*time.Second)
+	// 确定性断言 + 反向对照：半帧头连接必须由握手绝对期限清掉（计数 >0）。
+	waitFor(t, 5*time.Second, "握手超时断连计数 +1", func() bool {
+		return handshakeTimeoutCloses.Load()-hsBase == 1
+	})
+	waitConnCount(t, srv, 0, 5*time.Second)
+	if got := idleTimeoutCloses.Load() - idleBase; got != 0 {
+		t.Fatalf("未认证连接不应由空闲超时清掉，误分类 %d 次", got)
+	}
 }
 
 // TestEstablishedSessionKeepsLongIdleTimeout：握手超时**只**作用于认证之前。
 // 已认证会话（macOS Finder 挂载后可能长时间不发请求）必须继续享受长空闲超时，
 // 否则修 slowloris 会把正常客户端一起踢掉。
+//
+// HandshakeTimeout 从旧写法的 150ms 放宽到 1s，理由：握手硬期限在 accept
+// 时武装，而「已认证」要等下一帧被读过才被观察到位；高负载下第二轮
+// ReadFrame 入口可能已越过旧期限导致好连接被误杀（正是本用例的假红源）。
+// 1s 给两轮本地回环往返留足负载余量，仍远小于生产默认值 30s。
 func TestEstablishedSessionKeepsLongIdleTimeout(t *testing.T) {
 	srv := newTestServer(t, func(o *Options) {
-		o.HandshakeTimeout = 150 * time.Millisecond
+		o.HandshakeTimeout = time.Second
 		o.IdleTimeout = 5 * time.Second
 	})
 	addr := serverAddr(t, srv)
@@ -416,6 +531,14 @@ func TestEstablishedSessionKeepsLongIdleTimeout(t *testing.T) {
 	// 伪造一个已认证会话：真正的 NTLM 握手由 auth 包的测试覆盖，
 	// 这里只关心「连接是否还在被握手超时盯着」。
 	establishSessionOn(t, onlyConnection(t, srv))
+
+	// 基线必须在此刻快照：读循环此刻阻塞在 ReadFrame 上，
+	// 不可能已经观察到会话；而下一帧的「期限解除」计数发生在
+	// 写响应之前 —— 等客户端读到响应再快照就把它算进基线了。
+	clearsBase := handshakeDeadlineClears.Load()
+	hsBase := handshakeTimeoutCloses.Load()
+	idleBase := idleTimeoutCloses.Load()
+
 	// 再发一帧，逼读循环走完一轮 —— 期限是在每次 ReadFrame 入口重新装载的，
 	// 只有走过一轮读循环才会观察到"已认证"并把握手死线摘掉。
 	// 这也正是真实路径的样子（SESSION_SETUP 响应写出后回到 ReadFrame）。
@@ -424,10 +547,29 @@ func TestEstablishedSessionKeepsLongIdleTimeout(t *testing.T) {
 		t.Fatalf("认证后再次交互失败: %v", err)
 	}
 
-	// 远超握手超时，但远小于空闲超时 —— 连接必须还活着。
-	time.Sleep(600 * time.Millisecond)
+	// 确定性观察点：读循环必须已经走过一轮、真的摘掉了握手死线
+	// （handshakeDeadlineClears 恰好 +1）。旧写法直接开始睡，
+	// 观察是否发生全凭墙钟 —— 那是竞态来源。
+	waitFor(t, 5*time.Second, "握手期限解除计数 +1", func() bool {
+		return handshakeDeadlineClears.Load()-clearsBase == 1
+	})
+
+	// 远超握手超时（1s），远小于空闲超时（5s）—— 连接必须还活着。
+	//
+	// 这里必须保留墙钟等待（AGENTS.md §3 允许的例外）：要证的是
+	// 「定时器没有在 T_accept+HT 触发」，负时间性质无法只用事件计数表达，
+	// 只能等到过期时刻之后再检查。断言本身已被计数器钉死：
+	// 下面三个 delta==0 分别证明握手期限、空闲期限都没触发过误杀断连，
+	// 墙钟只负责把「过期时刻已过去」这件事坐实。
+	time.Sleep(1500 * time.Millisecond)
 	if got := srv.ConnectionCount(); got != 1 {
 		t.Fatalf("已认证连接被握手超时误杀：连接数 = %d", got)
+	}
+	if got := handshakeTimeoutCloses.Load() - hsBase; got != 0 {
+		t.Fatalf("已认证连接触发握手超时 %d 次（期限应已解除）", got)
+	}
+	if got := idleTimeoutCloses.Load() - idleBase; got != 0 {
+		t.Fatalf("已认证连接在远小于空闲超时的窗口内触发空闲超时 %d 次", got)
 	}
 	writeFrame(t, c, realNegotiate(t))
 	if _, err := readFrame(t, c, 3*time.Second); err != nil {
