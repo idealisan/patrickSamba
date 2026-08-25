@@ -189,6 +189,51 @@ func putBE32(b []byte, v uint32) {
 
 // ---------------------------------------------------------------- 枚举
 
+// RemoveStream 实现 StreamRemover：只删 base 对象上的这一个流，
+// 基础对象与其余流一概不动。
+//
+// 这是流句柄 delete-on-close 的正确粒度（Samba streams_xattr_unlinkat()
+// 语义，见 StreamRemover 接口注释）。三种流的存储形态不同，
+// 删除动作由 removeStreamStorage 统一分派。
+func (l *LocalFS) RemoveStream(base, stream string) error {
+	if l.cfg.ReadOnly {
+		return ErrReadOnly
+	}
+	if stream == "" {
+		// 主数据流不是「一个流」，它就是文件本身 —— 走 FileSystem.Remove。
+		return ErrInvalidPath
+	}
+	host, err := l.res.Resolve(base)
+	if err != nil {
+		return err
+	}
+	return l.removeStreamStorage(host, canonicalStreamName(stream))
+}
+
+// removeStreamStorage 删掉一个流的底层存储，按 openStream 的三种形态分派。
+// 流本来就不存在时返回 nil（幂等，见 StreamRemover 接口注释）。
+func (l *LocalFS) removeStreamStorage(host, slot string) error {
+	switch slot {
+	case StreamAFPInfo:
+		// AFP_AfpInfo 落 netatalk metadata xattr：删 xattr 即删流。
+		if err := l.xattrAt(host, nil).Remove(netatalkMetaXattr); err != nil && err != ErrNotFound {
+			return err
+		}
+		return nil
+	case StreamAFPResource:
+		// AFP_Resource 落 ._ 旁路文件：整个 ._ 文件就是这个流的容器
+		// （FinderInfo 在另一个 xattr 上，不受影响）。
+		if err := os.Remove(dotUnderscoreName(host)); err != nil && !os.IsNotExist(err) {
+			return mapError(err)
+		}
+		return nil
+	}
+	if err := validateDosStreamName(slot); err != nil {
+		return err
+	}
+	return l.removeDosStream(host, slot)
+}
+
 // streamsOf 列出一个对象的所有流，供 FileStreamInformation 使用。
 //
 // 必须与 openStream 的可用范围**严格一致**：列出一个打不开的流，
