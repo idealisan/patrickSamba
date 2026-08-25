@@ -31,15 +31,15 @@ func handleRead(ctx *Context) error {
 	if req.Length > ctx.Conn.MaxReadSize {
 		return status.InvalidParameter
 	}
-	if req.Length == 0 {
-		// 读 0 字节：MS-SMB2 要求回 STATUS_END_OF_FILE 而不是空成功响应。
-		return status.EndOfFile
-	}
 
 	if open.IsPipe() {
 		return readPipe(ctx, open, req)
 	}
 
+	// 目录与访问权检查必须先于一切「按长度/内容判定」的状态 —— 零长度读
+	// 也不例外。此前 `Length==0 → END_OF_FILE` 排在它们前面，无权句柄或
+	// 目录句柄读 0 字节会拿到 END_OF_FILE，等于向客户端泄露「先看长度后
+	// 鉴权」的实现细节（bh4-A#3）。
 	if open.IsDir {
 		return status.InvalidDeviceRequest
 	}
@@ -69,11 +69,15 @@ func handleRead(ctx *Context) error {
 	if rerr != nil && !errors.Is(rerr, io.EOF) {
 		return status.FromVFSError(rerr)
 	}
-	if n == 0 {
-		// 读到文件尾一个字节都没读到：MS-SMB2 §3.3.5.12 要求 END_OF_FILE。
+	// 读到文件尾一个字节都没读到：仅当客户端确实请求了至少 1 字节时才是
+	// END_OF_FILE（offset ≥ EOF）。length==0 的空读是合法探测，应当成功回
+	// 0 字节 —— Samba smb2_read.c:404-407 仅 nread==0 && in_length!=0 才回
+	// END_OF_FILE，torture read.c:92-97（Windows 归纳）同。
+	if n == 0 && req.Length != 0 {
 		return status.EndOfFile
 	}
 	// MinimumCount 是客户端声明的「少于这个数就别回了」。
+	// length=0,min_count>0 时 n==0 < min_count → END_OF_FILE（torture 同）。
 	if req.MinimumCount > 0 && uint32(n) < req.MinimumCount {
 		return status.EndOfFile
 	}
