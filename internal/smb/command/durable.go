@@ -424,10 +424,15 @@ func (r *durableTable) reconnect(session *Session, tree *Tree, intent *wire.Dura
 // —— 一个「看起来成功、实际是死的」句柄，比直接失败更难排查。
 func (s *Session) rebindOpen(o *Open, t *Tree) {
 	s.mu.Lock()
+	// o.Tree 的写必须持 o.mu：Open.close() 的锁释放路径（open.go）会在
+	// 无 s.mu 的上下文里快照读 o.Tree（CI race 门禁抓到的数据竞争）。
+	// 锁序恒为 s.mu → o.mu，与既有用法一致。
+	o.mu.Lock()
 	o.Session = s
 	if t != nil {
 		o.Tree = t
 	}
+	o.mu.Unlock()
 	s.opens[o.Volatile] = o
 	// 新会话的 Volatile 计数器从 0 起，若不抬高，它后续分配到 o.Volatile 时
 	// 会**覆盖掉刚认领回来的句柄**（map 同键写入，静默丢失）。
