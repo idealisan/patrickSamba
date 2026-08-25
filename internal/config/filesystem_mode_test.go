@@ -72,10 +72,10 @@ func TestFilesystemModeRejectsInvalid(t *testing.T) {
 	}
 }
 
-// TestFilesystemModeNativeRejectedWithRemovalNotice：写已移除的 "native"
+// TestNativeModeRejectedWithRemovalNotice：写已移除的 "native"
 // 必须报错，且报错要带上移除说明与替代取值 —— 只说「非法取值」会让人去
 // 检查拼写，意识不到这一档已经没了、配置必须改。
-func TestFilesystemModeNativeRejectedWithRemovalNotice(t *testing.T) {
+func TestNativeModeRejectedWithRemovalNotice(t *testing.T) {
 	c := baseConfig(t)
 	c.FilesystemMode = "native"
 	err := Validate(c)

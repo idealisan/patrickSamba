@@ -5,6 +5,26 @@
 
 ---
 
+## Unreleased（main，v0.5.0 开发中）
+
+> 写作纪律同前：只写已合入 `main` 的内容；本节条目随对应 PR 合入逐一落账。
+
+- **移除 `filesystem_mode` 的 `native` 档，配置收敛为两态：`auto`（默认）/ `portable`**。
+  移除原因：`native` 的契约是「全部能力强制走原生实现，缺一项启动即报错」，但每个平台都至少有
+  一项能力被源码硬编码为没有原生实现（linux/darwin 的 DOS 属性位、darwin 另缺稀疏文件、
+  windows 缺 xattr、其余平台六项全无），该契约在任何平台上都无法满足——三个平台恒定启动失败
+  （v0.3.0/v0.4.0 已知问题），`native` 从未有过可用场景。项目所有者 2026-08-25 拍板整档删除。
+  - 行为变化：旧配置写 `filesystem_mode: native` 会在配置校验/启动时失败，错误信息说明该档已在
+    v0.5 开发版移除及原因，并建议改用 `auto` 或 `portable`。未显式写 `native` 的用户不受影响；
+    `auto` 本就逐项优先选原生，「钉死原生路径」的测试需求由 auto + 生效矩阵断言覆盖。
+  - 同步改动：`configs/example.yaml` 与 AGENTS.md §1.2/§5 P7 的取值表改为两态并记录移除缘由。
+  - 证据强度分档：单测级反向对照（`ParseMode("native")` 必须报错且文案含替代取值 auto/portable；
+    `TestNoModeForcesAllNative` 对全部合法取值断言「探测全失败也必须成功落 builtin」，防止
+    「全原生强制」语义以任何形式回归）；linux/amd64、linux/arm64、darwin/arm64、windows/amd64、
+    freebsd/amd64 五个目标交叉编译 vet 通过。真机行为验证未做（本档此前也从未在真机可用过）。
+
+---
+
 ## v0.4.0（2026-08-25，正式版）
 
 > 写作纪律同 v0.2.0/v0.3.0：功能没合入 `main` 之前不写、打折写在句子主干里、
