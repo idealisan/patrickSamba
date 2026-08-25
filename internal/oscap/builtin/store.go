@@ -386,6 +386,174 @@ type kvPair struct {
 	Val []byte
 }
 
+// allBuckets 是**按路径记账**的全部 bucket（落盘格式的一部分，与上面的
+// 单桶常量同步维护）。rename/remove 的元数据迁移必须扫全这里：
+// 漏掉任何一个桶就是一条「改名后属性凭空消失/串到别人身上」的 bug。
+var allBuckets = [...][]byte{
+	bucketXattr, bucketHoles, bucketStream, bucketFileID, bucketTimes, bucketDOS,
+}
+
+// keyRanges 是一个路径在库内的全部键边界：
+//   - exact：本对象的 obj 键（btime/dosattr/holes/fileid）；
+//   - subPre（pathKey+NUL）：本对象具名子项的前缀（xattr / stream）；
+//   - childPre（pathKey+"/"）：整棵子树的前缀（目录改名要带走全部后代）。
+//
+// 两个前缀的边界字符不同（NUL 与 '/'），这正是 keySep 注释里
+// 「前缀扫描不会串到相邻对象」的兑现处："a/f.txt" 与 "a/f.txt.bak"
+// 共享字符串前缀但路径不同，childPre 的 '/' 边界把它们分开。
+type keyRanges struct {
+	exact    []byte
+	subPre   []byte
+	childPre []byte
+}
+
+func newKeyRanges(key string) keyRanges {
+	r := keyRanges{exact: []byte(key)}
+	r.subPre = append(r.subPre, key...)
+	r.subPre = append(r.subPre, keySep)
+	r.childPre = append(r.childPre, key...)
+	r.childPre = append(r.childPre, '/')
+	return r
+}
+
+// lowerBound 返回扫描本范围的起始键。exact 是另外两个前缀的真前缀，
+// 字节序必然最小，Seek 到它即可覆盖全部三个范围。
+func (r keyRanges) lowerBound() []byte { return r.exact }
+
+// within 报告游标是否还可能命中本范围。三个范围都以 exact 的字节开头，
+// 所以它就是安全的停机条件（兄弟路径如 "a/f.txt.bak" 也会通过本检查，
+// 由 hits 精确排除 —— 多扫几条是可接受的浪费，漏扫才是 bug）。
+func (r keyRanges) within(k []byte) bool { return hasPrefix(k, r.exact) }
+
+func (r keyRanges) hits(k []byte) bool {
+	return string(k) == string(r.exact) ||
+		hasPrefix(k, r.subPre) ||
+		hasPrefix(k, r.childPre)
+}
+
+// renameKeys 把 oldPath 名下（含子树与具名子项）的全部记录搬进 newPath，
+// **同一个写事务里**先清掉 newPath 上的陈旧记录再迁入 —— 原子性由 bbolt
+// 事务保证：要么全搬完，要么全没动。
+//
+// 为什么先清目标：replace 改名覆盖了别的文件时，目标路径上留着前任的
+// 记录。若不清理，「迁入」会与「残留」在同一个 pathKey 下拼成一份
+// 谁也不该看到的组合 —— 恰是 B5 要堵的那类跨对象泄漏的反向形态。
+//
+// 值原样搬运不做解码：记录编码归各能力的读写方管，这里只当不透明字节，
+// 迁移永远不会把一条损坏记录变得更坏。
+func (s *store) renameKeys(oldPath, newPath string) error {
+	if s.readOnly || s.db == nil {
+		return oscap.ErrReadOnly
+	}
+	src := newKeyRanges(s.pathKey(oldPath))
+	dst := newKeyRanges(s.pathKey(newPath))
+	if string(src.exact) == string(dst.exact) {
+		return nil // 同名 no-op（大小写折叠等场景）
+	}
+	dsrc := string(src.exact)
+	ddst := string(dst.exact)
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, bn := range allBuckets {
+			b := tx.Bucket(bn)
+			if b == nil {
+				continue
+			}
+			// 收集阶段只读；删写统一放在遍历结束之后，
+			// 避免边遍历边改同一张表。
+			var staleKeys [][]byte
+			collectKeys(b, dst, func(k []byte) {
+				staleKeys = append(staleKeys, append([]byte{}, k...))
+			})
+			type move struct{ from, to, val []byte }
+			var moves []move
+			collectPairs(b, src, func(full, val []byte) {
+				nk := relabel(string(full), dsrc, ddst)
+				moves = append(moves, move{
+					from: append([]byte{}, full...),
+					to:   []byte(nk),
+					val:  append([]byte{}, val...),
+				})
+			})
+			for _, k := range staleKeys {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+			}
+			for _, m := range moves {
+				if err := b.Delete(m.from); err != nil {
+					return err
+				}
+				if err := b.Put(m.to, m.val); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// deleteKeys 删掉 path 名下（含子树与具名子项）的全部记录。幂等：
+// 一条都没有也是成功 —— 调用方刚 os.Remove 完，旁路里可能本来就没账。
+func (s *store) deleteKeys(path string) error {
+	if s.readOnly || s.db == nil {
+		return oscap.ErrReadOnly
+	}
+	rng := newKeyRanges(s.pathKey(path))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, bn := range allBuckets {
+			b := tx.Bucket(bn)
+			if b == nil {
+				continue
+			}
+			var keys [][]byte
+			collectKeys(b, rng, func(k []byte) {
+				keys = append(keys, append([]byte{}, k...))
+			})
+			for _, k := range keys {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// collectKeys 遍历 b 中落在 rng 范围内的键交给 fn。只读，不改表。
+func collectKeys(b *bolt.Bucket, rng keyRanges, fn func(k []byte)) {
+	c := b.Cursor()
+	for k, _ := c.Seek(rng.lowerBound()); k != nil && rng.within(k); k, _ = c.Next() {
+		if rng.hits(k) {
+			fn(k)
+		}
+	}
+}
+
+// collectPairs 同 collectKeys，但把值一并交给 fn。只读，不改表。
+func collectPairs(b *bolt.Bucket, rng keyRanges, fn func(full, val []byte)) {
+	c := b.Cursor()
+	for k, v := c.Seek(rng.lowerBound()); k != nil && rng.within(k); k, v = c.Next() {
+		if rng.hits(k) {
+			fn(k, v)
+		}
+	}
+}
+
+// relabel 把键 full 里开头的 old 路径段换成 new。
+// 三种边界分别对应 exact / subPre / childPre，与 keyRanges 的判定一致。
+func relabel(full, old, new string) string {
+	switch {
+	case full == old:
+		return new
+	case len(full) > len(old) && (full[len(old)] == byte(keySep) || full[len(old)] == '/'):
+		return new + full[len(old):]
+	default:
+		// 不该发生（调用方只会喂命中范围内的键）；保守返回原键，
+		// 宁可少迁一条也不能把别人的键改坏。
+		return full
+	}
+}
+
 // scanPrefix 列出某前缀下的全部记录，按 key 升序（bbolt 游标天然有序）。
 func (s *store) scanPrefix(bucket, prefix []byte) ([]kvPair, error) {
 	if s.db == nil {
