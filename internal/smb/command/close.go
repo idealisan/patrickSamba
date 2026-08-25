@@ -86,15 +86,18 @@ func handleClose(ctx *Context) error {
 	}
 	// vfsOwnsDelete 时底层句柄已在 open.close() 里删过，命令层不再删。
 	delPath, doDelete := open.Path, open.DeleteOnClose() && open.Handle != nil && !open.vfsOwnsDelete
+	// Stream 字段在 close 之后仍然可读（close 只清 Handle/Pipe），
+	// 但这里先取快照更直观：删除对象由「打开时是什么」决定。
+	delStream := open.Stream
 	open.close()
 
 	// delete-on-close 的实际删除必须在句柄关闭之后做
 	// （Windows 上还持有 fd 时删不掉）。
 	if doDelete {
-		if err := ctx.deleteOnClose(delPath); err != nil {
+		if err := ctx.deleteOnClose(delPath, delStream); err != nil {
 			// 删除失败不影响 CLOSE 本身成功 —— 客户端已经认为句柄没了，
 			// 回错误只会让它困惑。记日志即可。
-			ctx.Log.Warn("delete-on-close 删除失败", "path", delPath, "err", err)
+			ctx.Log.Warn("delete-on-close 删除失败", "path", delPath, "stream", delStream, "err", err)
 		}
 	}
 
@@ -104,13 +107,27 @@ func handleClose(ctx *Context) error {
 
 // deleteOnClose 执行 FILE_DELETE_ON_CLOSE / FileDispositionInformation
 // 约定的删除动作。
-func (c *Context) deleteOnClose(path string) error {
+//
+// 粒度按打开的对象定：流句柄（stream != ""）只删那一个流，基础文件不动。
+// Samba 对照：streams_xattr_unlinkat()
+// （source3/modules/vfs_streams_xattr.c:1056-1110）对命名流只清对应 xattr；
+// 对 ADS 句柄设 FileDispositionInformation（MS-FSCC §2.4.11）在 Windows 上
+// 同样只删该流。历史上这里曾一律 fs.Remove(open.Path)，客户端删一个流
+// 会把整个基础文件连带所有流一起删掉。
+func (c *Context) deleteOnClose(path, stream string) error {
 	if err := c.RequireWritable(); err != nil {
 		return err
 	}
 	fs := c.Tree.FS()
 	if fs == nil {
 		return status.NetworkNameDeleted
+	}
+	if stream != "" {
+		sr, ok := fs.(vfs.StreamRemover)
+		if !ok {
+			return status.NotSupported
+		}
+		return sr.RemoveStream(path, stream)
 	}
 	return fs.Remove(path)
 }

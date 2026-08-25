@@ -46,6 +46,11 @@ type streamHandle struct {
 
 	writable bool
 
+	// deleteOnClose 是 CREATE 时的 FILE_DELETE_ON_CLOSE（OpenDeleteOnClose）。
+	// 提交动作在 Close 里做，粒度是**这一个流**而不是基础文件
+	// （Samba streams_xattr_unlinkat() 语义，见 StreamRemover 注释）。
+	deleteOnClose bool
+
 	// 缓冲模式（AfpInfo / 通用 xattr 流）：内存缓冲 + 脏标记。
 	buf   []byte
 	dirty bool
@@ -111,6 +116,7 @@ func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handl
 
 	h := &streamHandle{
 		fs: l, host: host, name: name, slot: slot, kind: kind, writable: writable,
+		deleteOnClose: req.Flags&OpenDeleteOnClose != 0,
 	}
 
 	switch kind {
@@ -564,14 +570,25 @@ func (h *streamHandle) Close() error {
 	}
 	h.closed = true
 
-	err := h.flushLocked()
+	// FILE_DELETE_ON_CLOSE 落在流句柄上：只删这一个流自己的存储，
+	// 基础文件与其余流不动。此时缓冲内容不必再回写 —— 马上就要删了。
+	del := h.deleteOnClose && !h.fs.cfg.ReadOnly
+
+	var err error
+	if del {
+		err = h.fs.removeStreamStorage(h.host, h.slot)
+	} else {
+		err = h.flushLocked()
+	}
 	if h.f != nil {
 		if cerr := h.f.Close(); err == nil {
 			err = mapError(cerr)
 		}
-		// 资源段为空的 ._ 文件是垃圾，删掉 —— 留着会在目录里堆积，
-		// 也会让 macOS 认为每个文件都有资源派生。
-		h.cleanupEmptyResource()
+		if !del {
+			// 资源段为空的 ._ 文件是垃圾，删掉 —— 留着会在目录里堆积，
+			// 也会让 macOS 认为每个文件都有资源派生。
+			h.cleanupEmptyResource()
+		}
 	}
 	return err
 }
