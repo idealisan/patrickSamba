@@ -91,3 +91,12 @@ Go 工具链消失、python3/smbclient 消失、`/root/.codebuddy/.../memory` �
 **会话历史的备份与恢复**见 AGENTS.md §10 与 `scripts/save-history.sh` /
 `scripts/restore-history.sh`。要点：`codebuddy --resume=<uuid>` 可用且不重跑工作，
 但 `codebuddy -c` 是陷阱（接的是最近一次会话，崩溃后往往是新开的空壳）。
+
+**python3 遮蔽会让 impacket 假 FAIL（2026-08-25 实测）**：本容器 `/usr/local/bin/python3`
+排在 PATH 前面且没装 impacket，系统的 `/usr/bin/python3`（3.13）才有
+`python3-impacket`。直接跑 `scripts/acceptance.sh` 会得到 `[FAIL] impacket` +
+`ModuleNotFoundError`，看起来像产品回归，其实只是解释器选错。解法二选一：
+`export PATH=/usr/bin:$PATH` 再跑（acceptance 内部脚本用裸 `python3`）；
+或把脚本的 `python3` 调用改成可被 `SMB_PYTHON` 之类环境变量覆盖。
+另：qa-clients 遗留的测试服务进程会占住 `SMB_PORT` 让 acceptance 拒绝启动
+（harness 有端口预检，会打印占用者 pid）——先 `fuser <port>/tcp` 查明再精确 kill。
