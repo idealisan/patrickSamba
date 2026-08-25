@@ -22,6 +22,59 @@
     `TestNoModeForcesAllNative` 对全部合法取值断言「探测全失败也必须成功落 builtin」，防止
     「全原生强制」语义以任何形式回归）；linux/amd64、linux/arm64、darwin/arm64、windows/amd64、
     freebsd/amd64 五个目标交叉编译 vet 通过。真机行为验证未做（本档此前也从未在真机可用过）。
+- **v0.4.0 性能基线报告入仓（PR #192，merge `0d33643`）**：`test/reports/perf-v040-20260825.md`，
+  七场景 × auto/portable × 加密对比，用第三方纯 Go 客户端（go-smb2 v1.1.0）在容器 loopback 上测得，
+  测试角色产出、未改任何产品代码。报告自述其性质是 **loopback 协议栈基线，不是真实网络吞吐**，
+  只用于相对比较与回归基线，不代表任何真实部署的绝对性能——引用数字时必须带上这个前提。核心数字：
+  单流大文件约 95 MB/s 写 / 200 MB/s 读（SMB 3.1.1 + 签名），16 并发流把聚合读推到约 716 MB/s
+  （p95 延迟同步从 4.6 ms 恶化到 45 ms）；auto 与 portable 在该宿主负载下性能几乎无差（比值
+  0.98×–1.05×）；开 SMB3 加密反而比仅签名快约 1.5×（AES-NI 硬件路径替代 HMAC-SHA256 软件路径）。
+- **B3/B4/B5 元数据三连修（PR #193，merge `2cd1710`）**——对照 Samba 源码排查产出的三个高危缺陷：
+  - B3：CREATE 请求携带的 FileAttributes 此前被整体丢弃（连初始 ARCHIVE 位都不落库）；现按 Samba
+    语义消费——剥 DIRECTORY、叠 ARCHIVE 后落地。
+  - B4：新建对象此前从不把创建时间写进旁路库（portable 模式与无 birthtime 的文件系统上 btime
+    永不持久，代码注释声称的行为并不存在）；现在真正落库，native 有 birthtime 时跳过旁路。
+  - B5：rename/remove/DELETE_ON_CLOSE 此前不迁移不清 caps 旁路账本，路径复用会继承陌生文件的
+    创建时间与 DOS 属性位（跨对象元数据泄漏）。oscap 新增 MetadataMigration port
+    （RenameMetadata/DeleteMetadata 单事务前缀迁移），vfs 在三条删除/改名路径挂接。
+  - 可见行为：改名/删除后重建的同名对象不再带前任的创建时间与 DOS 属性；新建文件的属性位与
+    btime 首次真实生效。证据档位：单测级（16 个用例先红后绿）+ 四门禁绿，协议级实测未做。
+- **B6 流删除粒度修复 + 流创建语义对齐 Samba（PR #195，merge `a75a643`）**：
+  - 高危：SET_INFO(FileDispositionInformation) 删一个备用数据流（ADS）此前会把整个基础文件连同
+    全部流一起删掉（close.go 一律按不含流名的基础路径 Remove）；FILE_DELETE_ON_CLOSE 打开流时
+    标志静默无效。现按打开时携带的流名分派删除粒度（新增 `vfs.StreamRemover.RemoveStream`，
+    Samba streams_xattr_unlinkat 语义）：删流只删该流；DELETE_ON_CLOSE 对流真正生效。
+  - 中危×2：OPEN_IF / OVERWRITE_IF 打开「基础文件不存在」的流时先建基础文件再开流
+    （Samba open.c:6508 语义）；SUPERSEDE / OVERWRITE 打开时清掉目标残留的全部 ADS
+    （clear_ads / delete_all_streams 语义）。
+  - 可见行为：删流从「丢整个文件」变为只丢该流（数据丢失级缺陷修复）；SUPERSEDE/OVERWRITE
+    不再保留历史残留 ADS。证据档位：单测级 + 四门禁绿，协议级实测未做。
+- **B1/B2 字节范围锁强制与全路径释放，附两项读写语义修正（PR #196，merge `1156053`）**：
+  - B1（高危）：字节范围锁此前对 READ/WRITE 完全无阻挡——LOCK 命令只在记账，IO 入口根本不查表，
+    A 句柄独占锁住的区间 B 句柄照常穿透读写。现两个 IO 入口接入 strict locking 检查（对齐 Samba
+    STRICT_LOCK_CHECK）：读只被外句柄的独占锁阻挡、写被任何重叠的外句柄锁阻挡、豁免单位是句柄
+    （自己的锁不妨碍自己），冲突回 STATUS_FILE_LOCK_CONFLICT。**行为变化提示：此前依赖「锁不生效」
+    旧行为的应用（无论有意无意绕开了锁互斥）从本版起会开始收到 FILE_LOCK_CONFLICT** ——这是把
+    Excel/SQLite 类互斥场景修对的必然代价。
+  - B2（高危）：锁释放此前只挂在 CLOSE 命令路径，TREE_DISCONNECT / LOGOFF / 连接断开 /
+    durable 过期回收全不释放，客户端异常退出后锁一直泄漏到服务进程重启。现把释放下沉进
+    `Open.close()`（所有关闭路径的唯一汇合点）；durable 等待重连期间保留锁，回收或显式关闭才释放。
+  - 零长度 READ 改判成功回 0 字节：此前 `Length==0` 无条件回 END_OF_FILE；现按 Samba/Windows 归纳
+    改为合法探测返回成功（length=0 且 min_count>0 的边界仍回 END_OF_FILE），同时把目录/权限检查
+    提前到长度判定之前（堵住无权句柄借零长读拿到不同状态码的信息泄露）。
+    **行为变化提示：此前把 END_OF_FILE 当成功处理的客户端需要适配 SUCCESS + 0 字节的新返回**；
+    offset ≥ EOF 且请求非零字节时的 END_OF_FILE 行为不变（有回归钉子）。
+  - 对 FILE_ATTRIBUTE_READONLY 目标的 WRITE 从「照常写入」改为拒绝（STATUS_ACCESS_DENIED，
+    按打开时的属性快照判，与 Windows「打开时定生死」一致；delete/setinfo 面不在本轮范围）。
+  - 证据档位：单测级（11 个用例先红后绿）+ 四门禁绿；真机多客户端互斥场景未测。
+  - 合入后两笔热修直接落 main（如实记录，也是门禁有效的实证）：gofmt 门禁拦下 #196 带来的
+    `lock_disconnect_test.go` 格式红点（热修 `d067ede`）；race 门禁（`CGO_ENABLED=1 go test -race`）
+    拦下 Open.close 锁释放与 durable 重连改绑之间的数据竞争，以 o.mu 配对修复（热修 `5550015`）。
+- **pm 进度板与 bug 排查成果入库（PR #194，merge `434a53e`）**：新增 `docs/status-v050.md`
+  （v0.5 修复波进度板：B1–B6 分派表、时间线、修复分支盘点与待决事项）与
+  `docs/bughunt-20260825/findings-bh{3,4,5}.md`（三份对照 Samba 的排查报告，92/122/128 行共 342 行，
+  自 `/tmp/opencode` 原样抢救拷贝入库；bh1/bh2 未找到对应文件，已在板内列为待决事项）。
+  纯文档入库，二进制行为不受影响。
 
 ---
 
@@ -349,6 +402,14 @@
        按「有没有 BEGIN」去分类就永远看不见它，而 grep 照样会把它捞出来。）
      （初版写「三处」，漏了 AGENTS.md —— 漏的那处恰好是 oscap-wire 点名要改的。
        所以「一套 N 处」这个数字本身也要核，别照抄。） -->
+> **⚠️ 更新注记（2026-08-25 补记，v0.5 开发版起口径）**：`filesystem_mode` 已收敛为两态
+> `auto` / `portable`，`native` 整档移除（PR #191，见顶部 Unreleased 条目）。下方正文写作于
+> 三态时代：其中「三档」的表述、「`native` 强制全走原生（某项不支持即启动报错、不降级）」，以及
+> 两条 ⚠️（native 档恒定启动失败、报错文案归因有误）均已随档位整档移除而失去当前性——按发布时点
+> 状态原样保留作历史，请勿当作现状；当前口径以 AGENTS.md §1.2 的两态表为准。四处同步进度：
+> configs/example.yaml 与 AGENTS.md §1.2/§5 P7 已随 #191 改为两态；README 的对应陈述截至本注记
+> 写入时仍为旧口径（README 不归本文件管辖，此处仅记录事实快照）。
+
 **已接线 6 项 / 共 6 项**（v0.3.0 起全部接进 `internal/vfs` 数据路径；v0.2.0 时仅 2/6，
 见下方「历史」段）。下面判据**命令可原样粘贴复跑**，不依赖任何时间戳：
 
