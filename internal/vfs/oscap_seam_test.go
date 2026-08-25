@@ -260,10 +260,10 @@ func TestPortableUsesBuiltinMatrix(t *testing.T) {
 // native 档曾承诺「缺一项原生实现就启动报错」，但每个平台都至少有一项能力
 // 没有原生实现，该契约在任何平台上都无法满足（v0.4 及以前三平台恒定启动失败），
 // 因此整档移除。这条用例防止两条退化路径：
-// 1) ParseMode 把 "native" 静默映射到某个现存档 —— 用户以为在跑 native，
-//    实际行为无人知道；
-// 2) NewLocalFS 对未知 Mode 悄悄按默认档跑 —— 与「不静默纠正」的严格解析
-//    姿态相悖。
+//  1. ParseMode 把 "native" 静默映射到某个现存档 —— 用户以为在跑 native，
+//     实际行为无人知道；
+//  2. NewLocalFS 对未知 Mode 悄悄按默认档跑 —— 与「不静默纠正」的严格解析
+//     姿态相悖。
 func TestRemovedNativeModeUnreachable(t *testing.T) {
 	_, err := oscap.ParseMode("native")
 	if err == nil {
