@@ -29,10 +29,17 @@
 
 | 分支 | Owner | 任务 | 备注 |
 |---|---|---|---|
-| `vfs/oscap-robustness` | vfs | M1 / OI-1（builtin bbolt 跨进程锁修复） | worktree 内带一份**上个会话遗留的未提交半成品 InstanceID 改动**，正在续写 |
-| `qa/v040-ci-hardening` | qa | A1（windows CI 修复）+ A3（acceptance.sh harness 防御） | 对应 §3 的 M3 与 M1 的 A3 部分 |
-| `server/v040-deflake` | server | B1（时序测试计数化，OI-2 / M2） | — |
-| `pm/v040-board-merge` | pm | 本进度板合入分支（基于 `origin/pm/v0.4.0-board` = `6ec7383`） | 待 team-lead 经 CNB API 建 PR 合入 main |
+| `vfs/oscap-robustness` | vfs | M1 / OI-1（builtin bbolt 跨进程锁修复） | ✅ 已完成并合入（PR #183 @ b1dc47e，15:51） |
+| `qa/v040-ci-hardening` | qa | A1（windows CI 修复）+ A3（acceptance.sh harness 防御） | ✅ 已完成并合入（PR #184 @ 9ce47c6，15:51）；本机全量 acceptance 三客户端真跑绿 |
+| `server/v040-deflake` | server | B1（时序测试计数化，OI-2 / M2） | ✅ 已完成并合入（PR #185 @ 1e9641c，15:51）；8/8 变异反向对照变红 |
+| `pm/v040-board-merge` | pm | 本进度板合入分支（基于 `origin/pm/v0.4.0-board` = `6ec7383`） | ✅ 已合入（PR #182，15:51） |
+
+### 收敛结果（2026-08-25 16:05 更新，team-lead 记录）
+
+- **六个 PR 合入 main**：#182（本板）、#183（M1/A2）、#184（A1+A3）、#185（B1）、#186（v0.3.0 三客户端交叉验证基线报告，`test/reports/client-matrix-v030-20260825.md`）、#176+#187（metadata_path 全平台校验与注释口径）。合并后 main = `34f22d9`。
+- **六个 v0.2.0 时代遗留开放 PR 关闭留档**（分支未删）：#177/#179/#180/#181/#174/#157，理由见各 PR 评论；其中 #157（push 门禁只限 main）思路有效、待基于现行 .cnb.yml 重开。
+- **合并后 main 全套门禁实测绿**（16:04）：build/vet/test 全过；check-test-compile（四平台×全 tag 含 _test.go）rc=0；check-constraints rc=0；portable-mode rc=0；**acceptance.sh rc=0**——smbclient/impacket/go-smb2 三客户端 + dialects/signing/encryption/readonly/authfail/guest 全 PASS，mount.cifs 按环境限制 SKIP。OI-1 多进程场景即此验收的一部分，黑盒确认已修复。
+- **待办移交**：M4/M5 仍 TODO（区域计划未产出）；A4 必需门禁的镜像仓分支保护是 repo-owner 动作；打不打 v0.4.0 tag 由项目所有者拍板。
 
 ---
 
@@ -116,9 +123,9 @@ CNB），并完成认证安全审计与 Apple 扩展的真机/协议级验证收
 ### Must（发布阻塞）
 | # | 条目 | Owner | 来源 (A/B) | 状态 | 验收准则（引用 plan） |
 |---|---|---|---|---|---|
-| M1 | 修复 builtin bbolt 跨进程锁冲突（OI-1）：产品侧 A2 + harness 侧 A3 防御 | vfs/oscap + qa | A2, A3 | IN-PROGRESS（2026-08-25：A2 侧 owner vfs @ `vfs/oscap-robustness`，续写上会话 InstanceID 半成品；A3 侧 owner qa @ `qa/v040-ci-hardening`） | A2：「`acceptance.sh` smbclient case passes on a single share dir with 3 server processes; add a regression test that starts ≥2 servers on one share.」A3：「harness runs green even if a future product change re-introduces shared paths.」 |
-| M2 | 收敛 server 时序测试抖动（OI-2）：产品计数化 B1 + 隔离/重试 A5 | server + qa | B1, A5 | IN-PROGRESS（2026-08-25：B1 侧 owner server @ `server/v040-deflake`；A5 隔离/重试待协同 qa） | B1：「the timing test is green under the local false-red recipe … and the `server-timing` job can become required.」A5：「`unit` is green on shared runners regardless of timing noise.」 |
-| M3 | 修复 GitHub Actions `windows-latest` 单测（OI-3） | qa | A1 | IN-PROGRESS（2026-08-25：owner qa @ `qa/v040-ci-hardening`） | A1：「`windows-latest` unit job goes green on a push.」 |
+| M1 | 修复 builtin bbolt 跨进程锁冲突（OI-1）：产品侧 A2 + harness 侧 A3 防御 | vfs/oscap + qa | A2, A3 | **DONE（2026-08-25 16:00）**：PR #183（A2，`vfs/oscap-robustness` @ b1dc47e）+ PR #184（A3，`qa/v040-ci-hardening`）均已合入 main。验收证据：helper-process 多进程回归测试（变异体 go test -overlay 反向对照 3/3 变红）；合并后 main 上 `acceptance.sh` 全量重跑 rc=0（16:04，三客户端全 PASS——即 A2 准则「单 share 目录 3 server 进程」的黑盒确认）。另：#176（metadata_path 全平台校验）、#187（字段注释口径同步）已随收敛一并合入 | A2：「`acceptance.sh` smbclient case passes on a single share dir with 3 server processes; add a regression test that starts ≥2 servers on one share.」A3：「harness runs green even if a future product change re-introduces shared paths.」 |
+| M2 | 收敛 server 时序测试抖动（OI-2）：产品计数化 B1 + 隔离/重试 A5 | server + qa | B1, A5 | **DONE（2026-08-25 15:51 合入）**：PR #185（B1，`server/v040-deflake` @ 1e9641c）。8 个 flaky 用例全部计数化，overlay 变异 8/8 变红，8 忙循环+GOGC=5 高负载 `-count=12` 全绿；**无需 -skip 隔离**（第 9 个 TestPathLookupScaling 已由 PR #149 在 vfs 修复），故 A5 无需单独落地 | B1：「the timing test is green under the local false-red recipe … and the `server-timing` job can become required.」A5：「`unit` is green on shared runners regardless of timing noise.」 |
+| M3 | 修复 GitHub Actions `windows-latest` 单测（OI-3） | qa | A1 | **代码侧 DONE（2026-08-25 15:51 合入）**：PR #184 顶层 `defaults: run: shell: bash` + 移除内联前缀。⚠️ runner 真机验证待镜像仓下次 GA run 后回填（本容器无法跑 Windows）——在此之前按「只交叉编译过」档对待 | A1：「`windows-latest` unit job goes green on a push.」 |
 | M4 | 认证安全审计（NTLMv2 校验 / 常量时间比较 / 日志不落口令） | auth | auth-security 区域计划（未产出） | TODO（阻塞于区域计划） | 验收准则待 auth-security 区域计划回填 |
 | M5 | Apple 扩展协议级/真机验证收尾，口径按证据强度分档 | mdns/apple | apple-tm 区域计划（未产出） | TODO（阻塞于区域计划） | 验收准则待 apple-tm 区域计划回填（见 OD-3） |
 
