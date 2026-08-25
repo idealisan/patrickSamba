@@ -258,8 +258,14 @@ func (o *Open) close() {
 	// 与 CLOSE handler（close.go）里的显式 releaseAll 构成**双保险**：
 	// releaseAll 幂等，两处都调无害；close.go 那处刻意保持原样不动。
 	// 必须在 o.mu 之外调用（releaseAll 自带表锁，理由同上）。
-	if o.Tree != nil && o.Tree.Share != nil {
-		o.Tree.Share.locks.releaseAll(o.Path, o)
+	//
+	// o.Tree 的读取走 o.mu 快照：durable 重连（rebindOpen）会在持 s.mu 时
+	// 并发改绑 o.Tree，裸读是 CI race 门禁抓到的数据竞争。
+	o.mu.Lock()
+	tree := o.Tree
+	o.mu.Unlock()
+	if tree != nil && tree.Share != nil {
+		tree.Share.locks.releaseAll(o.Path, o)
 	}
 
 	if h != nil {
