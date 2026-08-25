@@ -213,7 +213,13 @@ curl -sS -X PUT \
 ### 5.5 评审与合并规则
 
 - PR 由 team-lead 或另一个 agent 评审后合并，**作者不自行合并**。
-- 合并前 CI 必须绿。
+- 合并前 CI 必须绿。**CI 现状是双轨（2026-08-25）**：
+  - **CNB 门禁（`.cnb.yml`，主门禁）**：build/vet/gofmt/测试代码编译校验/C1-C9
+    硬性约束/单测/race/交叉编译/静态链接/portable 实测等 stage，push 与 PR 两条路径同锚点复用；
+  - **GitHub Actions（`.github/workflows/ci.yml`，「更多测试」一层）**：多 OS 单测
+    （ubuntu/macos/windows）、跨平台 `go vet`（含 `_test.go` × 全部 build tag，
+    覆盖 linux/darwin/windows/freebsd）、三客户端真实验收（smbclient / impacket / go-smb2）。
+    该文件在 CNB 上不触发，只在仓库镜像到 github.com 后由 GA 执行。
 - 建完 PR **立刻 DM team-lead 报 PR 号**，不然没人知道它在等评审。
 
 ---
@@ -280,29 +286,23 @@ worktree 保证你不会**物理上**破坏别人，但两个人在各自分支�
 
 ---
 
-## 8. 收尾清理
+## 8. 收尾清理 —— **不做清理，留在原地**
 
-任务结束、分支已合入后：
+> **⚠️ 本节 2026-08-25 起按 AGENTS.md 现行纪律改写（旧版本教人 `worktree remove` /
+> `prune` / `push --delete`，那些做法已被项目所有者明令废止）。**
 
-```sh
-git -C /workspace worktree remove /work/<角色>
-```
+任务结束、分支已合入后：**什么都不做，把 worktree 留在原地。**
 
-如果目录里还有未提交的改动，`remove` 会拒绝 —— **这是保护，不是障碍**。
-先确认那些改动真的不要了，再加 `--force`。
+- `git worktree remove` / `git worktree prune` 会命中 CodeBuddy 的 HIGH 风险确认面板，
+  该面板一旦超时卡死会拖垮整个会话（见 AGENTS.md §7.5）；留着 worktree 除占点磁盘外
+  没有任何害处。
+- 项目所有者 2026-08-10 口述红线：**除非磁盘真的满了，否则一律不做删除/清理类操作**
+  （`rm` / `git restore` / `reset --hard` / `clean` / `worktree remove` 同罪）。
+  需要新工作区就**新建**，不要删旧的。
+- 远端分支同理：**不要** `git push origin --delete`。分支列表长一点无所谓。
 
-**不要直接 `rm -rf /work/<角色>`。** 那会在 `.git/worktrees/` 下留一条悬空记录，
-之后想用同名 worktree 会报错。已经删了就用：
-
-```sh
-git worktree prune
-```
-
-分支合入后删远端分支（可选，保持分支列表干净）：
-
-```sh
-git push origin --delete <角色>/<主题>
-```
+如果目录里还有未提交的改动，先判断它是不是该提交的产出 —— 多数情况下答案是
+「提交推送」，而不是丢弃。
 
 ---
 
@@ -335,7 +335,8 @@ git push origin --delete <角色>/<主题>
 
 ### 9.3 专属调试端口
 
-每人一个，避免抢 445 / 4445：
+每人一个，避免抢 445 / 4445（下表为 v0.2.0 时期的分配存档，示例作用；
+新角色按同一规则往下自增，不与表中冲突即可）：
 
 | agent | 端口 |
 |---|---|
@@ -365,10 +366,13 @@ git push origin --delete <角色>/<主题>
 
 - **`smbclient` 的 `-c` 多条命令必须用分号 `;` 分隔。** 写成多行会产生
   `NT_STATUS_NO_SUCH_FILE listing \get` 这类**假故障**，看起来像服务端 bug。
-- **`mount.cifs` 在本容器永远跑不通**（缺 `CAP_SYS_ADMIN`，报
-  `Unable to apply new capability set`）。这是环境限制，不是服务端 bug；
+- **`mount.cifs` 在本容器永远跑不通**。死因**不是**缺 `CAP_SYS_ADMIN`（旧文曾这样归因，
+  2026-08-09 被决定性实验推翻）：真正原因是本环境在**非初始 user namespace** 里，
+  内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统，cifs 没有这个标志 —— 加任何
+  capability（含 `--cap-add SYS_ADMIN`）都救不了。这是环境限制，不是服务端 bug；
   `scripts/acceptance.sh` 已把它做成 skip(rc=77)。**不要因为它 fail 就判定验收不通过，
-  也不要把它写进"已验证"清单。**
+  不要再浪费时间加 capability，也不要把它写进"已验证"清单。**
+  完整实验链见 AGENTS.md §10.3 第 2 条与 `docs/test-infra.md` §A.4(3)。
 - `impacket` 用 `apt-get install python3-impacket` 装，**不要用 pip**（会和已有的
   cryptography 版本冲突）。
 
