@@ -126,17 +126,21 @@ type Share struct {
 	// —— mDNS `_adisk._tcp` 的 TXT 词汇表里没有任何经过验证的容量键
 	// （AGENTS.md §9 不许臆造字段值），所以广播那条路走不通。
 	QuotaBytes uint64 `yaml:"quota_bytes"`
-	// MetadataPath 是 POSIX 元数据旁路存储（纯 Go 嵌入式 KV）的落盘路径。
+	// MetadataPath 是元数据旁路存储（纯 Go 嵌入式 KV）的落盘路径。
 	//
-	// **仅 Windows 使用**（AGENTS.md §5 P7）：NTFS 表达不了 POSIX 的
-	// uid/gid/mode，需要旁路存储；Linux/macOS 原生能力足够，该字段留空即可，
-	// 填了也会被忽略（会有一条启动 WARN）。
+	// **所有平台都生效**：它既决定 Windows 上 POSIX 属主/权限旁路库
+	// （internal/vfs/metadata_windows.go）的位置，也决定 oscap builtin 六项能力
+	// 旁路库（internal/oscap/builtin）的位置——后者在 auto/portable 档于任何
+	// 平台都会真实创建（PR #159 之后「填了被忽略」就是假话，校验层已按全平台
+	// 生效处理，见 validate.go）。
 	//
 	// 留空时由 vfs 层的 defaultMetadataPath 决定默认落点，config 不替它做决定：
-	//   os.UserConfigDir()/stupidsamba/metadata-<fnv32a(root)>.db
-	// 即 Windows 上为 %AppData%\stupidsamba\metadata-xxxxxxxx.db
-	// （root 路径先 ToLower 再哈希，规避 Windows 路径大小写不敏感导致的重复库）。
-	// 默认落点刻意放在共享目录之外，避免客户端在共享里看到这个数据库文件。
+	// 共享根目录的**兄弟**位置，文件名同时编入共享根哈希与服务实例标识
+	// （监听 addr:port，见 oscap.Options.InstanceID）——多个服务进程共享同一
+	// 共享目录时各开各的库，不会在 bbolt 的 flock 上互相卡死。
+	// 显式配置本字段时，**多进程唯一性由配置者自己负责**（两个进程指向同一个
+	// 文件，后到的会因 flock 超时启动失败）。默认落点刻意放在共享目录之外，
+	// 避免客户端在共享里看到这个数据库文件。
 	MetadataPath string `yaml:"metadata_path"`
 }
 
