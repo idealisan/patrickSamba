@@ -147,6 +147,14 @@ func handleWrite(ctx *Context) error {
 	if open.GrantedAccess&(wire.FileWriteData|wire.FileAppendData) == 0 {
 		return status.AccessDenied
 	}
+	// FILE_ATTRIBUTE_READONLY 的目标拒绝写入（bh3-F4 写面）。
+	// 判据是打开时的属性快照（create.go 填充），授权依据仍是配置与
+	// 属性位，不读宿主 ACL（AGENTS.md §1.1）。已知边界：句柄存续期间
+	// 目标被 SET_INFO(FileBasicInformation) 改掉 READONLY 位时，本快照
+	// 不跟随 —— 与 Windows「打开时定生死」的主判定点一致，误差窗口极小。
+	if open.FileAttributes&wire.FileAttributeReadonly != 0 {
+		return status.AccessDenied
+	}
 	h := open.Handle
 	if h == nil {
 		return status.FileClosed
