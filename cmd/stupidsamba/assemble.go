@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,6 +96,30 @@ func buildAuth(cfg *config.Config) (auth.Provider, error) {
 	}), nil
 }
 
+// listenerInstanceID 由监听配置推导出本服务实例的稳定标识，
+// 作为旁路元数据默认落点的实例维度（internal/vfs LocalConfig.InstanceID /
+// oscap.Options.InstanceID 的语义见其注释，OI-1）。
+//
+// 为什么用监听端点：两个服务进程不可能同时 bind 同一个 addr:port，
+// 所以端点组合必然区分并存实例；又因为它完全来自配置，同一实例重启后
+// 得到同一个值 —— 重启前后复用同一份旁路元数据。
+//
+// 多个地址按配置顺序用 "," 连接（validate 已拒绝重复地址）；单地址时
+// 恰为 "addr:port"。addresses 留空表示监听所有接口，这里用字面量
+// "0.0.0.0" 保持确定性（精确到哪一族不影响「区分并存进程」这个用途：
+// 两个全默认配置的进程本来就会在 bind 阶段互斥，见 main.go 的启动顺序）。
+func listenerInstanceID(l config.Listen) string {
+	addrs := l.Addresses
+	if len(addrs) == 0 {
+		addrs = []string{"0.0.0.0"}
+	}
+	parts := make([]string, len(addrs))
+	for i, a := range addrs {
+		parts[i] = net.JoinHostPort(a, strconv.Itoa(l.Port))
+	}
+	return strings.Join(parts, ",")
+}
+
 // buildShares 为每个配置的共享构造 VFS，并追加 IPC$ 管道共享。
 //
 // 任何一个共享构造失败都会关掉已经建好的 VFS 再返回错误 ——
@@ -112,6 +138,10 @@ func buildShares(cfg *config.Config) ([]*command.Share, error) {
 		return nil, err
 	}
 
+	// 实例标识对全部共享是同一个值：它标识的是**本服务进程**（由监听端点
+	// 决定），不是某个共享。放在循环外算一次，避免每个共享重复推导。
+	instID := listenerInstanceID(cfg.Listen)
+
 	for i := range cfg.Shares {
 		s := &cfg.Shares[i]
 		fs, err := vfs.NewLocalFS(vfs.LocalConfig{
@@ -127,6 +157,9 @@ func buildShares(cfg *config.Config) ([]*command.Share, error) {
 			// UID/GID 留 0：config.Share 不提供属主标签，
 			// 且这些数字**不做系统用户解析**（AGENTS.md §1.1 C8）。
 			MetadataPath: s.MetadataPath,
+			// 本进程的稳定标识：多个进程共享同一共享目录时，
+			// 各自的旁路元数据库按它区分，不再互抢 bbolt 文件锁（OI-1）。
+			InstanceID: instID,
 			// 向客户端上报的卷容量上限（0=不限）；真正生效依赖 vfs.LocalConfig 的对应字段。
 			QuotaBytes: s.QuotaBytes,
 		})

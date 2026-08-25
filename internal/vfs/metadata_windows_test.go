@@ -13,7 +13,7 @@ import (
 
 func newTestStore(t *testing.T) MetadataStore {
 	t.Helper()
-	s, err := openMetadataStore(t.TempDir(), filepath.Join(t.TempDir(), "md.db"))
+	s, err := openMetadataStore(t.TempDir(), filepath.Join(t.TempDir(), "md.db"), "")
 	if err != nil {
 		t.Fatalf("openMetadataStore: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestMetadataPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "md.db")
 
-	s, err := openMetadataStore(dir, p)
+	s, err := openMetadataStore(dir, p, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestMetadataPersistsAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s2, err := openMetadataStore(dir, p)
+	s2, err := openMetadataStore(dir, p, "")
 	if err != nil {
 		t.Fatalf("重开: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestMetadataCodec(t *testing.T) {
 // 否则客户端会看见并可能删掉这个库。
 func TestDefaultMetadataPathOutsideShare(t *testing.T) {
 	root := t.TempDir()
-	p, err := defaultMetadataPath(root)
+	p, err := defaultMetadataPath(root, "")
 	if err != nil {
 		t.Skipf("环境没有用户配置目录: %v", err)
 	}
@@ -240,8 +240,34 @@ func TestDefaultMetadataPathOutsideShare(t *testing.T) {
 		t.Errorf("默认落点 %q 落在共享目录 %q 内部", p, root)
 	}
 	// 同一个 root 必须稳定，否则重启后旧记录就找不到了
-	p2, _ := defaultMetadataPath(root)
+	p2, _ := defaultMetadataPath(root, "")
 	if p != p2 {
 		t.Errorf("默认落点不稳定: %q vs %q", p, p2)
+	}
+}
+
+// TestDefaultMetadataPathDistinguishesInstances：非空 InstanceID 必须改变
+// 默认落点，且同一 InstanceID 两次推导结果一致 —— 这是「共享同一目录的多个
+// 服务进程各用各的 bbolt 库（bbolt 按 path 拿 flock）」的前提。
+func TestDefaultMetadataPathDistinguishesInstances(t *testing.T) {
+	root := t.TempDir()
+	a1, err := defaultMetadataPath(root, "127.0.0.1:4451")
+	if err != nil {
+		t.Skipf("环境没有用户配置目录: %v", err)
+	}
+	a2, _ := defaultMetadataPath(root, "127.0.0.1:4451")
+	b, err := defaultMetadataPath(root, "127.0.0.1:4452")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hist, _ := defaultMetadataPath(root, "")
+	if a1 != a2 {
+		t.Errorf("同一实例两次推导不一致: %q vs %q", a1, a2)
+	}
+	if a1 == b {
+		t.Errorf("不同实例得到了同一个默认落点: %q", a1)
+	}
+	if a1 == hist {
+		t.Errorf("实例片段没有编进文件名: %q", a1)
 	}
 }
