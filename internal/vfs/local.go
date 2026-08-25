@@ -49,8 +49,16 @@ type LocalConfig struct {
 	FileMode fs.FileMode
 	DirMode  fs.FileMode
 
-	// MetadataPath 是旁路元数据库的路径（仅 Windows 使用，见 AGENTS.md §5 P7）。
-	// 空则放在 Root 下的默认位置。
+	// MetadataPath 是旁路元数据库的路径。空则放在 Root 下的默认位置。
+	//
+	// **所有平台都用它**，有两个消费方，别再按"仅 Windows"理解：
+	//   ① openMetadataStore —— POSIX 属主/权限位旁路，仅 Windows 编译进来
+	//      （metadata_windows.go；非 Windows 上 openMetadataStore 返回 nil）；
+	//   ② oscapMetadataDir —— oscap builtin 六项能力的旁路 bbolt 库
+	//      （oscap_xattr.go），**不分平台**，auto 与 portable 两档实测都会
+	//      在该目录下建出 .stupidsamba-oscap-<hash>.db。
+	//
+	// ② 是 PR #159 接线带来的，此前这里写的"仅 Windows 使用"从那时起就是假话。
 	MetadataPath string
 
 	// InstanceID 是**本服务实例**的稳定标识，语义与 oscap.Options.InstanceID 一致
