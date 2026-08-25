@@ -10,6 +10,32 @@
 
 ---
 
+## 会话恢复（2026-08-25，PM 记录）
+
+> 团队于 2026-08-25 重启开工。以下时间戳来自 team-lead 会话，原样记录，
+> 作为崩溃复盘的时间锚点证据（AGENTS.md §7.6 / §10）。
+> 基线：v0.3.0 已发布，`origin/main` = `31d2902`。
+
+### 时间线
+
+| 时间（CST） | 事件 |
+|---|---|
+| 2026-08-25 14:20 | 会话恢复 |
+| 2026-08-25 14:31 | 开始环境恢复 |
+| 2026-08-25 14:32 | Go 工具链重装完成（go1.25.0 linux/amd64） |
+| 2026-08-25 14:33 | `origin/main` 基线自检通过：`CGO_ENABLED=0 go build ./...` |
+
+### 分工开工状态（team-lead 已开三个开发 worktree 并推空分支）
+
+| 分支 | Owner | 任务 | 备注 |
+|---|---|---|---|
+| `vfs/oscap-robustness` | vfs | M1 / OI-1（builtin bbolt 跨进程锁修复） | worktree 内带一份**上个会话遗留的未提交半成品 InstanceID 改动**，正在续写 |
+| `qa/v040-ci-hardening` | qa | A1（windows CI 修复）+ A3（acceptance.sh harness 防御） | 对应 §3 的 M3 与 M1 的 A3 部分 |
+| `server/v040-deflake` | server | B1（时序测试计数化，OI-2 / M2） | — |
+| `pm/v040-board-merge` | pm | 本进度板合入分支（基于 `origin/pm/v0.4.0-board` = `6ec7383`） | 待 team-lead 经 CNB API 建 PR 合入 main |
+
+---
+
 ## 0. Goal（一句话目标 — ✅ 已定稿，Step 2 consolid）
 
 **把 v0.3.0 已经接好的 6/6 `oscap` 能力从「能跑」打磨到「在真实 CI 与多进程场景下可靠」，
@@ -85,14 +111,14 @@ CNB），并完成认证安全审计与 Apple 扩展的真机/协议级验证收
 
 > 来源：plan-v0.4.0-ci-release.md 的 (a) 失败根因表与 (c) v0.4.0 CI/Release backlog A1–A5、B1–B5。
 > 每项映射到 Owner 角色 + 状态（TODO/IN-PROGRESS/DONE）+ 验收准则（原文引用 plan）。
-> 状态全为空跑起点，待 Owner 在 PR 推进后由 PM 更新。
+> 状态由 PM 按各 Owner 分支实际开工情况更新（2026-08-25 起首批 IN-PROGRESS，见「会话恢复」小节）。
 
 ### Must（发布阻塞）
 | # | 条目 | Owner | 来源 (A/B) | 状态 | 验收准则（引用 plan） |
 |---|---|---|---|---|---|
-| M1 | 修复 builtin bbolt 跨进程锁冲突（OI-1）：产品侧 A2 + harness 侧 A3 防御 | vfs/oscap + qa | A2, A3 | TODO | A2：「`acceptance.sh` smbclient case passes on a single share dir with 3 server processes; add a regression test that starts ≥2 servers on one share.」A3：「harness runs green even if a future product change re-introduces shared paths.」 |
-| M2 | 收敛 server 时序测试抖动（OI-2）：产品计数化 B1 + 隔离/重试 A5 | server + qa | B1, A5 | TODO | B1：「the timing test is green under the local false-red recipe … and the `server-timing` job can become required.」A5：「`unit` is green on shared runners regardless of timing noise.」 |
-| M3 | 修复 GitHub Actions `windows-latest` 单测（OI-3） | qa | A1 | TODO | A1：「`windows-latest` unit job goes green on a push.」 |
+| M1 | 修复 builtin bbolt 跨进程锁冲突（OI-1）：产品侧 A2 + harness 侧 A3 防御 | vfs/oscap + qa | A2, A3 | IN-PROGRESS（2026-08-25：A2 侧 owner vfs @ `vfs/oscap-robustness`，续写上会话 InstanceID 半成品；A3 侧 owner qa @ `qa/v040-ci-hardening`） | A2：「`acceptance.sh` smbclient case passes on a single share dir with 3 server processes; add a regression test that starts ≥2 servers on one share.」A3：「harness runs green even if a future product change re-introduces shared paths.」 |
+| M2 | 收敛 server 时序测试抖动（OI-2）：产品计数化 B1 + 隔离/重试 A5 | server + qa | B1, A5 | IN-PROGRESS（2026-08-25：B1 侧 owner server @ `server/v040-deflake`；A5 隔离/重试待协同 qa） | B1：「the timing test is green under the local false-red recipe … and the `server-timing` job can become required.」A5：「`unit` is green on shared runners regardless of timing noise.」 |
+| M3 | 修复 GitHub Actions `windows-latest` 单测（OI-3） | qa | A1 | IN-PROGRESS（2026-08-25：owner qa @ `qa/v040-ci-hardening`） | A1：「`windows-latest` unit job goes green on a push.」 |
 | M4 | 认证安全审计（NTLMv2 校验 / 常量时间比较 / 日志不落口令） | auth | auth-security 区域计划（未产出） | TODO（阻塞于区域计划） | 验收准则待 auth-security 区域计划回填 |
 | M5 | Apple 扩展协议级/真机验证收尾，口径按证据强度分档 | mdns/apple | apple-tm 区域计划（未产出） | TODO（阻塞于区域计划） | 验收准则待 apple-tm 区域计划回填（见 OD-3） |
 
@@ -157,5 +183,6 @@ CNB），并完成认证安全审计与 Apple 扩展的真机/协议级验证收
 - [x] **OD-1（RESOLVED）**：`oscap-wiring` → `oscap-robustness` 重命名已 sign-off（team-lead @ 2026-08-12）；`vfs` 分支命名一致。
 - [x] **OD-2（RESOLVED "是"）**：多进程 shared-share acceptance 为发布门禁（经 A4 必需检查），前提 A2 先合。`qa` 行动项：把 A4 设为必需检查。**待 repo-owner 配置镜像仓分支保护（repo-owner 动作，已在 PR 描述 flag）。**
 - [x] **OD-3（RESOLVED）**：TM 真机保持 OPTIONAL，协议级证据即达标。`mdns` 行动项：按证据强度分档汇报。
-- [ ] 跟踪 A1–A5 / B1–B5 各 Owner 的落地与 PR 进度，按角色 agent 回报更新 §3 状态列（TODO→IN-PROGRESS→DONE）。
+- [ ] **合入进度板**：team-lead 经 CNB API 为 `pm/v040-board-merge` 建 PR（本文件），CI 绿后合并。
+- [ ] 跟踪 A1–A5 / B1–B5 各 Owner 的落地与 PR 进度，按角色 agent 回报更新 §3 状态列（TODO→IN-PROGRESS→DONE）；**各 Owner PR 就绪后回收验证证据**（验收命令输出 / CI run 链接）再置 DONE，未经证据不得标 DONE。
 - [ ] 待 auth-security / apple-tm 区域计划补齐后，回填 M4/M5/O1 的验收准则（当前 TODO，阻塞于区域计划）。
