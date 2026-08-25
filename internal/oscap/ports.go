@@ -195,3 +195,26 @@ type DOSAttributes interface {
 	// 在传入前剔除（vfs 层的 settableDOSAttributes）。
 	SetDOSAttributes(ref Ref, attrs uint32) error
 }
+
+// MetadataMigration 是「按路径记账的元数据」在 rename/remove 时的伴随能力。
+//
+// # 为什么六项能力之外还需要它
+//
+// builtin 适配器的一切元数据都按 pathKey 记在旁路库里，宿主的 rename/unlink
+// 不会替它搬账。没有这个能力，改名会把客户端设置过的创建时间与 DOS 位丢在
+// 旧路径上，而残留记录还会安到之后新建在该路径上的无关文件头上
+// —— 跨对象元数据泄漏。native 侧的元数据长在宿主对象本身上
+// （xattr 随 inode 走、NTFS 属性随文件走、btime 由内核维护），
+// 所以 native 实现是无操作，但**接口两侧都必须提供**：
+// vfs 层不做矩阵判断、无差别调用，由实现方自己决定做还是不做。
+type MetadataMigration interface {
+	// RenameMetadata 把 oldPath 名下的全部旁路记录（含具名子项与整棵子树）
+	// 原子地迁移到 newPath。newPath 上已有的陈旧记录必须先被清除，
+	// 不能与迁入记录合并。
+	RenameMetadata(oldPath, newPath string) error
+
+	// DeleteMetadata 清掉 path 名下的全部旁路记录（含子树）。
+	// 记录不存在时返回 nil（幂等）：宿主的 unlink 已完成，
+	// 旁路里没账是常态而非异常。
+	DeleteMetadata(path string) error
+}
