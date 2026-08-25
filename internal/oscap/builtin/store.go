@@ -203,21 +203,34 @@ func releaseDB(p string, ref *dbRef) error {
 // 甚至把它删掉或备份走。
 func resolveMetadataPath(o oscap.Options) (string, error) {
 	if o.MetadataPath == "" {
-		return defaultMetadataPath(o.Root)
+		return defaultMetadataPath(o.Root, o.InstanceID)
 	}
 	// 配置项给成目录也接受：这是系统边界（用户手写的 YAML），
 	// 在这里判一次比让 bbolt 报一句 "is a directory" 友好得多。
 	if fi, err := os.Stat(o.MetadataPath); err == nil && fi.IsDir() {
-		return filepath.Join(o.MetadataPath, metadataFileName(o.Root)), nil
+		return filepath.Join(o.MetadataPath, metadataFileName(o.Root, o.InstanceID)), nil
 	}
 	return o.MetadataPath, nil
 }
 
 // defaultMetadataPath 给出未配置 metadata_path 时的默认落点：共享目录的**兄弟**位置。
 //
+// instanceID 的语义见 oscap.Options.InstanceID：
+//   - 空 ⇒ 历史文件名，与旧版本逐字节一致（测试与库直连场景零变化）；
+//   - 非空 ⇒ 把实例编进文件名。bbolt 按 path 拿 flock，多个服务进程共享同一
+//     共享目录时（scripts/acceptance.sh 起的就是这种部署），若都算出同一个库
+//     文件，第二个进程会卡满 flock 超时（5 秒）后启动失败。监听端点在每个
+//     进程上必然不同（同一 addr:port 不可能同时被两个进程 bind），拿它当
+//     InstanceID 就让每实例各开各的旁路库，互不阻塞；同一配置重启又得到
+//     同一路径，元数据照常复用。
+//
+// 显式配置的 MetadataPath **优先于** InstanceID（resolveMetadataPath）：
+// 用户一旦手写落点，「多个进程别指向同一个文件」就交给用户自己负责 ——
+// 这是已拍板的契约，本函数不替显式路径做任何区分。
+//
 // 边界情形：共享根就是卷根（"/" 或 "C:\"）时它没有「旁边」，
 // 落到 os.UserConfigDir() 下 —— 那里读的是环境变量，不是系统用户数据库，不违反 C8。
-func defaultMetadataPath(root string) (string, error) {
+func defaultMetadataPath(root, instanceID string) (string, error) {
 	clean := filepath.Clean(root)
 	parent := filepath.Dir(clean)
 	if parent == clean {
@@ -228,14 +241,23 @@ func defaultMetadataPath(root string) (string, error) {
 		}
 		parent = filepath.Join(dir, "stupidsamba")
 	}
-	return filepath.Join(parent, metadataFileName(clean)), nil
+	return filepath.Join(parent, metadataFileName(clean, instanceID)), nil
 }
 
-// metadataFileName 用共享根的哈希区分多个共享，避免它们互相覆盖。
-func metadataFileName(root string) string {
+// metadataFileName 用「共享根哈希 [+ 实例片段]」区分多个库文件：
+// 根哈希避免多个共享互相覆盖，实例片段（oscap.InstanceIDSuffix）避免多个
+// 服务进程共享同一共享目录时抢同一个 bbolt 文件锁（OI-1）。
+//
+// instanceID 为空时返回历史文件名 ".stupidsamba-oscap-<root哈希>.db"，
+// 与旧版本逐字节一致。
+func metadataFileName(root, instanceID string) string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(normalizePath(filepath.Clean(root))))
-	return fmt.Sprintf(".stupidsamba-oscap-%016x.db", h.Sum64())
+	name := fmt.Sprintf(".stupidsamba-oscap-%016x", h.Sum64())
+	if suffix, ok := oscap.InstanceIDSuffix(instanceID); ok {
+		name += "-" + suffix
+	}
+	return name + ".db"
 }
 
 // normalizePath 把宿主路径规范成 key 用的形式。

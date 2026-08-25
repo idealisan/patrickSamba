@@ -260,7 +260,7 @@ func TestPortableDefaultMetadataPathOutsideRoot(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("建目录失败: %v", err)
 	}
-	p, err := defaultMetadataPath(root)
+	p, err := defaultMetadataPath(root, "")
 	if err != nil {
 		t.Fatalf("defaultMetadataPath 失败: %v", err)
 	}
