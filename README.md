@@ -288,7 +288,7 @@ done
 
 | 字段 | 含义 | 默认值 |
 |---|---|---|
-| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `native` / `portable`，**大小写敏感**。⚠️ **6 项里只有扩展属性与命名流已接进数据路径**，这两项三档行为确实不同，另外四项三档仍然等价；且 **`native` 档在 linux / darwin / windows 上都会启动失败**（每个平台各有至少一项能力被硬编码为不支持），见[已知限制](#notes)第 7 条 | `auto` |
+| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `portable` 两态，**大小写敏感**。六项能力自 v0.3.0 起**全部接进数据路径**，两态对全部六项都有真实运行期效果。⚠️ 旧的第三态 `native` 已在 v0.5 开发版移除：旧配置写了 `filesystem_mode: native` 会启动报错，改 `auto` 或 `portable`，详见[已知限制](#notes)第 7 条 | `auto` |
 
 ### `server`
 
@@ -338,7 +338,7 @@ done
 | `valid_users` | 限定可访问用户，留空表示所有已认证用户；名字必须在 `auth.users` 里定义过 | 所有已认证用户 |
 | `time_machine` | 把本共享宣告为 Time Machine 备份目标（阶段二） | `false` |
 | `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)）。⚠️ 上报的**可用空间 = `quota_bytes` − 宿主卷已用空间**（出于性能不递归统计本共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，否则即使共享是空的，客户端也会看到可用空间为 0 而拒绝开始备份 | `0` |
-| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS **留空**即可。⚠️ 校验**只在 Windows 做**：非 Windows 上 `internal/config/validate.go:394-396` 在 `hostOS != "windows"` 时直接 `return`，**完全不校验**，只打一条 WARN「该字段仅在 Windows 上生效…会忽略它」，服务照常启动。所以「在 Linux 上填 `C:\...` 会起不来」是**过时说法**——实测 Linux 二进制 + `metadata_path: C:\ProgramData\stupidsamba\x.db` 仅 WARN、监听照起（退出 0）。跨平台复用同一份配置时这项要么留空、要么按平台分开写 | 空（落在 `%AppData%\stupidsamba\` 下，按共享根路径哈希命名） |
+| `metadata_path` | 旁路元数据库落盘路径。⚠️ **所有平台都生效**（v0.4.0 起，不再是「仅 Windows」）：它既决定 Windows 上 POSIX 属主/权限位旁路库的位置，也决定 oscap builtin 六项能力旁路库（`.stupidsamba-oscap-*.db`）的位置——后者在 `auto` 与 `portable` 两档、任何平台上都会真实创建。校验同样在**所有平台**做：必须是**当前运行平台**意义上的绝对路径且父目录已存在；把 Windows 路径写进 Linux 配置会**直接启动失败**（报错会点明「另一个平台的绝对路径」，这是 v0.4.0 的行为变化，此前仅 WARN）。留空时落点由程序自己决定：oscap 旁路库落在**共享根目录的兄弟位置**（文件名编入根路径哈希与服务实例标识，多进程各开各的库不互抢文件锁），Windows 的 POSIX 库落在 `%AppData%\stupidsamba\` 下。填在共享目录内部不会报错但会有一条 WARN（客户端能看见这个数据库文件） | 空（按上述默认规则落点） |
 
 ### `mdns`
 
@@ -389,6 +389,33 @@ done
 - **`OPLOCK_BREAK`**：本服务在 `CREATE` 时一律授予 `NONE` oplock、也不宣告 leasing
   能力，因此正常情况下客户端不会发来 oplock/lease break；万一收到则按协议返回
   `STATUS_INVALID_PARAMETER`。即「真实 oplock/lease 能力」尚未实现。
+
+### 文件行为语义（v0.4.x 对照 Samba 的修正）
+
+以下行为自 v0.4.x 起生效（对照真实 Samba 行为逐项核对后的修复波），此前的版本
+在这些点上是空壳或语义错误：
+
+- **字节范围锁是真的**（v0.4.x 起）：`LOCK` 授予的范围锁现在会真正阻挡**其他句柄**
+  对重叠区间的 READ/WRITE——读只被外句柄的独占锁阻挡，写被任何重叠的外句柄锁阻挡；
+  同一句柄自己的锁不妨碍自己（与 Samba 的 STRICT_LOCK_CHECK 一致），冲突回
+  `STATUS_FILE_LOCK_CONFLICT`。句柄关闭/断连时其全部锁随之释放。
+- **READONLY 属性拒绝写入**（v0.4.x 起）：带 `FILE_ATTRIBUTE_READONLY` 的目标，
+  WRITE 按**打开时的属性快照**拒绝（`STATUS_ACCESS_DENIED`）。判据是配置与属性位，
+  不读宿主 ACL。注意这与共享级 `read_only: true` 是两层独立的只读：前者按对象属性，
+  后者按共享配置。
+- **零长度读成功回 0 字节**（v0.4.x 起）：`READ` Length=0 不再回 `END_OF_FILE`
+  而是正常成功——它是客户端的合法探测手法；越界非零读才回 `END_OF_FILE`。
+  同时鉴权检查先于一切长度判定，无权句柄不再能借零长读探测文件是否存在。
+- **CREATE 携带的 FileAttributes 生效**（v0.4.x 起）：创建性打开携带的属性位按 Samba
+  语义落地——`DIRECTORY` 位静默剥掉（目录与否由操作本身决定）、自动叠上 `ARCHIVE`、
+  只对 created/overwritten/superseded 生效（opened 不动既有属性）；新建对象的
+  创建时间同样会持久化到旁路库，改名/删除会把旁路元数据一并迁移或清理，
+  不再残留孤儿记录。
+- **流的删除粒度是单个流**（v0.4.x 起）：对 `file.txt:stream` 句柄做删除
+  （delete-on-close 或 SET_INFO FileDisposition）只删那一个流，不再连带删掉基础文件
+  与其他流。配套语义：带创建意图（OPEN_IF 等）打开流时若基础文件不存在会自动建出
+  空基础文件；SUPERSEDE/OVERWRITE* 打开时会清掉残留的 Apple 元数据流
+  （FinderInfo 等），避免截断后的「新」文件仍显示旧的颜色标签。
 
 ### 认证 / 签名 / 加密
 
@@ -575,6 +602,12 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
 > 想核实「你说支持，凭什么」？完整的多客户端验收报告见
 > [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md)（smbclient / impacket / go-smb2
 > 三家客户端栈逐项实测，含加密 fail-closed 验证），基线 commit `5428bcd`。
+> 更近的黑盒复测见 [`test/reports/client-matrix-v030-20260825.md`](test/reports/client-matrix-v030-20260825.md)
+> （对 v0.3.0：smbclient 七种方言 + 全操作集、impacket 11/11、go-smb2 集成套件 21/21）；
+> 性能基线见 [`test/reports/perf-v040-20260825.md`](test/reports/perf-v040-20260825.md)
+> ——注意那是 **loopback 协议栈基线，不是真实网络吞吐**：4 vCPU 容器里单流大文件约
+> 写 95 MB/s / 读 200 MB/s（SMB3.1.1+签名），并发 16 流聚合读约 716 MB/s，
+> `auto` 与 `portable` 两档在本机负载下性能几乎无差。
 
 ---
 
