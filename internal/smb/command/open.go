@@ -244,6 +244,24 @@ func (o *Open) close() {
 		o.Tree.Share.shareModes.remove(o)
 	}
 
+	// 释放该句柄持有的全部字节范围锁（MS-SMB2 §3.3.5.14 / §3.3.5.10：
+	// 句柄消失即释放）。与 shareModes 同理，这里是全部非 CLOSE 关闭路径的
+	// 唯一汇合处 —— 此前释放只挂在 CLOSE 命令里，TREE_DISCONNECT /
+	// LOGOFF / 断连 / durable 过期回收全都不碰锁表，客户端异常退出后锁会
+	// 泄漏到进程重启（bh4-A#2）。Samba 对照：所有关闭路径汇于
+	// close_file → brl_close_fnum（source3/smbd/close.c:503）。
+	//
+	// durable 语义不受影响：等待重连的句柄不走本方法（disconnect 返回 true
+	// 时调用方跳过 close），锁随句柄保留；过期回收与显式 CLOSE 才走到这里，
+	// 锁随之释放；重连认领回的是同一个 *Open，按指针记账的锁继续有效。
+	//
+	// 与 CLOSE handler（close.go）里的显式 releaseAll 构成**双保险**：
+	// releaseAll 幂等，两处都调无害；close.go 那处刻意保持原样不动。
+	// 必须在 o.mu 之外调用（releaseAll 自带表锁，理由同上）。
+	if o.Tree != nil && o.Tree.Share != nil {
+		o.Tree.Share.locks.releaseAll(o.Path, o)
+	}
+
 	if h != nil {
 		_ = h.Close()
 	}
