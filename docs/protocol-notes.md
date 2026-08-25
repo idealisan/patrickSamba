@@ -74,6 +74,13 @@ Capabilities：`DFS=0x01`、`LEASING=0x02`、`LARGE_MTU=0x04`（**必须设**）
 - 只含 `"SMB 2.002"` → 直接回 `0x0202` 完成协商。
 - 都没有 → 关闭连接。
 
+> **证据强度现状（2026-08-25 记录，v0.4.0）**：这条升级入口目前只有**单测档**证据
+> （构造 SMB1 报文的单元测试），没有任何第三方客户端实测覆盖——本环境可用的三家
+> 客户端里 smbclient 4.22 已剔除 SMB1、impacket 直发 SMB2，都触达不了这条路径
+> （详见 `test/reports/client-matrix-v030-20260825.md` §SKIP）。按项目所有者决定
+> （2026-08-25），此项暂不投入补测；将来若要宣称「支持 SMB1 客户端升级」，
+> 必须先补一条能真实发出 `SMB_COM_NEGOTIATE "SMB 2.???"` 的裸报文回归。
+
 ### 3.1.1 NegotiateContext
 
 头：`ContextType(2)+DataLength(2)+Reserved(4)+Data`，context 间 **8 字节对齐**（最后一个后不填充）。
