@@ -53,6 +53,18 @@ type LocalConfig struct {
 	// 空则放在 Root 下的默认位置。
 	MetadataPath string
 
+	// InstanceID 是**本服务实例**的稳定标识，语义与 oscap.Options.InstanceID 一致
+	// （装配层用监听端点推导，见 cmd/stupidsamba 的 listenerInstanceID）。
+	//
+	// 为什么需要：两处旁路存储（oscap/builtin 六项能力、Windows POSIX 元数据）
+	// 都是 bbolt 库按 path 拿 flock。多个服务进程共享同一共享目录时，若默认
+	// 落点算出同一个文件，第二个进程会卡满 flock 超时后启动失败。
+	// 非空时实例被确定性地编进默认库文件名，各进程互不阻塞；
+	// 留空表示「单实例」语义，默认落点退回历史文件名
+	// （测试、库直接调用等不经由服务装配层的场景都走这条，行为零变化）。
+	// 显式配置的 MetadataPath 优先于本字段：用户手写落点时唯一性由用户负责。
+	InstanceID string
+
 	// FilesystemMode 是 OS 能力抽象的三态开关（AGENTS.md §1.2 C9）。
 	// 零值 oscap.ModeAuto = 逐项探测，能 native 就 native。
 	FilesystemMode oscap.Mode
@@ -141,7 +153,7 @@ func NewLocalFS(cfg LocalConfig) (*LocalFS, error) {
 		serial: volumeSerial(res.Root()),
 	}
 
-	meta, err := openMetadataStore(res.Root(), cfg.MetadataPath)
+	meta, err := openMetadataStore(res.Root(), cfg.MetadataPath, cfg.InstanceID)
 	if err != nil {
 		return nil, err
 	}

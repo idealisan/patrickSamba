@@ -24,6 +24,8 @@ import (
 	"time"
 
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
 
 // metadataBucket 是存放 POSIX 属主/权限位的 bucket 名。
@@ -54,11 +56,13 @@ type boltMetadataStore struct {
 //
 // metadataPath 来自配置的 share.metadata_path；config 层已校验它是绝对路径
 // 且父目录存在。留空时由本层决定默认落点 —— 与 mdns agent 约定好的分工。
-func openMetadataStore(root, metadataPath string) (MetadataStore, error) {
+// instanceID 语义见 LocalConfig.InstanceID：非空时编进默认库文件名，
+// 让共享同一目录的多个服务进程各用各的 bbolt 库（bbolt 按 path 拿 flock）。
+func openMetadataStore(root, metadataPath, instanceID string) (MetadataStore, error) {
 	p := metadataPath
 	if p == "" {
 		var err error
-		if p, err = defaultMetadataPath(root); err != nil {
+		if p, err = defaultMetadataPath(root, instanceID); err != nil {
 			return nil, err
 		}
 	}
@@ -89,10 +93,15 @@ func openMetadataStore(root, metadataPath string) (MetadataStore, error) {
 // 甚至可能把它删掉或备份走（mdns agent 的 Warnings() 也会对此告警）。
 //
 // 落点取 os.UserConfigDir()（Windows 上是 %AppData%）下的
-// stupidsamba\metadata-<root 哈希>.db，用哈希区分多个共享，避免互相覆盖。
+// stupidsamba\metadata-<root 哈希>[-<实例片段>].db：root 哈希区分多个共享，
+// 实例片段（oscap.InstanceIDSuffix，清洗标签+原始值哈希，规则与 builtin
+// 旁路共用同一份）区分共享同一目录的多个服务进程 —— bbolt 按 path 拿
+// flock，两个进程算出同一个文件时第二个会卡满超时后启动失败（OI-1 的
+// Windows 形态）。instanceID 为空时不带实例片段，与旧版本逐字节一致；
+// 显式配置的 MetadataPath 优先于实例区分，用户手写落点时唯一性由用户负责。
 //
 // 注意这里读的是 APPDATA 环境变量，不是系统用户数据库查询，不违反 C8。
-func defaultMetadataPath(root string) (string, error) {
+func defaultMetadataPath(root, instanceID string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("vfs: 无法确定元数据存储的默认落点，请在配置里显式设置 metadata_path: %w", err)
@@ -101,8 +110,11 @@ func defaultMetadataPath(root string) (string, error) {
 	// 用小写形式做哈希：Windows 路径大小写不敏感，
 	// 同一个共享写成不同大小写不应该产生两个库。
 	_, _ = h.Write([]byte(strings.ToLower(filepath.Clean(root))))
-	name := fmt.Sprintf("metadata-%08x.db", h.Sum32())
-	return filepath.Join(dir, "stupidsamba", name), nil
+	name := fmt.Sprintf("metadata-%08x", h.Sum32())
+	if suffix, ok := oscap.InstanceIDSuffix(instanceID); ok {
+		name += "-" + suffix
+	}
+	return filepath.Join(dir, "stupidsamba", name+".db"), nil
 }
 
 // Get 实现 MetadataStore。
