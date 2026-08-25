@@ -54,6 +54,15 @@ func handleRead(ctx *Context) error {
 	if req.Offset > uint64(1<<63-1)-uint64(req.Length) {
 		return status.InvalidParameter
 	}
+	// 字节范围锁强制检查：别的句柄在目标区间上持独占锁时拒绝读。
+	// 此前锁表只有 LOCK 命令自己在记账，READ/WRITE 完全不设防，
+	// 依赖锁互斥的应用会真实数据竞争（bh4-A#1）。
+	if open.Tree != nil && open.Tree.Share != nil {
+		sh := open.Tree.Share
+		if st := sh.locks.checkIO(open.Path, open, req.Offset, uint64(req.Length), false); st != status.Success {
+			return st
+		}
+	}
 
 	buf := make([]byte, req.Length)
 	n, rerr := h.ReadAt(buf, int64(req.Offset))
@@ -140,6 +149,14 @@ func handleWrite(ctx *Context) error {
 	}
 	if req.Offset > uint64(1<<63-1)-uint64(len(req.Data)) {
 		return status.InvalidParameter
+	}
+	// 字节范围锁强制检查：别的句柄在目标区间上持任何锁（独占或共享）
+	// 时拒绝写。零长度写在 checkIO 内天然放行（不占用字节）。
+	if open.Tree != nil && open.Tree.Share != nil {
+		sh := open.Tree.Share
+		if st := sh.locks.checkIO(open.Path, open, req.Offset, uint64(len(req.Data)), true); st != status.Success {
+			return st
+		}
 	}
 
 	// 长度为 0 的写是合法的 no-op（客户端用它探测可写性）。
