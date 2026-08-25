@@ -367,10 +367,12 @@ done
 
 - **SMB 2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1** —— 全部支持，协商范围由 `min_dialect` /
   `max_dialect` 限定。
-- **SMB1 仅作为多协议协商入口**：老客户端（以及 Linux 内核 cifs、impacket 的默认
-  行为）会先发 SMB1 `SMB_COM_NEGOTIATE` 并带 `"SMB 2.???"`，本服务用 SMB2 响应
-  把它升级到 SMB2。**本服务不提供任何 SMB1 文件操作**，因此 EternalBlue 一类针对
-  SMB1 文件操作的攻击面在这里为零。
+- **SMB1 仅作为多协议协商入口**：老客户端会先发 SMB1 `SMB_COM_NEGOTIATE` 并带
+  `"SMB 2.??"`，本服务用 SMB2 响应把它升级到 SMB2。**本服务不提供任何 SMB1 文件操作**，
+  因此 EternalBlue 一类针对 SMB1 文件操作的攻击面在这里为零。
+  （如实说明：2026-08-25 的三方黑盒复测里没有任何客户端真的走到这条入口——
+  新版 smbclient 已剔除 SMB1、impacket 0.12 默认直发 SMB2——所以该路径目前只有
+  单元测试档证据；纯 SMB1 请求会被正确拒绝并记 WARN。见 `docs/protocol-notes.md` §4。）
 
 ### 已实现的 SMB2 命令
 
@@ -483,7 +485,8 @@ done
 - 命名流与 Alternate Data Stream（含目录上的流，`.sparsebundle` 依赖）；
 - 稀疏文件 FSCTL 三件套（`SET_SPARSE` / `SET_ZERO_DATA` / `QUERY_ALLOCATED_RANGES`）；
 - 卷容量与 `quota_bytes` 上报；
-- 大目录枚举性能（5 万 band 文件全量枚举约 0.28 s，内存不增长）；
+- 大目录枚举性能（v0.4.0 基线：5 万条**热**枚举约 0.34 s、约 6–7 µs/条且线性扩展；
+  更早的 v0.2 实测约为 0.28 s。见 `test/reports/perf-v040-20260825.md`，loopback 口径）；
 - `_adisk._tcp` mDNS 广播。
 
 `F_FULLFSYNC`：Linux / Windows 分支实测通过（**B 档**）；**Darwin 的 `F_FULLFSYNC` 分支
@@ -560,7 +563,7 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
      全部落点一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
 7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6），
    取值为 `auto` / `portable` 两态**：
-    **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
+   **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
    都已接进 VFS 数据路径**，两态行为对全部六项**确实不同**：
    `portable` 整机不碰宿主可选能力（数据落自带旁路存储），`auto` 在支持的宿主上逐项优先走原生并降级。
    自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `3`
@@ -593,8 +596,8 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
 | 客户端 | 状态 | 说明 |
 |---|---|---|
 | `smbclient`（Samba CLI） | ✅ 已实测 | `ls` / `put` / `get` / `mkdir` / `rm` / `rmdir`、各方言、加密、`nt_hash` 登录均通过 |
-| `impacket`（Python） | ✅ 目标支持 | 客户端矩阵第 3 项；本服务保留的 SMB1 多协议协商入口正是为它（默认先发 SMB1 协商）而开 |
-| `go-smb2`（纯 Go 客户端） | ✅ 目标支持 | 纯 Go 端到端集成测试，可进 CI |
+| `impacket`（Python） | ✅ 已实测 | 客户端矩阵第 3 项；对 v0.3.0 黑盒复测 11/11 通过（认证拒绝、全操作集、8MB md5 回环、只读强制） |
+| `go-smb2`（纯 Go 客户端） | ✅ 已实测 | 对 v0.3.0 独立客户端 9 步 + 仓库集成套件 21/21 全部通过（含加密与只读强制） |
 | macOS Finder / `mount_smbfs` | 🎯 目标 | Apple 扩展（AAPL / `_adisk` / `readdir_attr`）为其服务；Time Machine 见[上](#timemachine) |
 | Windows 资源管理器 | 🎯 目标 | 签名、`guest` 策略、属性页 |
 | `mount.cifs`（Linux 内核客户端） | ⏭️ 本环境跳过，未实测 | 开发容器跑在**非初始 user namespace** 里（`cat /proc/self/uid_map` = `0 1000 1`），内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统，而 cifs 没有这个标志，于是 `mount error(1): Operation not permitted`。**与 `CAP_SYS_ADMIN` 无关**——`--cap-add SYS_ADMIN` 下重跑仍然失败，同容器 `mount -t tmpfs` 却成功（反向对照）。这是环境限制不是服务端缺陷，但我们**没有**在真实 Linux 主机上验证过，所以这里不写「✅ 支持」。`scripts/acceptance.sh` 把它记为 skip(rc=77) |
