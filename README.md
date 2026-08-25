@@ -646,5 +646,8 @@ sh test/ci/check-test-compile.sh
 - [`configs/example.yaml`](configs/example.yaml) —— 逐字段注释的完整配置示例
 - [`CHANGELOG.md`](CHANGELOG.md) —— 各版本变更记录
 - [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md) —— v0.1.0 多客户端验收报告（smbclient / impacket / go-smb2 实测矩阵、加密 fail-closed 验证方法）
+- [`test/reports/client-matrix-v030-20260825.md`](test/reports/client-matrix-v030-20260825.md) —— 对 v0.3.0 的三客户端黑盒复测报告
+- [`test/reports/perf-v040-20260825.md`](test/reports/perf-v040-20260825.md) —— v0.4.0 性能基线（loopback，非真实网络吞吐）
+- [`docs/timemachine-status.md`](docs/timemachine-status.md) —— Time Machine 逐项验证证据（A/B/C 定级）
 - [`docs/protocol-notes.md`](docs/protocol-notes.md) —— 协议研究笔记（实现依据）
 - [`docs/dev-workflow.md`](docs/dev-workflow.md) —— 开发工作流 SOP（独立 worktree + 独立分支 + PR），参与开发前必读
