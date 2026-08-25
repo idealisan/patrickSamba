@@ -46,6 +46,11 @@ type streamHandle struct {
 
 	writable bool
 
+	// deleteOnClose 是 CREATE 时的 FILE_DELETE_ON_CLOSE（OpenDeleteOnClose）。
+	// 提交动作在 Close 里做，粒度是**这一个流**而不是基础文件
+	// （Samba streams_xattr_unlinkat() 语义，见 StreamRemover 注释）。
+	deleteOnClose bool
+
 	// 缓冲模式（AfpInfo / 通用 xattr 流）：内存缓冲 + 脏标记。
 	buf   []byte
 	dirty bool
@@ -59,12 +64,36 @@ var _ Handle = (*streamHandle)(nil)
 
 // openStream 打开 alternate data stream。
 //
-// 基础对象必须已存在：SMB 不允许「只创建流不创建文件」，
-// 客户端总是先 CREATE 文件本体再 CREATE 它的流。
+// 基础对象通常已存在（客户端总是先 CREATE 文件本体再 CREATE 它的流），
+// 但**创建语义**的 disposition（Supersede/CreateNew/OpenIf/OverwriteIf）
+// 在它不存在时会先把基础文件建出来 —— Samba 对流路径正是先以
+// FILE_OPEN_IF 打开基础文件（source3/smbd/open.c:6508 附近，注释原话
+// "We may be creating the basefile as part of creating the stream"）。
+// FILE_OPEN / FILE_OVERWRITE 保持「不存在即 ErrNotFound」且不建。
 func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handle, Action, error) {
 	slot := canonicalStreamName(stream)
 
 	fi, err := os.Lstat(host)
+	if err != nil && os.IsNotExist(err) {
+		switch {
+		case req.Disposition == OpenExisting || req.Disposition == TruncateExisting:
+			// 非创建语义：如实报不存在。（有意与 Samba 的差异：
+			// 它对 FILE_OVERWRITE 也用 OPEN_IF 建基础文件，那会让一次
+			// 注定失败的流打开留下一个空的残留文件。）
+			return nil, 0, ErrNotFound
+		case l.cfg.ReadOnly:
+			// 只读共享上不可能走到这里（入口已按写意图拒绝），
+			// 防御分支保持旧行为。
+			return nil, 0, ErrNotFound
+		default:
+			if err := l.createBaseForStream(host); err != nil {
+				return nil, 0, err
+			}
+			if fi, err = os.Lstat(host); err != nil {
+				return nil, 0, mapError(err)
+			}
+		}
+	}
 	if err != nil {
 		return nil, 0, mapError(err)
 	}
@@ -111,6 +140,7 @@ func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handl
 
 	h := &streamHandle{
 		fs: l, host: host, name: name, slot: slot, kind: kind, writable: writable,
+		deleteOnClose: req.Flags&OpenDeleteOnClose != 0,
 	}
 
 	switch kind {
@@ -121,6 +151,21 @@ func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handl
 	default:
 		return h.openResource(req)
 	}
+}
+
+// createBaseForStream 在开流之前建出一个空的宿主机基础文件。
+//
+// O_EXCL 让「输给并发的创建者」成为可识别事件：对方建好了就直接用，
+// 不算错误。
+func (l *LocalFS) createBaseForStream(host string) error {
+	f, err := openHostFile(host, os.O_CREATE|os.O_EXCL|os.O_WRONLY|openNoFollow, l.cfg.FileMode)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return mapError(err)
+	}
+	return mapError(f.Close())
 }
 
 // openXattrStream 准备通用 named stream 的内存缓冲。
@@ -564,14 +609,25 @@ func (h *streamHandle) Close() error {
 	}
 	h.closed = true
 
-	err := h.flushLocked()
+	// FILE_DELETE_ON_CLOSE 落在流句柄上：只删这一个流自己的存储，
+	// 基础文件与其余流不动。此时缓冲内容不必再回写 —— 马上就要删了。
+	del := h.deleteOnClose && !h.fs.cfg.ReadOnly
+
+	var err error
+	if del {
+		err = h.fs.removeStreamStorage(h.host, h.slot)
+	} else {
+		err = h.flushLocked()
+	}
 	if h.f != nil {
 		if cerr := h.f.Close(); err == nil {
 			err = mapError(cerr)
 		}
-		// 资源段为空的 ._ 文件是垃圾，删掉 —— 留着会在目录里堆积，
-		// 也会让 macOS 认为每个文件都有资源派生。
-		h.cleanupEmptyResource()
+		if !del {
+			// 资源段为空的 ._ 文件是垃圾，删掉 —— 留着会在目录里堆积，
+			// 也会让 macOS 认为每个文件都有资源派生。
+			h.cleanupEmptyResource()
+		}
 	}
 	return err
 }

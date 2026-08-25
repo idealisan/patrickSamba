@@ -144,6 +144,25 @@ func IsAFPStream(name string) bool {
 		strings.EqualFold(name, StreamAFPResource)
 }
 
+// StreamRemover 是「按流粒度删除」的可选能力。
+//
+// 为什么需要它：对命名流句柄做 delete-on-close（FILE_DELETE_ON_CLOSE 或
+// SET_INFO/FileDispositionInformation）时，删除的对象是**这一个流**，
+// 不是基础文件。若上层拿不到这个能力就只能退化为整文件删除——那会把
+// 基础文件连同它上面的所有流一起删掉，是数据丢失级的事故。
+//
+// Samba 对照：删除按 fsp 粒度走，命名流 fsp 就是流本身；
+// streams_xattr_unlinkat()（source3/modules/vfs_streams_xattr.c:1056-1110）
+// 对命名流只清对应的 xattr，注释原话 "A stream can never be rmdir'ed"。
+type StreamRemover interface {
+	// RemoveStream 删除 base 对象上名为 stream 的命名流，基础对象不受影响。
+	//
+	//   - stream 必须非空：删主数据流/整个对象请走 FileSystem.Remove；
+	//   - 流本来就不存在时返回 nil（幂等）：CLOSE 语境下的重复删除
+	//     （例如两个句柄都标了 delete-on-close）不该让后关的那个报错。
+	RemoveStream(base, stream string) error
+}
+
 // canonicalStreamName 把流名折叠成规范写法，便于后端用它做 key。
 // 认得的特殊流返回 Samba/Apple 的标准拼写，其余原样返回。
 func canonicalStreamName(name string) string {
