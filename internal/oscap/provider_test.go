@@ -144,36 +144,6 @@ func TestAutoFallsBackWhenNativeLacksCapability(t *testing.T) {
 	}
 }
 
-// TestNativeModeFailsWhenNativeLacksCapability 是上一条在 native 模式下的对照：
-// 同样的输入，native 模式必须**硬失败**而不是降级。
-//
-// 两条用例的输入只差一个 Mode —— 这正是「同时测允许路径与拒绝路径」的做法。
-func TestNativeModeFailsWhenNativeLacksCapability(t *testing.T) {
-	partial := fullSet("native")
-	partial.Times = nil
-
-	m := NewMatrix(ModeNative, map[Capability]Kind{
-		CapXattr:         KindNative,
-		CapSparseFile:    KindNative,
-		CapNamedStream:   KindNative,
-		CapStableFileID:  KindNative,
-		CapCreationTime:  KindNative,
-		CapDOSAttributes: KindNative,
-	})
-
-	_, err := New(m, testOptions(t), factoryOf(partial, nil), factoryOf(fullSet("builtin"), nil))
-	if err == nil {
-		t.Fatal("native 模式下 native 侧缺项却没报错 —— 静默降级正是本项目禁止的")
-	}
-	var ue *UnsupportedError
-	if !errors.As(err, &ue) {
-		t.Fatalf("错误类型应为 *UnsupportedError，实际 %T: %v", err, err)
-	}
-	if len(ue.Caps) != 1 || ue.Caps[0] != CapCreationTime {
-		t.Errorf("UnsupportedError.Caps = %v, 期望 [creation_time]", ue.Caps)
-	}
-}
-
 // TestBuiltinMustBeComplete 兑现 AGENTS.md §1.2 的第二条铁律。
 //
 // 为什么要在**组装期**硬失败而不是运行期返回 ErrNotSupported：
@@ -242,18 +212,6 @@ func TestAutoSurvivesNativeFactoryError(t *testing.T) {
 	}
 	if got := p.Matrix().Kind(CapXattr); got != KindBuiltin {
 		t.Errorf("Matrix() 应如实报 builtin，实际 %s", got)
-	}
-}
-
-// TestNativeModeSurfacesFactoryError：同样的失败在 native 模式下不许被吞。
-func TestNativeModeSurfacesFactoryError(t *testing.T) {
-	sentinel := errors.New("模拟 native 初始化失败")
-	nf := func(Options) (Set, error) { return Set{}, sentinel }
-
-	_, err := New(NewMatrix(ModeNative, map[Capability]Kind{CapXattr: KindNative}),
-		testOptions(t), nf, factoryOf(fullSet("builtin"), nil))
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("native 模式应把 native 构造失败原样抛出，实际: %v", err)
 	}
 }
 

@@ -3,13 +3,13 @@ package oscap
 import (
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 )
 
 func TestParseModeAccepts(t *testing.T) {
 	cases := map[string]Mode{
 		"auto":     ModeAuto,
-		"native":   ModeNative,
 		"portable": ModePortable,
 	}
 	for in, want := range cases {
@@ -47,9 +47,37 @@ func TestParseModeRejects(t *testing.T) {
 	}
 }
 
+// TestParseModeRejectsRemovedNative 是移除档的反向对照。
+//
+// "native" 在 v0.5 开发版已从 filesystem_mode 移除（原契约「全部能力原生」
+// 在任何平台都无法满足）。它必须**报错**而不是被静默当成别的档，
+// 且报错要指名道姓：说明已移除、并给出替代取值 auto / portable ——
+// 只说"非法"会让人去检查拼写，意识不到配置本身已经过时。
+func TestParseModeRejectsRemovedNative(t *testing.T) {
+	got, err := ParseMode("native")
+	if err == nil {
+		t.Fatalf("ParseMode(\"native\") 应当报错，却返回了 %v", got)
+	}
+	if got != DefaultMode {
+		t.Errorf("ParseMode(\"native\") 失败时应返回 DefaultMode，却返回 %v", got)
+	}
+	msg := err.Error()
+	for _, want := range []string{"auto", "portable", "v0.5"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ParseMode(\"native\") 的错误信息应包含 %q:\n%s", want, msg)
+		}
+	}
+	// 大小写与空白变体走普通非法值路径，同样必须报错（严格解析，不纠正）。
+	for _, in := range []string{"Native", "NATIVE", "native ", " native"} {
+		if _, err := ParseMode(in); err == nil {
+			t.Errorf("ParseMode(%q) 应当报错", in)
+		}
+	}
+}
+
 func TestModeNames(t *testing.T) {
 	got := ModeNames()
-	want := []string{"auto", "native", "portable"}
+	want := []string{"auto", "portable"}
 	if len(got) != len(want) {
 		t.Fatalf("ModeNames() = %v, 期望 %v", got, want)
 	}

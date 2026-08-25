@@ -50,8 +50,8 @@ import (
 //
 // 返回错误的条件很窄：**只有真正的构造失败**（目前各平台都不需要在构造期
 // 分配资源，所以实际只会因 Options 非法而失败）。某一项能力在本宿主上不可用
-// **不是**错误 —— 那会让整个 native 侧被判定为不可用（provider.New 在
-// native 模式下直接抛出、auto 模式下整体退到 builtin），把「一项降级」
+// **不是**错误 —— 那会让整个 native 侧被判定为不可用（provider.New 会
+// 整体退到 builtin），把「一项降级」
 // 放大成「全部降级」，与逐项矩阵的设计相悖。
 func New(o oscap.Options) (oscap.Set, error) {
 	if err := o.Validate(); err != nil {
