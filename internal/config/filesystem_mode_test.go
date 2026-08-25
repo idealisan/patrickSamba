@@ -59,6 +59,7 @@ func TestFilesystemModeRejectsInvalid(t *testing.T) {
 		" auto",      // 不 trim
 		"auto ",      //
 		"builtin",    // 像那么回事但不是取值（builtin 是 adapter 名，不是模式名）
+		"native",     // v0.5 已移除的档：必须报错，不能被当成别的档放行
 		"native ",    //
 		"portable\n", //
 		"true",       // YAML 里手滑写成布尔
@@ -68,6 +69,24 @@ func TestFilesystemModeRejectsInvalid(t *testing.T) {
 		c := baseConfig(t)
 		c.FilesystemMode = v
 		assertInvalid(t, c, "filesystem_mode")
+	}
+}
+
+// TestFilesystemModeNativeRejectedWithRemovalNotice：写已移除的 "native"
+// 必须报错，且报错要带上移除说明与替代取值 —— 只说「非法取值」会让人去
+// 检查拼写，意识不到这一档已经没了、配置必须改。
+func TestFilesystemModeNativeRejectedWithRemovalNotice(t *testing.T) {
+	c := baseConfig(t)
+	c.FilesystemMode = "native"
+	err := Validate(c)
+	if err == nil {
+		t.Fatal("filesystem_mode: native（v0.5 已移除）应当校验失败")
+	}
+	msg := err.Error()
+	for _, want := range []string{"auto", "portable", "v0.5"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("错误信息应包含 %q:\n%s", want, msg)
+		}
 	}
 }
 
