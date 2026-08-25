@@ -101,6 +101,7 @@ func (c *Connection) onSessionEstablished() {
 	}
 	c.handshakeDone = true
 	c.tr.SetHardReadDeadline(time.Time{})
+	handshakeDeadlineClears.Add(1) // 观测点
 	c.log.Debug("认证完成，解除握手期限")
 }
 
@@ -133,12 +134,14 @@ func (c *Connection) serve(ctx context.Context) {
 	for {
 		frame, err := c.tr.ReadFrame()
 		if err != nil {
+			c.countReadExit(err) // 观测点：先按期限来源分类计数，再记日志
 			c.logReadError(err)
 			return
 		}
 
 		resp, err := c.handleFrame(frame)
 		if err != nil {
+			malformedFrameDrops.Add(1) // 观测点
 			c.log.Warn("处理帧失败，断开连接", "err", err)
 			return
 		}
@@ -155,6 +158,26 @@ func (c *Connection) serve(ctx context.Context) {
 		if err != nil {
 			c.log.Debug("写出响应失败", "err", err)
 			return
+		}
+	}
+}
+
+// countReadExit 按读循环退出原因更新观测计数器（AGENTS.md §3 确定性事件计数）。
+//
+// 只由读 goroutine 调用。超时类退出按 lastDeadlineSrc 区分是哪个期限到期：
+// 两者都是 net.Error 超时，仅凭错误值无法区分。
+func (c *Connection) countReadExit(err error) {
+	switch {
+	case errors.Is(err, ErrFrameTooLarge):
+		frameTooLargeDrops.Add(1)
+	default:
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			if c.tr.lastDeadlineSrc == deadlineHard {
+				handshakeTimeoutCloses.Add(1)
+			} else {
+				idleTimeoutCloses.Add(1)
+			}
 		}
 	}
 }

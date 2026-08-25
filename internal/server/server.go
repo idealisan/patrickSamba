@@ -326,6 +326,7 @@ func (s *Server) logRejected(remote string) {
 	now := time.Now()
 	if !s.rejectLogAt.IsZero() && now.Sub(s.rejectLogAt) < rejectLogInterval {
 		s.rejectMu.Unlock()
+		rejectLogSuppressed.Add(1) // 观测点
 		return
 	}
 	n := s.rejectedSince
@@ -351,6 +352,7 @@ func (s *Server) trackConn(ctx context.Context, nc net.Conn) bool {
 	}
 	if len(s.conns) >= s.opts.maxConnections() {
 		s.mu.Unlock()
+		connRejected.Add(1) // 观测点
 		return false
 	}
 	s.conns[c] = struct{}{}
