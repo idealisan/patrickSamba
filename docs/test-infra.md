@@ -305,7 +305,7 @@ Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要�
 | B-L4 | guest 策略（Win11 默认拒绝 guest） | `smbclient -N` 断言 `LOGON_FAILURE` | §B.3 **【实测】** |
 | B-L5 | 全部 5 个方言的协商 | `smbclient -m SMB2_02/SMB2_10/SMB3_00/SMB3_02/SMB3_11` | §B.3 **【实测】** |
 | B-L6 | NTLMv2 报文级正确性 | impacket（独立 Python 实现，第三家栈） | 现有 `scripts/acceptance.sh` |
-| B-L7 | Windows 版**编译期**正确性（含 `_test.go`） | `GOOS=windows go vet ./...` | §B.1 **【实测】**，且 **CI 现在没做** |
+| B-L7 | Windows 版**编译期**正确性（含 `_test.go`） | `GOOS=windows go vet ./...` | §B.1 **【实测】**；**2026-08-25 起 CI 已做**（CNB 测试代码编译校验 stage + GA cross-vet job） |
 | B-L8 | 文件属性 / DOS attribute 往返 | smbtorture `smb2.getinfo` / `smb2.setinfo` | §B.2 |
 | B-L9 | Alternate Data Stream 语义 | smbtorture `smb2.streams` | §B.2 |
 
@@ -317,6 +317,16 @@ Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要�
 ---
 
 ### B.1 **仓库里已经有从未被执行过的 Windows 测试代码**
+
+> **2026-08-25 更新**：本节写作时的两条 CI 缺口此后都已闭合，原文保留作历史调研记录：
+> ① CNB 门禁已新增「测试代码编译校验（全部 build tag × 全部平台）」stage
+> （`test/ci/check-test-compile.sh`，含 windows/darwin/freebsd 的 `_test.go`）；
+> ② main 上已有 GitHub Actions 工作流 `.github/workflows/ci.yml`——多 OS 单测
+> （ubuntu/macos/windows 真实执行 `go test ./...`）+ 跨平台 `go vet`（含 `_test.go`，
+> linux/darwin/windows/freebsd × amd64 及 linux/darwin arm64）。下文「给 qa 的具体建议」
+> （交叉编译门禁改用/补上 `go vet`）即由该 GA job 落实。**Windows 测试代码从未被真实
+> *运行* 这一点仍然成立**（GA 只在 ubuntu 上跑单测；windows-latest 单测的修复见
+> CHANGELOG v0.4.0 已知问题），真机运行仍缺。
 
 这是本节最硬的一条事实，也是 B-W1 的直接证据。
 
@@ -541,6 +551,10 @@ Windows/macOS 云主机**，但支持把自己的机器注册成构建节点，�
 - 缺点：需要一台常开的 Windows 机器 + 网络可达 CNB；矛盾未澄清前有落空风险。
 
 #### 路线 2：镜像到 GitHub 用 `windows-latest`
+
+> **2026-08-25 更新**：这条路线**已被采纳落地** —— main 上已有
+> `.github/workflows/ci.yml`（多 OS 单测 + cross-vet + 三客户端验收），
+> 仓库已镜像到 GitHub 并由 GA 执行（CNB 上不触发）。原文保留作决策过程记录。
 
 **【查文档】** GitHub Actions 标准托管 runner（[官方规格表](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)）：
 
