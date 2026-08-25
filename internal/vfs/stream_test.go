@@ -430,13 +430,103 @@ func TestStreamReadOnlyShare(t *testing.T) {
 }
 
 // TestStreamOnMissingBase：基础对象不存在时不能凭空造出流。
-func TestStreamOnMissingBase(t *testing.T) {
+// TestStreamOpenOnMissingBaseStaysNotFound：**非创建语义**的打开
+// （FILE_OPEN / FILE_OVERWRITE）在基础对象不存在时必须失败，
+// 且不能顺手把基础文件造出来。
+func TestStreamOpenOnMissingBaseStaysNotFound(t *testing.T) {
 	fs := newTestFS(t, false)
-	for _, stream := range []string{StreamAFPInfo, StreamAFPResource} {
-		if _, _, err := fs.Open(&OpenRequest{
-			Path: "ghost.bin", Stream: stream, Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
-		}); !errors.Is(err, ErrNotFound) {
-			t.Errorf("基础对象不存在时打开 %s 应返回 ErrNotFound，得到 %v", stream, err)
+	for _, disp := range []Disposition{OpenExisting, TruncateExisting} {
+		for _, stream := range []string{StreamAFPInfo, StreamAFPResource, "Meta"} {
+			if _, _, err := fs.Open(&OpenRequest{
+				Path: "ghost.bin", Stream: stream, Flags: OpenRead | OpenWrite, Disposition: disp,
+			}); !errors.Is(err, ErrNotFound) {
+				t.Errorf("disposition=%d 基础对象不存在时打开 %s 应返回 ErrNotFound，得到 %v",
+					disp, stream, err)
+			}
+		}
+	}
+	// 失败路径不得留下半成品基础文件。
+	if _, err := os.Lstat(filepath.Join(fs.Root(), "ghost.bin")); !os.IsNotExist(err) {
+		t.Errorf("失败的流打开不该创建基础文件，Lstat err=%v", err)
+	}
+}
+
+// TestStreamCreateBuildsMissingBase：带创建语义的 disposition 在基础对象
+// 不存在时要先把基础文件建出来再开流（bh5 F2）。
+//
+// Samba 对照：对流路径先以 FILE_OPEN_IF 打开基础文件
+// （source3/smbd/open.c:6508 附近），注释原话
+// "We may be creating the basefile as part of creating the stream"。
+// 差异（有意）：Samba 对 FILE_OVERWRITE 也用 OPEN_IF 建基础文件，
+// 我们对 OVERWRITE 保持 NOT_FOUND 且不建 —— 否则一次注定失败的打开
+// 会留下一个空的残留文件。
+func TestStreamCreateBuildsMissingBase(t *testing.T) {
+	cases := []struct {
+		name string
+		disp Disposition
+		want Action
+	}{
+		{"OpenIf", OpenAlways, ActionCreated},
+		{"Create", CreateNew, ActionCreated},
+		{"Supersede", Supersede, ActionCreated},
+		{"OverwriteIf", TruncateAlways, ActionCreated},
+	}
+	for _, stream := range []string{"Meta", StreamAFPInfo} {
+		for _, tc := range cases {
+			t.Run(stream+"/"+tc.name, func(t *testing.T) {
+				fs := newTestFS(t, false)
+				h, action, err := fs.Open(&OpenRequest{
+					Path: "new.bin", Stream: stream,
+					Flags: OpenRead | OpenWrite, Disposition: tc.disp,
+				})
+				if err != nil {
+					t.Fatalf("创建性打开 %s:%s: %v", "new.bin", stream, err)
+				}
+				if action != tc.want {
+					t.Errorf("action = %d, 期望 %d", action, tc.want)
+				}
+				// AFP_AfpInfo 是定长且带签名校验的：必须写合法的 60 字节
+				// blob 才算「真实写入」（全零 FinderInfo 等于删除语义，
+				// 流不会进清单）。通用流写任意内容即可。
+				if stream == StreamAFPInfo {
+					ai := NewAfpInfo()
+					copy(ai.FinderInfo[:], finderInfoPattern())
+					if _, serr := h.WriteAt(ai.Marshal(), 0); serr != nil {
+						t.Fatalf("写入流: %v", serr)
+					}
+				} else {
+					if _, serr := h.WriteAt([]byte("x"), 0); serr != nil {
+						t.Fatalf("写入流: %v", serr)
+					}
+				}
+				if cerr := h.Close(); cerr != nil {
+					t.Fatalf("Close: %v", cerr)
+				}
+
+				// 基础文件必须真的被建出来了。
+				fi, lerr := os.Lstat(filepath.Join(fs.Root(), "new.bin"))
+				if lerr != nil {
+					t.Fatalf("基础文件未被创建: %v", lerr)
+				}
+				if fi.IsDir() {
+					t.Fatal("基础对象应是普通文件")
+				}
+				// 流也要立即可见。
+				list, serr := fs.Streams("new.bin")
+				if serr != nil {
+					t.Fatalf("Streams: %v", serr)
+				}
+				want := ":" + stream + ":$DATA"
+				found := false
+				for _, si := range list {
+					if si.Name == want {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("流清单缺 %s：%v", want, list)
+				}
+			})
 		}
 	}
 }
