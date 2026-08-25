@@ -1,0 +1,109 @@
+# GitHub Actions —— 用 GitHub 的 action 额度跑「更多测试」。
+#
+# 本仓库主 CI 在 CNB（.cnb.yml），只跑 linux 单一镜像。这里用 GitHub Actions 的公开
+# runner 额度，把测试面扩到多 OS（ubuntu/macos/windows）+ 真实第三方客户端验收
+# （smbclient / impacket / go-smb2），作为 CNB 门禁之外的「更多测试」一层。
+#
+# 注意：本文件在 CNB 上不会触发（CNB 只看 .cnb.yml）；它只在仓库被镜像到
+# github.com 后、由 GitHub Actions 执行。
+
+name: Extended Tests (GitHub Actions)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+  GO_VERSION: "1.25"
+
+# Windows runner 默认 shell 是 PowerShell，会把「VAR=value cmd」前缀当成命令解析；
+# 统一强制 bash（CGO_ENABLED 已由上面顶层 env 提供，run 里不再重复内联）。
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------- 跨平台类型检查（含 _test.go 与全部 build tag）
+  cross-vet:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [ linux, darwin, windows, freebsd ]
+        goarch: [ amd64 ]
+        include:
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: 跨平台 go vet（含 _test.go × 全部 build tag）
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet -tags integration,smoke,metabolt,qadefect ./...
+
+  # ---------------------------------------------------------------- 多 OS 单元测试（ubuntu/macos/windows 真实执行）
+  unit:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: 禁用 CGO 构建
+        run: go build ./...
+      - name: 单元测试（与交付形态一致）
+        run: go test -count=1 ./...
+      - name: Windows 旁路元数据存储实测 (bolt.go 仅 metabolt tag 可执行)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -tags metabolt -count=1 ./internal/meta/...
+      - name: portable 模式实测
+        if: matrix.os == 'ubuntu-latest'
+        run: sh test/ci/portable-mode.sh
+      - name: go-smb2 集成测试（进程内，第三类客户端）
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -tags integration -count=1 ./test/integration/
+
+  # ---------------------------------------------------------------- 真实第三方客户端验收（AGENTS.md §3 矩阵）
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: 安装 smbclient (Samba CLI) 与 python3-impacket
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y smbclient python3-impacket
+          smbclient --version
+          python3 -c "import impacket; print('impacket ok')"
+      - name: 预拉取 Go 模块（主模块 + gosmb2 独立客户端模块）
+        run: |
+          go mod download
+          ( cd scripts/clients/gosmb2 && go mod download )
+      - name: 客户端 smbclient 验收（AGENTS.md §3 矩阵 1）
+        run: SMB_PORT=4445 SMB_USER=testuser SMB_PASS=testpass bash scripts/acceptance.sh smbclient
+      - name: 客户端 impacket 验收（AGENTS.md §3 矩阵 3，Python 独立栈）
+        run: SMB_PORT=4446 SMB_USER=testuser SMB_PASS=testpass bash scripts/acceptance.sh impacket
+      - name: 客户端 go-smb2 验收（AGENTS.md §3 矩阵 6，纯 Go 端到端）
+        run: SMB_PORT=4447 SMB_USER=testuser SMB_PASS=testpass bash scripts/acceptance.sh gosmb2
