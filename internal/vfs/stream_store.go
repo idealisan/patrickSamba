@@ -234,6 +234,33 @@ func (l *LocalFS) removeStreamStorage(host, slot string) error {
 	return l.removeDosStream(host, slot)
 }
 
+// clearAlternateStreams 丢弃对象上的**全部** alternate data stream。
+//
+// SUPERSEDE / OVERWRITE* 打开基础文件时必须调用：覆盖写之后旧对象的
+// FinderInfo / 资源派生 / 通用流都属于「前世」，残留会让 Finder 显示
+// 旧的颜色标签、让流清单与真机不符。
+//
+// Samba 对照：clear_ads()（source3/smbd/open.c:3584-3598）对 SUPERSEDE /
+// OVERWRITE_IF / OVERWRITE 返回 true，open.c:4436-4446 据此调
+// delete_all_streams()。NTFS 同语义。
+//
+// 尽力而为：单项清理失败不阻断打开 —— 与 Samba 的容错一致，
+// 打开新文件不该因为旧元数据清不掉而整体失败。
+func (l *LocalFS) clearAlternateStreams(host string) {
+	// FinderInfo（netatalk metadata xattr）。
+	if err := l.xattrAt(host, nil).Remove(netatalkMetaXattr); err != nil && err != ErrNotFound {
+		return // 连 xattr 都删不掉，后面多半也做不成，别再折腾。
+	}
+	// 资源派生（._ 旁路文件）。不存在是常态，忽略 ENOENT。
+	_ = os.Remove(dotUnderscoreName(host))
+	// 通用流（user.DosStream.* xattr），逐条删。
+	if infos, err := l.caps.Streams().ListStreams(l.streamRef(host)); err == nil {
+		for _, si := range infos {
+			_ = l.removeDosStream(host, si.Name)
+		}
+	}
+}
+
 // streamsOf 列出一个对象的所有流，供 FileStreamInformation 使用。
 //
 // 必须与 openStream 的可用范围**严格一致**：列出一个打不开的流，
