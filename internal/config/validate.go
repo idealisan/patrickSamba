@@ -226,7 +226,7 @@ func validateServer(c *Config, errs *ValidationErrors) {
 	}
 }
 
-// validateFilesystemMode 校验 OS 能力抽象的三态开关（AGENTS.md §1.2 C9）。
+// validateFilesystemMode 校验 OS 能力抽象的两态开关（AGENTS.md §1.2 C9）。
 //
 // 判定**直接委托给 oscap.ParseMode**，不在这里另抄一份取值表：
 // 合法取值只能有一个真源。两处各写一份 switch 的下场是新增取值时改了一边、
@@ -237,11 +237,13 @@ func validateServer(c *Config, errs *ValidationErrors) {
 // 那就该报错，而不是替它猜一个默认值（Validate 的契约就是"调用前先 ApplyDefaults"）。
 func validateFilesystemMode(c *Config, errs *ValidationErrors) {
 	if _, err := oscap.ParseMode(c.FilesystemMode); err != nil {
+		// 底层 err 一并带出：写 "native"（v0.5 已移除的档）的用户会拿到
+		// 指名道姓的移除原因与替代建议，而不是一句干巴巴的「非法取值」。
 		errs.add("filesystem_mode",
 			"非法取值 %q，可选值: %s"+
-				"（auto=逐项探测自动降级；native=强制原生、不支持则启动报错；"+
-				"portable=全部使用本项目自带实现，可移植性最高）",
-			c.FilesystemMode, strings.Join(oscap.ModeNames(), ", "))
+				"（auto=逐项探测自动降级；"+
+				"portable=全部使用本项目自带实现，可移植性最高）：%v",
+			c.FilesystemMode, strings.Join(oscap.ModeNames(), ", "), err)
 	}
 }
 
