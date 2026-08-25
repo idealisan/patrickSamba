@@ -41,10 +41,11 @@
 - **操作系统只当「文件系统 + 套接字」用**：不依赖内核 cifs 驱动、不依赖 `mount`、
   不依赖 namespace，也不假设宿主文件系统支持扩展属性、稀疏文件、稳定 inode 或创建时间。
   这条由 `scripts/check-constraints.sh` 的 C9 段机器校验。
-  ⚠️ 承诺的**后半句在 v0.2.0 只兑现到「代码已建成」这一步**：
-  不依赖可选文件系统能力所需的自带实现（`internal/oscap/builtin`）已经写完并有 CI 覆盖，
-  但**还没有接进真实数据路径**，所以宿主不支持扩展属性时这些元数据目前仍会静默丢失。
-  详见「[已知限制与说明](#notes)」第 7 条与 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.2.0 段。
+  承诺的后半句自 v0.3.0 起完整兑现：不依赖可选文件系统能力的自带实现
+  （`internal/oscap/builtin`）已接进真实数据路径（6 项能力全部生效），
+  宿主不支持某项能力时由旁路存储兜底，不再静默丢失；
+  取用策略由 `filesystem_mode` 控制（`auto` / `portable` 两态）。
+  详见「[已知限制与说明](#notes)」第 7 条与 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.3.0 段。
 
 ---
 
@@ -115,10 +116,12 @@ smb: \> rmdir subdir
 > 端口用 `-p` 指定（如 `-p 445`）。写成 `//127.0.0.1:445/share` 会被当成
 > NetBIOS 名字而解析失败。
 
-**关于 `mount.cifs`（Linux 内核客户端）**：本项目的开发 / CI 容器缺少
-`CAP_SYS_ADMIN`，因此在该容器内执行 `mount -t cifs` 会报
-`Unable to apply new capability set` 而失败。这是**环境限制，不是服务端不支持
-Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
+**关于 `mount.cifs`（Linux 内核客户端）**：本项目的开发 / CI 容器跑在
+**非初始 user namespace** 里（`cat /proc/self/uid_map` = `0 1000 1`），内核只放行带
+`FS_USERNS_MOUNT` 标志的文件系统，而 cifs 没有这个标志，于是 `mount -t cifs` 报
+`mount error(1): Operation not permitted`。这是**环境限制，不是服务端不支持
+Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capability 重跑仍然失败，
+同容器 `mount -t tmpfs` 却成功），在具备初始 namespace 的普通 Linux 主机上，
 `mount -t cifs //host/share /mnt -o user=alice,pass=...` 可以正常挂载。
 （本项目的客户端验收矩阵用 `smbclient` + `impacket` + 纯 Go `go-smb2` 三家覆盖，
 见下方「[客户端测试矩阵](#matrix)」。）
@@ -144,16 +147,16 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 > export CNB_TOKEN=<你的个人访问令牌>
 > ```
 
-最新版本 **v0.2.0** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
+最新版本 **v0.4.0** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
 发布渠道按 **tag 名的 SemVer** 判定 —— 带连字符的 tag（`v0.2.0-rc1`）才走预发布。
 **「正式版通道」说的是发布渠道，不是成熟度背书**，成熟度以下文各节的实测证据为准）：
 
 - **Release 页（推荐，普通用户点这里下载）**：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.2.0`
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.4.0`
   页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
 - **原始文件直链（给脚本 / CI 用）**：
-  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0/stupidsamba_v0.2.0_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.2.0/SHA256SUMS`）。
+  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0/stupidsamba_v0.4.0_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.4.0/SHA256SUMS`）。
   注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
   最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
   ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
@@ -163,32 +166,33 @@ Linux 内核客户端**——在具备该能力的普通 Linux 主机上，
 
 | 平台 | 文件 |
 |---|---|
-| Linux x86-64 | `stupidsamba_v0.2.0_linux_amd64.tar.gz` |
-| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.2.0_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `stupidsamba_v0.2.0_darwin_arm64.tar.gz` |
-| Windows x86-64 | `stupidsamba_v0.2.0_windows_amd64.zip` |
+| Linux x86-64 | `stupidsamba_v0.4.0_linux_amd64.tar.gz` |
+| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.4.0_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `stupidsamba_v0.4.0_darwin_arm64.tar.gz` |
+| Windows x86-64 | `stupidsamba_v0.4.0_windows_amd64.zip` |
 
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.2.0
+BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0
 
 # 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
-  -o stupidsamba_v0.2.0_linux_amd64.tar.gz \
-  "$BASE/stupidsamba_v0.2.0_linux_amd64.tar.gz"
+  -o stupidsamba_v0.4.0_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_v0.4.0_linux_amd64.tar.gz"
 
 # 校验完整性
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
 
-tar -xzf stupidsamba_v0.2.0_linux_amd64.tar.gz
-./stupidsamba_v0.2.0_linux_amd64/stupidsamba -config stupidsamba_v0.2.0_linux_amd64/configs/example.yaml
+tar -xzf stupidsamba_v0.4.0_linux_amd64.tar.gz
+./stupidsamba_v0.4.0_linux_amd64/stupidsamba -config stupidsamba_v0.4.0_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
 
-> 说明：Release 页面上同时保留 `v0.1.0` 与 `v0.1.0-test` 条目。
-> `v0.1.0-test` 是发布流程的**验证记录**，**请勿下载使用**；`v0.1.0` 是上一个版本。
+> 说明：Release 页面上保留着历史条目 `v0.1.0` ~ `v0.3.0`，以及发布流程验证用的
+> `v0.1.0-test` / `v0.0.99-probe` / `v0.2.0-rc0`。后三个是**流程验证记录**，
+> **请勿下载使用**；`v0.1.0` ~ `v0.3.0` 是旧版本，新部署请用 v0.4.0。
 
 ### 方式一之二：Docker 镜像（NAS / 家庭服务器推荐）
 
@@ -210,7 +214,7 @@ docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
 docker run -d --name stupidsamba \
   -p 127.0.0.1:4445:445 \
   -v /你的目录:/data \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
 
 smbclient //127.0.0.1/public -p 4445 -N -m SMB3 -c ls
 ```
@@ -226,7 +230,7 @@ docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
   -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.2.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
 ```
 
 两点须知：
@@ -250,7 +254,7 @@ CGO_ENABLED=0 go build -o stupidsamba ./cmd/stupidsamba
 
 ```sh
 go build -trimpath \
-  -ldflags "-s -w -X main.version=v0.2.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -ldflags "-s -w -X main.version=v0.4.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o stupidsamba ./cmd/stupidsamba
 ```
 
@@ -284,7 +288,7 @@ done
 
 | 字段 | 含义 | 默认值 |
 |---|---|---|
-| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `native` / `portable`，**大小写敏感**。⚠️ **6 项里只有扩展属性与命名流已接进数据路径**，这两项三档行为确实不同，另外四项三档仍然等价；且 **`native` 档在 linux / darwin / windows 上都会启动失败**（每个平台各有至少一项能力被硬编码为不支持），见[已知限制](#notes)第 7 条 | `auto` |
+| `filesystem_mode` | OS 可选能力（扩展属性 / 稀疏文件 / 命名流 / 稳定 FileID / 创建时间 / DOS 属性）的取用策略，`auto` / `portable` 两态，**大小写敏感**。六项能力自 v0.3.0 起**全部接进数据路径**，两态对全部六项都有真实运行期效果。⚠️ 旧的第三态 `native` 已在 v0.5 开发版移除：旧配置写了 `filesystem_mode: native` 会启动报错，改 `auto` 或 `portable`，详见[已知限制](#notes)第 7 条 | `auto` |
 
 ### `server`
 
@@ -334,7 +338,7 @@ done
 | `valid_users` | 限定可访问用户，留空表示所有已认证用户；名字必须在 `auth.users` 里定义过 | 所有已认证用户 |
 | `time_machine` | 把本共享宣告为 Time Machine 备份目标（阶段二） | `false` |
 | `quota_bytes` | 向客户端**上报的卷容量上限**（字节）；`0` = 不限（按宿主真实剩余上报）。这是限制 Time Machine 备份体积的**唯一有效手段**（见[Time Machine 状态](#timemachine)）。⚠️ 上报的**可用空间 = `quota_bytes` − 宿主卷已用空间**（出于性能不递归统计本共享自身占用），因此 **`quota_bytes` 必须大于「宿主卷已用空间 + 期望备份体积」**，否则即使共享是空的，客户端也会看到可用空间为 0 而拒绝开始备份 | `0` |
-| `metadata_path` | POSIX 元数据旁路存储路径，**仅 Windows 使用**；Linux/macOS **留空**即可。⚠️ 校验**只在 Windows 做**：非 Windows 上 `internal/config/validate.go:394-396` 在 `hostOS != "windows"` 时直接 `return`，**完全不校验**，只打一条 WARN「该字段仅在 Windows 上生效…会忽略它」，服务照常启动。所以「在 Linux 上填 `C:\...` 会起不来」是**过时说法**——实测 Linux 二进制 + `metadata_path: C:\ProgramData\stupidsamba\x.db` 仅 WARN、监听照起（退出 0）。跨平台复用同一份配置时这项要么留空、要么按平台分开写 | 空（落在 `%AppData%\stupidsamba\` 下，按共享根路径哈希命名） |
+| `metadata_path` | 旁路元数据库落盘路径。⚠️ **所有平台都生效**——旁路库位置在非 Windows 上自 v0.3.0 接线起就真实生效，v0.4.0 起**配置校验**也改为全平台（不再是「仅 Windows」的字段）：它既决定 Windows 上 POSIX 属主/权限位旁路库的位置，也决定 oscap builtin 六项能力旁路库（`.stupidsamba-oscap-*.db`）的位置——后者在 `auto` 与 `portable` 两档、任何平台上都会真实创建。校验在**所有平台**做：必须是**当前运行平台**意义上的绝对路径且父目录已存在；把 Windows 路径写进 Linux 配置会**直接启动失败**（报错会点明「另一个平台的绝对路径」；这是 v0.4.0 的行为变化，此前仅 WARN 放行）。留空时落点由程序自己决定：oscap 旁路库落在**共享根目录的兄弟位置**（文件名编入根路径哈希与服务实例标识，多进程各开各的库不互抢文件锁），Windows 的 POSIX 库落在 `%AppData%\stupidsamba\` 下。填在共享目录内部不会报错但会有一条 WARN（客户端能看见这个数据库文件） | 空（按上述默认规则落点） |
 
 ### `mdns`
 
@@ -363,10 +367,12 @@ done
 
 - **SMB 2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1** —— 全部支持，协商范围由 `min_dialect` /
   `max_dialect` 限定。
-- **SMB1 仅作为多协议协商入口**：老客户端（以及 Linux 内核 cifs、impacket 的默认
-  行为）会先发 SMB1 `SMB_COM_NEGOTIATE` 并带 `"SMB 2.???"`，本服务用 SMB2 响应
-  把它升级到 SMB2。**本服务不提供任何 SMB1 文件操作**，因此 EternalBlue 一类针对
-  SMB1 文件操作的攻击面在这里为零。
+- **SMB1 仅作为多协议协商入口**：老客户端会先发 SMB1 `SMB_COM_NEGOTIATE` 并带
+  `"SMB 2.??"`，本服务用 SMB2 响应把它升级到 SMB2。**本服务不提供任何 SMB1 文件操作**，
+  因此 EternalBlue 一类针对 SMB1 文件操作的攻击面在这里为零。
+  （如实说明：2026-08-25 的三方黑盒复测里没有任何客户端真的走到这条入口——
+  新版 smbclient 已剔除 SMB1、impacket 0.12 默认直发 SMB2——所以该路径目前只有
+  单元测试档证据；纯 SMB1 请求会被正确拒绝并记 WARN。见 `docs/protocol-notes.md` §4。）
 
 ### 已实现的 SMB2 命令
 
@@ -385,6 +391,33 @@ done
 - **`OPLOCK_BREAK`**：本服务在 `CREATE` 时一律授予 `NONE` oplock、也不宣告 leasing
   能力，因此正常情况下客户端不会发来 oplock/lease break；万一收到则按协议返回
   `STATUS_INVALID_PARAMETER`。即「真实 oplock/lease 能力」尚未实现。
+
+### 文件行为语义（v0.4.x 对照 Samba 的修正）
+
+以下行为自 v0.4.x 起生效（对照真实 Samba 行为逐项核对后的修复波），此前的版本
+在这些点上是空壳或语义错误：
+
+- **字节范围锁是真的**（v0.4.x 起）：`LOCK` 授予的范围锁现在会真正阻挡**其他句柄**
+  对重叠区间的 READ/WRITE——读只被外句柄的独占锁阻挡，写被任何重叠的外句柄锁阻挡；
+  同一句柄自己的锁不妨碍自己（与 Samba 的 STRICT_LOCK_CHECK 一致），冲突回
+  `STATUS_FILE_LOCK_CONFLICT`。句柄关闭/断连时其全部锁随之释放。
+- **READONLY 属性拒绝写入**（v0.4.x 起）：带 `FILE_ATTRIBUTE_READONLY` 的目标，
+  WRITE 按**打开时的属性快照**拒绝（`STATUS_ACCESS_DENIED`）。判据是配置与属性位，
+  不读宿主 ACL。注意这与共享级 `read_only: true` 是两层独立的只读：前者按对象属性，
+  后者按共享配置。
+- **零长度读成功回 0 字节**（v0.4.x 起）：`READ` Length=0 不再回 `END_OF_FILE`
+  而是正常成功——它是客户端的合法探测手法；越界非零读才回 `END_OF_FILE`。
+  同时鉴权检查先于一切长度判定，无权句柄不再能借零长读探测文件是否存在。
+- **CREATE 携带的 FileAttributes 生效**（v0.4.x 起）：创建性打开携带的属性位按 Samba
+  语义落地——`DIRECTORY` 位静默剥掉（目录与否由操作本身决定）、自动叠上 `ARCHIVE`、
+  只对 created/overwritten/superseded 生效（opened 不动既有属性）；新建对象的
+  创建时间同样会持久化到旁路库，改名/删除会把旁路元数据一并迁移或清理，
+  不再残留孤儿记录。
+- **流的删除粒度是单个流**（v0.4.x 起）：对 `file.txt:stream` 句柄做删除
+  （delete-on-close 或 SET_INFO FileDisposition）只删那一个流，不再连带删掉基础文件
+  与其他流。配套语义：带创建意图（OPEN_IF 等）打开流时若基础文件不存在会自动建出
+  空基础文件；SUPERSEDE/OVERWRITE* 打开时会清掉残留的 Apple 元数据流
+  （FinderInfo 等），避免截断后的「新」文件仍显示旧的颜色标签。
 
 ### 认证 / 签名 / 加密
 
@@ -425,8 +458,9 @@ done
 
 ## Time Machine 状态 <a name="timemachine"></a>
 
-> **截至 v0.2.0，本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
-> 开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过。
+> **截至 v0.4.0（含），本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
+> 开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过（v0.2.0 时如此，
+> 此后三个版本也没有补上这个验证）。
 > 下面列的是「服务端前置能力已实现并实测」，**不等于「Time Machine 能用」**：前者是
 > 对服务端行为的探针，后者需要真机端到端验证。
 >
@@ -451,7 +485,8 @@ done
 - 命名流与 Alternate Data Stream（含目录上的流，`.sparsebundle` 依赖）；
 - 稀疏文件 FSCTL 三件套（`SET_SPARSE` / `SET_ZERO_DATA` / `QUERY_ALLOCATED_RANGES`）；
 - 卷容量与 `quota_bytes` 上报；
-- 大目录枚举性能（5 万 band 文件全量枚举约 0.28 s，内存不增长）；
+- 大目录枚举性能（v0.4.0 基线：5 万条**热**枚举约 0.34 s、约 6–7 µs/条且线性扩展；
+  更早的 v0.2 实测约为 0.28 s。见 `test/reports/perf-v040-20260825.md`，loopback 口径）；
 - `_adisk._tcp` mDNS 广播。
 
 `F_FULLFSYNC`：Linux / Windows 分支实测通过（**B 档**）；**Darwin 的 `F_FULLFSYNC` 分支
@@ -526,31 +561,30 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
      同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
      别只改 CHANGELOG 那一处。
      全部落点一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
-7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6）**：
-   配置里可以填 `auto` / `native` / `portable`，填错会启动报错（校验是真的）。
+7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6），
+   取值为 `auto` / `portable` 两态**：
    **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
-   现在都已接进 VFS 数据路径**，三档行为对全部六项**确实不同**：
+   都已接进 VFS 数据路径**，两态行为对全部六项**确实不同**：
    `portable` 整机不碰宿主可选能力（数据落自带旁路存储），`auto` 在支持的宿主上逐项优先走原生并降级。
    自行复算：`go list -deps ./cmd/stupidsamba | grep -c oscap` = `3`
    —— `internal/oscap`、`oscap/native`、`oscap/builtin` 都被链进了二进制（v0.2.0 接线前是 `1`）。
    六项调用点核查：`grep -rn 'caps\.\(Xattr\|Streams\|Sparse\|StableFileID\|CreationTime\|DOSAttributes\)()' --include='*.go' . | grep -v '^./internal/oscap/' | grep -v '_test.go' | grep -v '//'`
    （只证明有调用点，不证明端到端跑通；端到端验证强度见 CHANGELOG v0.3.0 段）。
 
+   ⚠️ **第三态 `native` 已在 v0.5 开发版移除**（项目所有者 2026-08-25 拍板）：旧配置写了
+   `filesystem_mode: native` 会启动报错并建议改用 `auto` 或 `portable`。移除原因是它的契约
+   「全部能力强制走原生、缺一项启动即报错」在任何平台都无法满足——每个平台都至少有一项能力被
+   源码硬编码为不支持（linux/darwin 的 DOS 属性位、darwin 另缺稀疏文件、windows 缺 xattr、
+   其余平台六项全无），三平台恒定启动失败，「钉死原生路径」的测试需求由 `auto` +
+   生效矩阵断言覆盖（见 vfs 测试的 requireKind 做法）。默认值本来就是 `auto`，
+   未显式写过 `native` 的用户不受影响。
+   详见 [`CHANGELOG.md`](CHANGELOG.md) 的 Unreleased 段与 `BEGIN-OSCAP-WIRING-STATUS` 块。
+
    > **历史（v0.2.0 时仅 2/6）：** 彼时只有扩展属性（xattr）与命名流两项接进数据路径，
-   > 其余四项（稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）三个取值跑起来行为完全一样，
+   > 其余四项（稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）各取值跑起来行为完全一样，
    > 在 FAT32/exFAT 外置盘、`nouser_xattr` 挂载、只读根这类宿主上照旧静默丢失。
    > v0.3.0 由 vfs-sparse / vfs-attr 角色把四项也接进后，本段更新为 6/6；请勿把本历史段
    > 当成当前状态。
-
-   ⚠️ **`native` 在 linux / darwin / windows 三个平台上都会恒定启动失败**，
-   与文件系统无关（v0.3.0 未修）。`native` 的契约是「有一项不支持就报错、不降级」，而
-   **每个平台都有至少一项能力被源码硬编码为不支持**——linux/darwin 的 `dos_attributes`、
-   darwin 还有 `sparse_file`、**windows 的 `xattr`**（`internal/oscap/probe_windows.go:24`
-   无条件 `return false`，因为不拿 NTFS ADS 冒充 xattr 语义），三家相乘即没有任何平台能让
-   `native` 起来。默认 `auto`，未显式写 `native` 的用户不受影响；撞上了改用 `auto` 或 `portable`。
-   **那句报错的归因是错的**——真相是本平台压根没有这一项的原生实现，换个文件系统一样失败；
-   文案修正排在 v0.3.0 之后。
-   详见 [`CHANGELOG.md`](CHANGELOG.md) 的 `BEGIN-OSCAP-WIRING-STATUS` 块（位于 v0.2.0 段，已同步更新为 6/6）。
 <!-- END-OSCAP-WIRING-STATUS-README -->
 
 ---
@@ -562,8 +596,8 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
 | 客户端 | 状态 | 说明 |
 |---|---|---|
 | `smbclient`（Samba CLI） | ✅ 已实测 | `ls` / `put` / `get` / `mkdir` / `rm` / `rmdir`、各方言、加密、`nt_hash` 登录均通过 |
-| `impacket`（Python） | ✅ 目标支持 | 客户端矩阵第 3 项；本服务保留的 SMB1 多协议协商入口正是为它（默认先发 SMB1 协商）而开 |
-| `go-smb2`（纯 Go 客户端） | ✅ 目标支持 | 纯 Go 端到端集成测试，可进 CI |
+| `impacket`（Python） | ✅ 已实测 | 客户端矩阵第 3 项；对 v0.3.0 黑盒复测 11/11 通过（认证拒绝、全操作集、8MB md5 回环、只读强制） |
+| `go-smb2`（纯 Go 客户端） | ✅ 已实测 | 对 v0.3.0 独立客户端 9 步 + 仓库集成套件 21/21 全部通过（含加密与只读强制） |
 | macOS Finder / `mount_smbfs` | 🎯 目标 | Apple 扩展（AAPL / `_adisk` / `readdir_attr`）为其服务；Time Machine 见[上](#timemachine) |
 | Windows 资源管理器 | 🎯 目标 | 签名、`guest` 策略、属性页 |
 | `mount.cifs`（Linux 内核客户端） | ⏭️ 本环境跳过，未实测 | 开发容器跑在**非初始 user namespace** 里（`cat /proc/self/uid_map` = `0 1000 1`），内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统，而 cifs 没有这个标志，于是 `mount error(1): Operation not permitted`。**与 `CAP_SYS_ADMIN` 无关**——`--cap-add SYS_ADMIN` 下重跑仍然失败，同容器 `mount -t tmpfs` 却成功（反向对照）。这是环境限制不是服务端缺陷，但我们**没有**在真实 Linux 主机上验证过，所以这里不写「✅ 支持」。`scripts/acceptance.sh` 把它记为 skip(rc=77) |
@@ -571,6 +605,12 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
 > 想核实「你说支持，凭什么」？完整的多客户端验收报告见
 > [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md)（smbclient / impacket / go-smb2
 > 三家客户端栈逐项实测，含加密 fail-closed 验证），基线 commit `5428bcd`。
+> 更近的黑盒复测见 [`test/reports/client-matrix-v030-20260825.md`](test/reports/client-matrix-v030-20260825.md)
+> （对 v0.3.0：smbclient 七种方言 + 全操作集、impacket 11/11、go-smb2 集成套件 21/21）；
+> 性能基线见 [`test/reports/perf-v040-20260825.md`](test/reports/perf-v040-20260825.md)
+> ——注意那是 **loopback 协议栈基线，不是真实网络吞吐**：4 vCPU 容器里单流大文件约
+> 写 95 MB/s / 读 200 MB/s（SMB3.1.1+签名），并发 16 流聚合读约 716 MB/s，
+> `auto` 与 `portable` 两档在本机负载下性能几乎无差。
 
 ---
 
@@ -609,5 +649,8 @@ sh test/ci/check-test-compile.sh
 - [`configs/example.yaml`](configs/example.yaml) —— 逐字段注释的完整配置示例
 - [`CHANGELOG.md`](CHANGELOG.md) —— 各版本变更记录
 - [`docs/acceptance-v0.1.0.md`](docs/acceptance-v0.1.0.md) —— v0.1.0 多客户端验收报告（smbclient / impacket / go-smb2 实测矩阵、加密 fail-closed 验证方法）
+- [`test/reports/client-matrix-v030-20260825.md`](test/reports/client-matrix-v030-20260825.md) —— 对 v0.3.0 的三客户端黑盒复测报告
+- [`test/reports/perf-v040-20260825.md`](test/reports/perf-v040-20260825.md) —— v0.4.0 性能基线（loopback，非真实网络吞吐）
+- [`docs/timemachine-status.md`](docs/timemachine-status.md) —— Time Machine 逐项验证证据（A/B/C 定级）
 - [`docs/protocol-notes.md`](docs/protocol-notes.md) —— 协议研究笔记（实现依据）
 - [`docs/dev-workflow.md`](docs/dev-workflow.md) —— 开发工作流 SOP（独立 worktree + 独立分支 + PR），参与开发前必读
