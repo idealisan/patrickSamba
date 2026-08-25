@@ -13,6 +13,9 @@ package vfs
 // native 档用宿主能力）。这条路径与 meta 无关、始终可用，所以 non-Windows 上
 // 这三项元数据**不再静默丢失**——AGENTS.md §1.2「已建成 ≠ 已生效」里点名的那块
 // non-Windows 缺口已由 vfs-attr 接线闭合。
-func openMetadataStore(root, metadataPath string) (MetadataStore, error) {
+// instanceID 参数与 Windows 侧（metadata_windows.go）保持同一签名：
+// 本平台用不到它，但签名不一致会让 LocalConfig.InstanceID 的下传在每个
+// 平台文件里各写一遍调用点，容易漏。
+func openMetadataStore(root, metadataPath, instanceID string) (MetadataStore, error) {
 	return nil, nil
 }

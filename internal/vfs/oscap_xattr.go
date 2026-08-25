@@ -48,6 +48,7 @@ func (l *LocalFS) openCaps() error {
 	p, err := oscap.Open(l.cfg.FilesystemMode, oscap.Options{
 		Root:         l.res.Root(),
 		MetadataPath: oscapMetadataDir(l.cfg.MetadataPath),
+		InstanceID:   l.cfg.InstanceID,
 		ReadOnly:     l.cfg.ReadOnly,
 	}, native.New, builtin.New)
 	if err != nil {
