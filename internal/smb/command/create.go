@@ -308,16 +308,20 @@ func splitCreateName(name string) (path, stream string, err error) {
 
 	if i := strings.IndexByte(name, ':'); i >= 0 {
 		path, stream = name[:i], name[i+1:]
-		// 去掉 `:$DATA` 后缀；类型不是 $DATA 的流我们不支持。
+		if stream == "" {
+			// "f:" —— 冒号后面什么都没有。Samba check_path_syntax 对
+			// ':' 后无字符的情况报 OBJECT_NAME_INVALID（bh5 F11）；
+			// 当成主数据流放行会让残缺输入悄悄成功，Windows/Samba
+			// 都是报错的。
+			return "", "", status.ObjectNameInvalid
+		}
+		// 去掉 `:$DATA` 后缀；类型不是 $DATA 的流我们不支持
+		// （与 VFS 层 SplitStreamPath 的类型后缀口径一致，bh5 F11）。
 		if j := strings.IndexByte(stream, ':'); j >= 0 {
 			if !strings.EqualFold(stream[j:], ":$DATA") {
 				return "", "", status.NotSupported
 			}
 			stream = stream[:j]
-		}
-		if stream == "" {
-			// `file::$DATA` 就是主数据流。
-			stream = ""
 		}
 	} else {
 		path = name
