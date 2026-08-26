@@ -5,9 +5,20 @@
 
 ---
 
-## Unreleased（main，v0.5.0 开发中）
+## v0.5.0（2026-08-26，正式版）
 
-> 写作纪律同前：只写已合入 `main` 的内容；本节条目随对应 PR 合入逐一落账。
+> 写作纪律同前：只写已合入 `main` 的内容、按证据强度分档（真机实测 > 第三方客户端
+> 协议级实测 > 单测 > 仅代码存在）。本节所有条目均已合入 `main`。
+>
+> **发布门禁实测记录**（2026-08-26 18:02–18:07 CST，linux/amd64 go1.25.0）：
+> `CGO_ENABLED=0 go build/vet/test ./...` 全绿（17 包）；`go test -race` 覆盖
+> vfs/server/smb 七包零数据竞争；`test/ci/check-test-compile.sh` 五平台 × 全 build tag 绿；
+> `scripts/check-constraints.sh` C1/C3/C4/C8/C9 与无 AGPL 依赖全绿。
+
+**本版主题**：对照 Samba 源码排查产出的缺陷大修波。第一波高危 B1–B6、第二波 15 条
+（锁边界 / 元数据 / FSCTL / 命名流）全部闭环，外加三项协议栈性能优化与 SMB 3.1.1
+签名算法协商。行为变化集中在**锁强制与元数据语义**——升级前请阅读各条目的
+「行为变化提示」。
 
 - **移除 `filesystem_mode` 的 `native` 档，配置收敛为两态：`auto`（默认）/ `portable`**。
   移除原因：`native` 的契约是「全部能力强制走原生实现，缺一项启动即报错」，但每个平台都至少有
@@ -160,7 +171,20 @@
   （nonce=MessageId 小端+方向/CANCEL 位；原语以 NIST CAVP GCMVS 官方向量钉住；GCM 硬件路径，
   微基准 1MiB 签名 **7.1×** 于 CMAC）；客户端不支持时显式协商失败、绝不静默降级；
   max_dialect<3.1.1 时启动报错。smbclient 4.22 双向签名互通为协议级实测。
-  ⚠️ **尚未在 Windows/macOS 真机验收，真机验证通过前建议保持 auto**。
+   ⚠️ **尚未在 Windows/macOS 真机验收，真机验证通过前建议保持 auto**。
+
+### 已知问题 / 未实现（v0.5.0）
+
+- **阻塞锁是「同步有界等待」，不是规范的 interim STATUS_PENDING + CANCEL 异步模型**
+  （至多等 10s、并发等待者 ≤64、释放广播唤醒 + 100ms 兜底轮询）。补齐需要 server 层
+  异步未决请求表，已列为移交项。
+- **AES-GMAC 签名协商尚未在 Windows/macOS 真机验收**；真机验证通过前建议保持默认 auto。
+- **CreditCharge 覆盖校验保守放行子 quantum**（代码内标 TODO）。
+- **README 的 `filesystem_mode` 三态措辞订正尾巴未完成**：AGENTS.md / CHANGELOG /
+  configs/example.yaml 均已两态化，README 个别段落仍残留旧表述（进度板两波挂账无人认领）。
+- **Time Machine 真机验收继续未做**（阶段二长期标准，项目所有者 2026-08-09 起为可选项，
+  不是本版发布门槛）；Apple 扩展代码保留并有单测与协议级用例覆盖，如实表述为
+  「已实现、尚未真机验收」。
 
 ---
 
