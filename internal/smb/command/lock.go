@@ -13,31 +13,42 @@ func init() {
 
 // byteRangeLock 是一条已授予的字节范围锁。
 type byteRangeLock struct {
-	// owner 是持有该锁的句柄。同一个 Open 重复加锁不算冲突。
+	// owner 是持有该锁的句柄。
 	owner *Open
-	// offset/length 是锁定区间。length == 0 的锁不锁定任何字节。
+	// offset/length 是锁定区间。
+	// length == 0 的锁是「分界点」标记：不占用字节，但挡住一切跨过
+	// offset 这个点的区间（见 overlaps 的推导）。
 	offset uint64
 	length uint64
 	// exclusive 为 true 表示独占锁（写锁），false 为共享锁（读锁）。
 	exclusive bool
 }
 
-// overlaps 报告本锁与 [off, off+length) 是否有交集。
+// overlaps 报告本锁与请求区间 [off, off+length) 是否有交集。
 //
-// 这里刻意用 128 位安全的写法：off+length 可能在 uint64 上回绕，
-// 直接相加比较会把越界区间误判成不相交（AGENTS.md §8 整数溢出防御）。
+// 判交模型与 Samba brlock.c:158-210 byte_range_overlap 一致：把区间写成
+// **闭区间 [ofs, ofs+len-1]**，两个闭区间相交当且仅当
+//
+//	ofs1 <= last2 && ofs2 <= last1
+//
+// length == 0 的空区间的 last 恰好是 ofs-1（uint64 下溢自然给出），
+// 于是零长锁自动获得「分界点」语义：只挡住同时包含 ofs-1 与 ofs 的
+// 区间 —— 也就是「跨过 ofs 这一点」的区间（bh4-A#5，
+// torture smb2/lock.c:1319-1351 zero_byte_tests：持 {10,0} 时 {9,2} 拒、
+// {10,2} 允许）。唯一必须特判的是 {0,0}：ofs-1 会下溢成 MaxUint64，
+// 不特判它就变成「与一切冲突」，而 Samba locking.c:305 明注
+// 「0 byte ranges ARE allowed and should be stored」。
+//
+// 前置条件：调用方已保证 off+length 不回绕（LOCK 入口有回绕校验见
+// handleLock；READ/WRITE 入口有溢出防御），因此这里的加法不会溢出。
 func (l byteRangeLock) overlaps(off, length uint64) bool {
-	if l.length == 0 || length == 0 {
-		// 零长度锁不占用任何字节，与谁都不冲突（MS-FSA §2.1.4.10）。
-		return false
+	if l.length == 0 && l.offset == 0 {
+		return false // {0,0} 下溢特判：空集，与谁都不相交
 	}
-	// a 的结束位置：用减法改写 a.off+a.len > b.off，避免溢出。
-	//   l.offset+l.length > off  ⟺  l.length > off-l.offset（当 off >= l.offset）
-	// 分两种情况直接比较更稳妥：
-	if l.offset <= off {
-		return l.length > off-l.offset
+	if length == 0 && off == 0 {
+		return false // 同上，针对请求侧
 	}
-	return length > l.offset-off
+	return l.offset <= off+length-1 && off <= l.offset+l.length-1
 }
 
 // lockTable 是一个共享上的字节范围锁表，按共享内相对路径索引。
@@ -48,18 +59,64 @@ type lockTable struct {
 	m  map[string][]byteRangeLock
 }
 
-// conflict 在已有锁中查找与请求区间冲突的锁。
+// conflict 在已有锁中查找与请求区间冲突的锁 —— **LOCK 命令语义**。
 //
-// 冲突规则（MS-FSA §2.1.4.10 / MS-SMB2 §3.3.5.14）：
-// 两个区间有交集，且至少一方是独占锁，且不是同一个句柄持有 —— 才冲突。
-// 同一句柄自己的锁不与自己冲突。
+// 冲突矩阵复刻 Samba brlock.c:225-245 brl_conflict（bh4-A#6）：
+//
+//	READ × READ          永不冲突（任意两个句柄之间）
+//	同句柄且涉及 READ    不冲突（shared-over-exclusive 可叠，
+//	                     torture smb2/lock.c:2205-2236）
+//	其余                 一律冲突 —— 包括**同一句柄**的 W×W
+//	                     （torture :2311-2321「two exclusive locks do
+//	                     not stack」要求 LOCK_NOT_GRANTED）
+//
+// 注意：这只约束 LOCK 命令自身的授予判定。READ/WRITE 入口的强制检查走
+// blocksIO，那里的同句柄豁免是**完全豁免**（Samba STRICT_LOCK_CHECK 按
+// fsp 豁免自己），两者不能混用。
 func (t *lockTable) conflict(path string, o *Open, off, length uint64, exclusive bool) bool {
 	for _, l := range t.m[path] {
-		if l.owner == o {
+		if !l.overlaps(off, length) {
 			continue
 		}
 		if !l.exclusive && !exclusive {
 			// 共享锁之间可以共存。
+			continue
+		}
+		if l.owner == o && !(l.exclusive && exclusive) {
+			// 同一句柄：只要不是独占叠独占，共享/独占混合叠加允许。
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// blocksIO 是 READ/WRITE 入口的字节范围锁强制检查（strict locking）用的
+// 冲突判定。与 conflict()（LOCK 命令语义）的区别只有一点：
+// **同一句柄自己的锁完全豁免** —— Samba 的 SMB_VFS_STRICT_LOCK_CHECK 按
+// fsp 豁免自己（smb2_read.c:584 / smb2_write.c:392），否则句柄连自己刚用
+// LOCK 锁住的区间都写不了。
+//
+// write 为 true 表示写操作：与任何重叠的外句柄锁（独占或共享）冲突；
+// false 表示读操作：只与重叠的外句柄**独占**锁冲突。规则矩阵
+// （MS-FSA §2.1.4.10 / MS-SMB2 §3.3.5.14）：
+//
+//	        对方独占   对方共享
+//	本方读    冲突       放行
+//	本方写    冲突       冲突
+//
+// length == 0 的 IO（零长读/零长写探测）不占用任何字节，直接放行 ——
+// 这与零长锁的分界点语义无关：IO 语义下空操作就是碰不到任何字节。
+func (t *lockTable) blocksIO(path string, o *Open, off, length uint64, write bool) bool {
+	if length == 0 {
+		return false
+	}
+	for _, l := range t.m[path] {
+		if l.owner == o {
+			continue // 同句柄完全豁免（STRICT_LOCK_CHECK 语义）
+		}
+		if !write && !l.exclusive {
+			// 读只被外句柄的独占锁挡住。
 			continue
 		}
 		if l.overlaps(off, length) {
@@ -71,38 +128,49 @@ func (t *lockTable) conflict(path string, o *Open, off, length uint64, exclusive
 
 // checkIO 在 READ/WRITE 入口做字节范围锁强制检查（strict locking）。
 //
-// write 为 true 表示写操作：与任何重叠的外句柄锁（独占或共享）冲突；
-// false 表示读操作：只与重叠的独占锁冲突。规则就是 conflict() 的矩阵
-// （MS-FSA §2.1.4.10 / MS-SMB2 §3.3.5.14）：
-//
-//	        对方独占   对方共享
-//	本方读    冲突       放行
-//	本方写    冲突       冲突
-//
+// 冲突判定走 blocksIO（同句柄完全豁免，读只被外句柄独占锁挡住）。
 // Samba 对照：smb2_read.c:584 / smb2_write.c:392 的同步路径先做
 // SMB_VFS_STRICT_LOCK_CHECK，冲突即 NT_STATUS_FILE_LOCK_CONFLICT。
-// 同一句柄自己的锁不与自己冲突 —— 豁免单位是句柄，与 LOCK 命令一致。
 //
 // path 必须与加锁时的键一致（handleLock 用 open.Path，这里同样用 open.Path）。
 func (t *lockTable) checkIO(path string, o *Open, off, length uint64, write bool) status.Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.conflict(path, o, off, length, write) {
+	if t.blocksIO(path, o, off, length, write) {
 		return status.LockConflict
 	}
 	return status.Success
 }
 
+// validRange 报告锁区间 [ofs, ofs+length) 是否有效。
+//
+// length == 0 恒有效（零长「分界点」标记，见 overlaps）。
+// length > 0 时要求区间不回绕：MS-FSA §2.1.4.10 的判据是
+// (ofs+len-1) < ofs && len != 0 —— 即 ofs > MaxUint64-(len-1)。
+// 回绕区间必须回 STATUS_INVALID_LOCK_RANGE（bh4-A#7，
+// Samba brlock.c:392-400 brl_lock_windows_default 先 byte_range_valid()
+// 再谈授予，失败即 NT_STATUS_INVALID_LOCK_RANGE）。
+func validRange(ofs, length uint64) bool {
+	if length == 0 {
+		return true
+	}
+	return length-1 <= ^uint64(0)-ofs
+}
+
 // lock 原子地授予一组锁。
 //
 // MS-SMB2 §3.3.5.14：一条 LOCK 请求里的多个 LockElement 是**全有或全无**的，
-// 任何一条冲突都不得留下部分已授予的锁。
+// 任何一条冲突都不得留下部分已授予的锁。回绕的锁区间整条回
+// STATUS_INVALID_LOCK_RANGE（bh4-A#7），同样不留任何部分状态。
 func (t *lockTable) lock(path string, o *Open, elems []wire.LockElement) status.Status {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	// 先整体校验，再整体写入。
 	for _, e := range elems {
+		if !validRange(e.Offset, e.Length) {
+			return status.InvalidLockRange
+		}
 		exclusive := e.Flags.IsExclusive()
 		if t.conflict(path, o, e.Offset, e.Length, exclusive) {
 			// 未置 FAIL_IMMEDIATELY 时规范要求把请求挂起、等锁释放再回应

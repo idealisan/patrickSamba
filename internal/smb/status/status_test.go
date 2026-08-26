@@ -39,6 +39,7 @@ func TestKnownValues(t *testing.T) {
 		{LockConflict, 0xC0000054, "STATUS_FILE_LOCK_CONFLICT"},
 		{LockNotGranted, 0xC0000055, "STATUS_LOCK_NOT_GRANTED"},
 		{RangeNotLocked, 0xC000007E, "STATUS_RANGE_NOT_LOCKED"},
+		{InvalidLockRange, 0xC00001A1, "STATUS_INVALID_LOCK_RANGE"},
 		{LogonFailure, 0xC000006D, "STATUS_LOGON_FAILURE"},
 		{FileIsADirectory, 0xC00000BA, "STATUS_FILE_IS_A_DIRECTORY"},
 		{NotSupported, 0xC00000BB, "STATUS_NOT_SUPPORTED"},
