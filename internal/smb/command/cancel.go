@@ -28,14 +28,20 @@ func init() {
 //  3. 命中时，**被取消的那条请求**回 STATUS_CANCELLED；未命中则静默丢弃
 //     （客户端在响应与 CANCEL 交错时本来就会出现取消不到的情况，这不是错误）。
 //
-// 当前实现：本服务端所有 handler 都是**同步**执行的 —— 一条请求在读循环里
+// 当前实现：绝大多数 handler 都是**同步**执行的 —— 一条请求在读循环里
 // 处理完才会读下一帧，因此当 CANCEL 抵达时，被它引用的那条请求要么早已完成
 // 响应，要么就是同一复合帧里的兄弟消息（同样已同步执行完）。也就是说
 // **不存在可被取消的未决请求**，第 2、3 步必然落在"未命中 → 静默丢弃"分支。
 //
-// TODO: 待实现异步未决请求表。等 CHANGE_NOTIFY / 阻塞式 LOCK / 长 READ 改成
-// 异步（回 STATUS_PENDING + SMB2_FLAGS_ASYNC_COMMAND）之后，需要在 Conn 上
-// 维护 map[cancelKey]*pendingRequest，在这里查表并触发其取消。
+// bh4-A#4 之后 LOCK 有了阻塞等待（lockTable.waitLock），但它同样是
+// **同步**等待：handler 占着读循环等锁释放/超时，期间这条连接根本收不到
+// CANCEL 帧。所以「阻塞中的 LOCK 可被 CANCEL 取消」这一规范语义仍然
+// 不存在 —— 等待至多 blockingLockMaxWait 就会自行返回。
+//
+// TODO: 待实现异步未决请求表（需要 internal/server 的 Connection 提供异步
+// 写通路与 pending 表注入，见 handleLock 注释的「已知差距」）后：
+// 阻塞 LOCK 改为回 interim STATUS_PENDING 并登记进 map[cancelKey]，
+// 这里查表触发其取消；CHANGE_NOTIFY / 长 READ 同步受益。
 func handleCancel(ctx *Context) error {
 	// 不解析报文体：CANCEL Request 的 body 只有 StructureSize(4) 与
 	// Reserved，没有任何可用信息；而且**解析失败也无法回错误**，
