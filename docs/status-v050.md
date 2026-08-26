@@ -283,3 +283,22 @@ mdns.apple 默认开启 + Windows 带端口直连文档订正），见 CHANGELOG
 遗留移交（perf 分析报告 §8，需后续立项）：command.handleRead 双拷贝、bbolt DOS
 落库写放大、AES-GMAC 协商评估；A#4 异步未决请求表（server 层）；README 三态措辞
 订正尾巴仍待派。
+
+## W3.7 合并记录（team-lead 回填，2026-08-26 16:11 CST，`date` 实测）
+
+第三波三支优化分支评审后**全部合入 main**。cmdio 的 alloc profile 双热点归零为决定性证据；
+bolts 落实 D3 边界且比拍板更细（按桶分类，流/关键桶逐事务落盘不变）；gmac 落实 D4
+（默认 auto=现状等价）并超额完成 smbclient 4.22 协议级互通实测。
+
+| 分支 | 远端 HEAD | 合并 | 状态 |
+|---|---|---|---|
+| bolts/dos-nosync | `eb7c598` | merge --no-ff | ✅ DONE |
+| cmdio/handleread-single-alloc | `56c2e07` | merge --no-ff | ✅ DONE |
+| gmac/signing-algorithm | 6 commits | merge --no-ff | ✅ DONE |
+
+注：pm 巡检窗口（14:35–15:07）内三支远端为零提交、板面 ⚠️ 催办 OPEN——各角色在本地
+攒齐后于收尾一次推送（§W2.6 同型），催办随推送自然解除。
+遗留：`internal/smb/crypto/zz_gmac_bench_178740_.go` 为 gmac 角色的空壳残留文件
+（禁删令下留置），待人工清理；README 三态措辞尾巴仍待派。
+
+后续：qa 三客户端交叉验证 → v0.5.0 发版（D5）。
