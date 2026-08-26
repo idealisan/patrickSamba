@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 // loadTestdata 读取 testdata 下的配置，把占位符 __SHARE_DIR__ 换成一个真实存在的临时目录，
@@ -170,6 +172,60 @@ func TestLoadMissingFile(t *testing.T) {
 func TestLoadEmptyPath(t *testing.T) {
 	if _, err := Load(""); err == nil {
 		t.Fatal("空路径必须报错")
+	}
+}
+
+// TestLoadToleratesUTF8BOM 是 v0.5.0 Windows 用户真实事故的回归用例：
+// 记事本/PowerShell 保存的 UTF-8 配置常带 BOM，解析器在 [1:1] 报
+// "unexpected key name"，用户对着一个看不见的字符毫无办法。
+// 修复后 UTF-8 BOM 应当被静默剥掉，配置照常加载。
+func TestLoadToleratesUTF8BOM(t *testing.T) {
+	c, err := loadTestdata(t, "bom_utf8.yaml")
+	if err != nil {
+		t.Fatalf("带 UTF-8 BOM 的配置应能加载，实际: %v", err)
+	}
+	if len(c.Shares) != 1 || c.Shares[0].Name != "public" {
+		t.Errorf("shares 解析错误: %+v", c.Shares)
+	}
+}
+
+// 同一份语义钉在 Decode 层：BOM 剥离必须发生在任何入口（Load/Parse/Decode）之前。
+func TestDecodeToleratesUTF8BOM(t *testing.T) {
+	bom := append([]byte{0xEF, 0xBB, 0xBF},
+		[]byte("auth:\n  users:\n    - name: alice\n      password: x\nshares:\n  - name: public\n    path: "+t.TempDir()+"\n")...)
+	c, err := Parse(bom)
+	if err != nil {
+		t.Fatalf("Parse 应容忍 UTF-8 BOM，实际: %v", err)
+	}
+	if c.Auth.Users[0].Name != "alice" {
+		t.Errorf("auth.users[0].name = %q, 期望 alice", c.Auth.Users[0].Name)
+	}
+}
+
+// UTF-16 没法只剥个 BOM 就当 UTF-8 解，必须给人话报错而不是一屏乱码。
+func TestLoadRejectsUTF16WithFriendlyError(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "minimal.yaml"))
+	if err != nil {
+		t.Fatalf("读取 testdata/minimal.yaml: %v", err)
+	}
+	u16 := utf16.Encode([]rune(string(raw)))
+	data := make([]byte, 2+2*len(u16))
+	data[0], data[1] = 0xFF, 0xFE // UTF-16 LE BOM
+	for i, v := range u16 {
+		binary.LittleEndian.PutUint16(data[2+2*i:], v)
+	}
+
+	path := filepath.Join(t.TempDir(), "utf16.yaml")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("写临时配置: %v", err)
+	}
+	_, err = Load(path)
+	if err == nil {
+		t.Fatal("UTF-16 编码的配置必须报错")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "UTF-16") || !strings.Contains(msg, "UTF-8") {
+		t.Errorf("错误信息应指出编码问题并给出改法，实际: %v", msg)
 	}
 }
 
