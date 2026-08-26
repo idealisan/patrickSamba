@@ -284,6 +284,12 @@ func (h *localHandle) SetAttr(attr *Attr, mask AttrMask) error {
 // TODO: 阶段二可以像 Samba 那样存到 user.DOSATTRIB 扩展属性里，
 // 那样 Windows 客户端设置的隐藏属性就能持久化。
 func (h *localHandle) setDOSAttributes(attrs uint32) error {
+	// 入库前滤掉客观事实位（bh3-F8）。Samba 对照：file_set_dosmode
+	// （source3/smbd/dosmode.c:953）先 & SAMBA_ATTRIBUTES_MASK；parse 侧对
+	// SPARSE/REPARSE 单独按「valid on get but not on set」处理
+	// （dosmode.c:377–380）。这些位由读路径按宿主实况合成，客户端设了也
+	// 不落库 —— 否则记录里的假 DIRECTORY/SPARSE 会盖过文件系统的真话。
+	attrs &= settableDOSAttributes
 	// 优先走 oscap.DOS()：builtin 旁路真实记下客户端设置的 DOS 位，
 	// native 档在 Windows 上写 NTFS 原生属性。
 	// 拿不到（ErrNotSupported）回落到平台逻辑；其它错误按 oscap 错误映射上报。
