@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"time"
 )
 
 // FILE_ATTRIBUTE_* 位图（MS-FSCC §2.6 File Attributes，
@@ -66,6 +67,34 @@ func attrFromFileInfo(fi fs.FileInfo, name string, readOnlyShare bool) *Attr {
 	return a
 }
 
+// hiddenByName 报告一个文件名分量是否命中 Unix 隐藏约定（点开头）。
+// "." / ".." 不算 —— 它们是目录游标，不是真名。
+//
+// dosAttributes（无记录时的推导）与 mergeStoredDOS（有记录时的存储值
+// 优先合并）都必须走同一个判定，保证 hide_dot_files 行为在两条路径上一致
+// （Samba 对照：dos_mode_from_name，source3/smbd/dosmode.c:594–608）。
+func hiddenByName(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "." && name != ".."
+}
+
+// calcBtimeFallback 是拿不到内核 btime 时创建时间兜底值的统一口径：
+// **MIN(ctime, mtime, atime)**，atime 为零值（异常）时退 MIN(ctime, mtime)。
+//
+// 为什么不用 ctime 单值：Samba 的 calc_create_time_stat
+// （source3/lib/system.c:131–150）就是取三者最小 —— ctime 会随任何 inode
+// 变更（chmod/链接数）跳动，保时拷贝（rsync/cp -p）的文件 atime/mtime
+// 往往远早于 ctime，取最小值更接近真实创建时刻。
+func calcBtimeFallback(ctime, mtime, atime time.Time) time.Time {
+	out := ctime
+	if mtime.Before(out) {
+		out = mtime
+	}
+	if !atime.IsZero() && atime.Before(out) {
+		out = atime
+	}
+	return out
+}
+
 // dosAttributes 计算 FILE_ATTRIBUTE_* 位图。
 //
 // POSIX 映射规则（docs/protocol-notes.md §11）：
@@ -76,6 +105,9 @@ func attrFromFileInfo(fi fs.FileInfo, name string, readOnlyShare bool) *Attr {
 //   - 符号链接 → REPARSE_POINT
 //   - **结果不能为 0**：普通文件兜底给 ARCHIVE
 //     （返回 0 会让部分 Windows 客户端认为属性无效）
+//
+// 注意：这里的结果只是「无存储记录时的合成基线」。调用方随后会经
+// mergeStoredDOS 用旁路库里的存储值覆盖可设置位（bh3-F5 存储值优先）。
 func dosAttributes(fi fs.FileInfo, a *Attr, name string, readOnlyShare bool) uint32 {
 	// Windows 宿主上 fillSysAttr 已经填好了**原生** DOS 属性位
 	// （NTFS 真的存了 HIDDEN/SYSTEM/ARCHIVE），必须保留而不是覆盖；
@@ -90,7 +122,7 @@ func dosAttributes(fi fs.FileInfo, a *Attr, name string, readOnlyShare bool) uin
 		out |= FileAttributeReparse
 	}
 
-	if strings.HasPrefix(name, ".") && name != "." && name != ".." {
+	if hiddenByName(name) {
 		out |= FileAttributeHidden
 	}
 
