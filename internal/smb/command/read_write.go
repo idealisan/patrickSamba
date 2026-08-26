@@ -115,26 +115,47 @@ func handleRead(ctx *Context) error {
 		}
 	}
 
-	buf := make([]byte, req.Length)
-	n, rerr := h.ReadAt(buf, int64(req.Offset))
+	// ---- 单次分配读路径（v0.5 去双拷贝）----
+	// 旧路径每次 READ 先 make([]byte, Length) 把文件读进临时缓冲，
+	// 再由 Append 整体二次拷进响应缓冲 —— heap profile 里各占 34%/32%
+	// （perf-v050 报告 §4）。现在把数据窗口直接开在响应缓冲里，
+	// ReadAt 一步写进最终位置，线上字节序列与旧路径逐字节一致
+	// （wire golden 与下方 reference 对照测试钉死）。
+	if req.Length == 0 {
+		// 零长度读没有可预留的数据窗口，走常规编码（16+1 占位定长）。
+		// 语义同旧路径（Samba smb2_read.c:404-407 / torture read.c:92-97）：
+		// length=0,min_count>0 → END_OF_FILE；否则成功回 0 字节。
+		if req.MinimumCount > 0 {
+			return status.EndOfFile
+		}
+		out, aerr := (&wire.ReadResponse{}).Append(ctx.Out)
+		if aerr != nil {
+			return status.InsuffServerResources
+		}
+		ctx.Out = out
+		return nil
+	}
+
+	out, rsv, aerr := wire.ReserveReadResponse(ctx.Out, int(req.Length))
+	if aerr != nil {
+		return status.InsuffServerResources
+	}
+	n, rerr := h.ReadAt(rsv.Data, int64(req.Offset))
 	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		// 预留的响应体由 Dispatch 的 fail→ResetBody 统一回滚到响应头，
+		// 不留残迹 —— 与旧路径「读完才写缓冲」的错误面一致。
 		return status.FromVFSError(rerr)
 	}
-	// 读到文件尾一个字节都没读到：仅当客户端确实请求了至少 1 字节时才是
-	// END_OF_FILE（offset ≥ EOF）。length==0 的空读是合法探测，应当成功回
-	// 0 字节 —— Samba smb2_read.c:404-407 仅 nread==0 && in_length!=0 才回
-	// END_OF_FILE，torture read.c:92-97（Windows 归纳）同。
-	if n == 0 && req.Length != 0 {
+	// 一个字节都没读到且确实请求了至少 1 字节 → END_OF_FILE
+	// （offset ≥ EOF）；MinimumCount 不足同样 END_OF_FILE。
+	if n == 0 {
 		return status.EndOfFile
 	}
-	// MinimumCount 是客户端声明的「少于这个数就别回了」。
-	// length=0,min_count>0 时 n==0 < min_count → END_OF_FILE（torture 同）。
 	if req.MinimumCount > 0 && uint32(n) < req.MinimumCount {
 		return status.EndOfFile
 	}
 
-	resp := &wire.ReadResponse{Data: buf[:n]}
-	out, aerr := resp.Append(ctx.Out)
+	out, aerr = rsv.Commit(out, n)
 	if aerr != nil {
 		return status.InsuffServerResources
 	}
