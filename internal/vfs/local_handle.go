@@ -195,7 +195,7 @@ func (h *localHandle) Stat() (*Attr, error) {
 			// 用 caps 的稳定 FileID 覆盖 fillSysAttr 填的 st.Ino。
 			a.FileID = h.fs.fileIDAt(h.host, h.f, a.FileID)
 			fillSysAttrFromFile(h.f, a)
-			h.fs.mergeStoredDOS(h.host, h.f, a)
+			h.fs.mergeStoredDOS(h.host, h.f, a, h.name)
 			h.fs.applyMetadata(h.host, a)
 			return a, nil
 		}
