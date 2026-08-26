@@ -251,8 +251,11 @@ func TestSplitStreamPath(t *testing.T) {
 		{in: "f.txt:AFP_Resource:$DATA", base: "f.txt", name: "AFP_Resource"},
 		// 类型可省略
 		{in: "f.txt:AFP_AfpInfo", base: "f.txt", name: "AFP_AfpInfo"},
-		// 目录流类型
-		{in: "d:s:$INDEX_ALLOCATION", base: "d", name: "s"},
+		// 类型后缀只认 $DATA：$INDEX_ALLOCATION 是目录索引的类型，
+		// Samba streams_xattr_get_name 同样只认 ":$DATA"，其余拒绝
+		// （bh5 F11：与命令层 splitCreateName 统一口径）。
+		{in: "d:s:$INDEX_ALLOCATION", wantErr: true},
+		{in: "d::$INDEX_ALLOCATION", wantErr: true},
 		// 大小写不敏感的类型后缀
 		{in: "f.txt:s:$data", base: "f.txt", name: "s"},
 		// 共享根上的流
