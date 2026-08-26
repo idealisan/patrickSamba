@@ -231,6 +231,13 @@ func (l *LocalFS) removeStreamStorage(host, slot string) error {
 	if err := validateDosStreamName(slot); err != nil {
 		return err
 	}
+	// bh5 F10：delete-on-close 走的是 CREATE 时解析出的流名，与磁盘拼写
+	// 可能只差大小写。按 openStream 同一条兜底规则折到真实拼写再删 ——
+	// removeDosStream 对「不存在」是幂等的，删错名字不会报错，只会把
+	// 真流留在盘上。
+	if real, ok := l.resolveDosStreamName(host, slot); ok {
+		slot = real
+	}
 	return l.removeDosStream(host, slot)
 }
 
