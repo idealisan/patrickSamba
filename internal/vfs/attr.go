@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"time"
 )
 
 // FILE_ATTRIBUTE_* 位图（MS-FSCC §2.6 File Attributes，
@@ -74,6 +75,24 @@ func attrFromFileInfo(fi fs.FileInfo, name string, readOnlyShare bool) *Attr {
 // （Samba 对照：dos_mode_from_name，source3/smbd/dosmode.c:594–608）。
 func hiddenByName(name string) bool {
 	return strings.HasPrefix(name, ".") && name != "." && name != ".."
+}
+
+// calcBtimeFallback 是拿不到内核 btime 时创建时间兜底值的统一口径：
+// **MIN(ctime, mtime, atime)**，atime 为零值（异常）时退 MIN(ctime, mtime)。
+//
+// 为什么不用 ctime 单值：Samba 的 calc_create_time_stat
+// （source3/lib/system.c:131–150）就是取三者最小 —— ctime 会随任何 inode
+// 变更（chmod/链接数）跳动，保时拷贝（rsync/cp -p）的文件 atime/mtime
+// 往往远早于 ctime，取最小值更接近真实创建时刻。
+func calcBtimeFallback(ctime, mtime, atime time.Time) time.Time {
+	out := ctime
+	if mtime.Before(out) {
+		out = mtime
+	}
+	if !atime.IsZero() && atime.Before(out) {
+		out = atime
+	}
+	return out
 }
 
 // dosAttributes 计算 FILE_ATTRIBUTE_* 位图。

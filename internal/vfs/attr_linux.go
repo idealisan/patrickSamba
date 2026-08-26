@@ -27,10 +27,13 @@ func fillSysAttr(fi fs.FileInfo, a *Attr) {
 	a.Alloc = int64(st.Blocks) * 512
 	a.AccessTime = time.Unix(st.Atim.Unix())
 	a.WriteTime = time.Unix(st.Mtim.Unix())
-	// Linux 的 struct stat 没有创建时间，ctime（inode 变更时间）是最接近的
-	// 兜底；真正的 btime 由 statCreateTime 用 statx(2) 取，见下。
+	// ChangeTime 忠实反映 ctime（inode 变更时间）。
 	a.ChangeTime = time.Unix(st.Ctim.Unix())
-	a.CreateTime = a.ChangeTime
+	// Linux 的 struct stat 没有创建时间。兜底口径对齐 Samba 的
+	// calc_create_time_stat（source3/lib/system.c:131–150）：
+	// MIN(ctime, mtime, atime)，atime 异常为零时退 MIN(ctime, mtime)。
+	// 真正的 btime 由 statCreateTime 用 statx(2) 取，见下。
+	a.CreateTime = calcBtimeFallback(a.ChangeTime, a.WriteTime, a.AccessTime)
 }
 
 // fillSysAttrFromFile 在 Linux 上无需额外处理：fstat 的结果与 lstat 同构，
