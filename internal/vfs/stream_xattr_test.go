@@ -177,6 +177,131 @@ func TestGenericStreamNameLimits(t *testing.T) {
 	}
 }
 
+// TestGenericStreamNameCaseFallback（bh5 F10）：共享配置为大小写不敏感时，
+// 用与磁盘上不同的大小写回访同一个流必须能找到它。
+//
+// Samba 对照：filename.c 在精确匹配 NOT_FOUND 且共享不区分大小写时调
+// get_real_stream_name() 对流名做大小写不敏感匹配后再开
+// （bh5 报告引证 :444-476 与调用点 :983-999）。修复前我们按 xattr 名
+// 字节精确匹配，先写 ":Meta" 后读 ":meta" 会凭空多出一条空流。
+func TestGenericStreamNameCaseFallback(t *testing.T) {
+	fs := newTestFS(t, false) // CaseInsensitive: true
+	requireXattr(t, fs)
+	writeFile(t, fs, "f", "x")
+
+	h := openGeneric(t, fs, "f", "Meta", OpenAlways)
+	if _, err := h.WriteAt([]byte("v1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// FILE_OPEN 以不同大小写回访：必须命中既有流，内容原样读回。
+	h2, action, err := fs.Open(&OpenRequest{
+		Path: "f", Stream: "meta",
+		Flags: OpenRead | OpenWrite, Disposition: OpenExisting,
+	})
+	if err != nil {
+		t.Fatalf("以不同大小写打开既有流: %v", err)
+	}
+	if action != ActionOpened {
+		t.Errorf("action = %d, 期望 ActionOpened", action)
+	}
+	buf := make([]byte, 2)
+	if _, err := h2.ReadAt(buf, 0); err != nil && err.Error() != "EOF" {
+		t.Fatalf("读回: %v", err)
+	}
+	if string(buf) != "v1" {
+		t.Errorf("读到 %q, 期望 %q", buf, "v1")
+	}
+	if err := h2.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// OpenIf 回访也不得再建一条新流。
+	h3, action3, err := fs.Open(&OpenRequest{
+		Path: "f", Stream: "META",
+		Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+	})
+	if err != nil {
+		t.Fatalf("OpenIf 大小写回访: %v", err)
+	}
+	if action3 != ActionOpened {
+		t.Errorf("action = %d, 期望 ActionOpened（应命中既有流而不是新建）", action3)
+	}
+	if err := h3.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 流清单里仍然只有一条 Meta，且内容没丢。
+	got := streamNames(t, fs, "f")
+	if size, ok := got[StreamName("Meta")]; !ok || size != 2 {
+		t.Errorf("流清单 = %v，期望只有 :Meta:$DATA（size=2）", got)
+	}
+	if len(got) != 2 { // 主数据流 + Meta
+		t.Errorf("大小写回访不应产生第二条流: %v", got)
+	}
+}
+
+// TestGenericStreamNameCaseSensitiveShare 钉住 F10 的门控：
+// 大小写敏感的共享上不做兜底 —— 不同大小写就是不同的流名，
+// 这与路径查找的门控（Resolver.caseInsensitive）是同一口径。
+func TestGenericStreamNameCaseSensitiveShare(t *testing.T) {
+	rw := newTestFS(t, false)
+	requireXattr(t, rw)
+
+	root := rw.Root()
+	sens, err := NewLocalFS(LocalConfig{Root: root, CaseInsensitive: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sens.Close() }()
+
+	h := openGeneric(t, rw, "f", "Meta", OpenAlways)
+	if _, err := h.WriteAt([]byte("v1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := sens.Open(&OpenRequest{
+		Path: "f", Stream: "meta",
+		Flags: OpenRead, Disposition: OpenExisting,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("大小写敏感共享上回访 :meta = %v, 期望 ErrNotFound", err)
+	}
+}
+
+// TestRemoveStreamCaseFallback：delete-on-close 走的是 CREATE 时解析出的
+// 流名，可能与磁盘上的拼写只差大小写。RemoveStream 必须按同一条兜底规则
+// 折到真实拼写再删 —— 否则静默漏删（幂等返回 nil，谁都不知道）。
+func TestRemoveStreamCaseFallback(t *testing.T) {
+	fs := newTestFS(t, false)
+	requireXattr(t, fs)
+	writeFile(t, fs, "f", "x")
+
+	h := openGeneric(t, fs, "f", "Meta", OpenAlways)
+	if _, err := h.WriteAt([]byte("v1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sr, ok := interface{}(fs).(StreamRemover)
+	if !ok {
+		t.Fatal("LocalFS 应实现 StreamRemover")
+	}
+	if err := sr.RemoveStream("f", "meta"); err != nil {
+		t.Fatalf("按不同大小写删流: %v", err)
+	}
+	if _, ok := streamNames(t, fs, "f")[StreamName("Meta")]; ok {
+		t.Error("删除后流仍在 —— 大小写兜底没有生效，实际删到了空气")
+	}
+}
+
 // TestGenericStreamTooLarge：超过 xattr 能装下的量要如实报错。
 func TestGenericStreamTooLarge(t *testing.T) {
 	fs := newTestFS(t, false)
