@@ -18,10 +18,10 @@ import (
 // Go 标准库 cipher.NewGCM 交叉核对一致（标准库自身通过 CAVP 验证）。
 func TestGMACNISTVectors(t *testing.T) {
 	cases := []struct {
-		name       string
-		key, iv    string
-		aad        string // GMAC 中即被认证的"消息"
-		wantTag    string
+		name        string
+		key, iv     string
+		aad         string // GMAC 中即被认证的"消息"
+		wantTag     string
 		aadBitsNIST string // GCMVS 里该向量的 [AADlen]（位），留注释备查
 	}{
 		{
@@ -36,8 +36,8 @@ func TestGMACNISTVectors(t *testing.T) {
 		},
 		{
 			name: "AAD=48字节", key: "99e3e8793e686e571d8285c564f75e2b",
-			iv:     "c2dd0ab868da6aa8ad9c0d23",
-			aad:    "b668e42d4e444ca8b23cfdd95a9fedd5178aa521144890b093733cf5cf22526c5917ee476541809ac6867a8c399309fc",
+			iv:      "c2dd0ab868da6aa8ad9c0d23",
+			aad:     "b668e42d4e444ca8b23cfdd95a9fedd5178aa521144890b093733cf5cf22526c5917ee476541809ac6867a8c399309fc",
 			wantTag: "3f4fba100eaf1f34b0baadaae9995d85", aadBitsNIST: "384",
 		},
 	}
