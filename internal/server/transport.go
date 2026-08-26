@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,6 +59,22 @@ var (
 	ErrEmptyFrame = errors.New("smb transport: zero-length frame")
 )
 
+// 传输帧观测计数器（性能分析用，AGENTS.md §3 观测口径）。
+//
+// 每帧一次原子自增，常开代价约几纳秒/帧，不影响语义；
+// 数值经 TransportStats 暴露给管理端口（cmd 层可选开启）。
+var (
+	framesIn  atomic.Uint64
+	bytesIn   atomic.Uint64
+	framesOut atomic.Uint64
+	bytesOut  atomic.Uint64
+)
+
+// TransportStats 返回传输层累计帧计数（收/发的帧数与载荷字节数）。
+func TransportStats() (inFrames, inBytes, outFrames, outBytes uint64) {
+	return framesIn.Load(), bytesIn.Load(), framesOut.Load(), bytesOut.Load()
+}
+
 // Transport 在一条 TCP 连接上收发 Direct TCP 帧。
 //
 // 读侧与写侧各自串行：ReadFrame 只能由连接的读 goroutine 调用；
@@ -86,6 +103,13 @@ type Transport struct {
 	hdr [TransportHeaderSize]byte
 	// whdr 是复用的写头缓冲。
 	whdr [TransportHeaderSize]byte
+
+	// rbuf 是可复用的帧载荷缓冲（堆 profile 显示每帧 make 是最大的
+	// 稳定分配源之一）。安全性依据：serve 循环严格串行 ——
+	// ReadFrame 的返回值在 handleFrame 返回后即无人引用，下一次
+	// ReadFrame 才会覆写；命令层的会话/句柄状态不持有原始请求字节
+	// （pipes 用 io.ReadAll 自行产出缓冲，preauth hash 同步滚动）。
+	rbuf []byte
 }
 
 // NewTransport 基于一条已建立的 TCP 连接创建传输层。
@@ -127,9 +151,11 @@ func (t *Transport) Close() error { return t.conn.Close() }
 // ReadFrame 读取一个完整的 Direct TCP 帧，返回**不含 4 字节头**的载荷。
 //
 // 严格「读满 4 字节头 → 读满 body」，不做任何粘包猜测。
-// 返回的切片是新分配的，调用方可以持有。
 //
-// 对端正常关闭时返回 io.EOF；读到一半断开返回 io.ErrUnexpectedEOF。
+// 返回的切片复用 Transport 内部缓冲：**下一次 ReadFrame 会覆写其内容**，
+// 调用方不得在处理完本帧后继续持有（serve 循环的串行性保证这在
+// 当前调用结构下天然成立）。对端正常关闭时返回 io.EOF；
+// 读到一半断开返回 io.ErrUnexpectedEOF。
 func (t *Transport) ReadFrame() ([]byte, error) {
 	if err := t.applyReadDeadline(); err != nil {
 		return nil, err
@@ -156,7 +182,15 @@ func (t *Transport) ReadFrame() ([]byte, error) {
 		return nil, fmt.Errorf("%w: %d > %d", ErrFrameTooLarge, n, t.maxFrame)
 	}
 
-	buf := make([]byte, n)
+	var buf []byte
+	if cap(t.rbuf) >= n {
+		buf = t.rbuf[:n]
+	} else {
+		// 首次或偶发超大帧：按需扩容并保留复用（maxFrame 恒定，
+		// 实际只发生一次；超出 maxFrame 的帧在上面已被拒绝）。
+		t.rbuf = make([]byte, n)
+		buf = t.rbuf
+	}
 	if _, err := io.ReadFull(t.conn, buf); err != nil {
 		if errors.Is(err, io.EOF) {
 			// body 读了一半就断开，对调用方而言是异常截断。
@@ -164,6 +198,8 @@ func (t *Transport) ReadFrame() ([]byte, error) {
 		}
 		return nil, err
 	}
+	framesIn.Add(1)
+	bytesIn.Add(uint64(n))
 	return buf, nil
 }
 
@@ -216,5 +252,9 @@ func (t *Transport) WriteFrame(payload []byte) error {
 	bufs := net.Buffers{t.whdr[:], payload}
 	// net.Buffers.WriteTo 内部会处理短写与 writev 回退。
 	_, err := bufs.WriteTo(t.conn)
+	if err == nil {
+		framesOut.Add(1)
+		bytesOut.Add(uint64(n))
+	}
 	return err
 }

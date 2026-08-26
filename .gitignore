@@ -16,3 +16,7 @@
 # 明文 CNB_TOKEN —— 见 commit 2e327a6 / 8624094。任何层级都不得再入库。
 # 会话历史要归档请走 scripts/save-history.sh，它落到仓库的 history/ 目录。
 .codebuddy/
+
+# test/perf 基准程序在仓库根/本目录的构建产物
+/perf
+/test/perf/perf-bench
