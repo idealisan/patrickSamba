@@ -27,10 +27,13 @@ func fillSysAttr(fi fs.FileInfo, a *Attr) {
 	a.Alloc = int64(st.Blocks) * 512
 	a.AccessTime = time.Unix(st.Atim.Unix())
 	a.WriteTime = time.Unix(st.Mtim.Unix())
-	// Linux 的 struct stat 没有创建时间，ctime（inode 变更时间）是最接近的
-	// 兜底；真正的 btime 由 statCreateTime 用 statx(2) 取，见下。
+	// ChangeTime 忠实反映 ctime（inode 变更时间）。
 	a.ChangeTime = time.Unix(st.Ctim.Unix())
-	a.CreateTime = a.ChangeTime
+	// Linux 的 struct stat 没有创建时间。兜底口径对齐 Samba 的
+	// calc_create_time_stat（source3/lib/system.c:131–150）：
+	// MIN(ctime, mtime, atime)，atime 异常为零时退 MIN(ctime, mtime)。
+	// 真正的 btime 由 statCreateTime 用 statx(2) 取，见下。
+	a.CreateTime = calcBtimeFallback(a.ChangeTime, a.WriteTime, a.AccessTime)
 }
 
 // fillSysAttrFromFile 在 Linux 上无需额外处理：fstat 的结果与 lstat 同构，
@@ -69,4 +72,18 @@ func statCreateTime(path string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(stx.Btime.Sec, int64(stx.Btime.Nsec)), true
+}
+
+// fileAccessTime 从 FileInfo 取当前 atime。
+//
+// 唯一消费方是 sticky write time 的补偿回写（bh3-F6）：os.Chtimes 必须
+// 同时给 atime 与 mtime，而 POSIX 拿不到「只改其一」的接口，所以先把
+// 当前 atime 读出来原样写回去。取不到时返回 false，调用方放弃补偿
+// （尽力而为，不让补偿动作污染数据路径的错误处理）。
+func fileAccessTime(fi fs.FileInfo) (time.Time, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(st.Atim.Unix()), true
 }

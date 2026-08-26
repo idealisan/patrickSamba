@@ -101,6 +101,25 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		}
 	}
 
+	// bh3-F4 删除面：READONLY 目标不接受 FILE_DELETE_ON_CLOSE
+	// （Samba can_set_delete_on_close，source3/smbd/file_access.c:192–224，
+	// 回 NT_STATUS_CANNOT_DELETE；目录豁免，与 MxAc 口径一致）。
+	//
+	// 必须赶在 fs.Open **之前**判：openFlags 会把 FILE_DELETE_ON_CLOSE 翻译成
+	// vfs.OpenDeleteOnClose，句柄一旦建立，vfs 层的关闭路径就会真的删文件 ——
+	// 打开之后再回错，客户端收到 CANNOT_DELETE 而文件已经没了。
+	// 判据同样是「属性快照」语义：这里取的是打开前最后一次 Stat 的快照，
+	// 与 #196 写面用 open.FileAttributes 的口径等价（同一时刻的宿主实况）。
+	// 新建即带 READONLY 位 + DELETE_ON_CLOSE 的矛盾组合不在此拦截：
+	// 目标尚不存在时无快照可依，且该组合没有真实客户端会发。
+	if req.CreateOptions&wire.FileDeleteOnClose != 0 {
+		if a, serr := fs.Stat(path); serr == nil &&
+			a.FileAttributes&vfs.FileAttributeDirectory == 0 &&
+			a.FileAttributes&vfs.FileAttributeReadonly != 0 {
+			return status.CannotDelete
+		}
+	}
+
 	openReq := &vfs.OpenRequest{
 		Path:           path,
 		Stream:         stream,

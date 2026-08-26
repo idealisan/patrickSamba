@@ -244,6 +244,20 @@ func setAllocation(open *Open, h vfs.Handle, buf []byte) error {
 	return nil
 }
 
+// readOnlyBlocksDelete 报告「打开时属性快照里的 READONLY 位是否禁止删除」。
+//
+// 判据与 #196 的写面（read_write.go）同一口径：打开时的属性快照
+// （open.FileAttributes，create.go 在 fs.Open 之后 Stat 填充），Windows
+// 「打开时定生死」语义。目录豁免 —— 目录的 READONLY 位是自定义标记，
+// 不表示不可删（MxAc 同口径，见 create_context_mxac.go）。
+//
+// Samba 对照：can_set_delete_on_close（source3/smbd/file_access.c:192–224）
+// 对 READONLY 常规文件拒绝（`delete readonly` 默认 no），CREATE 与
+// SET_INFO disposition 两条路都会走到它。
+func readOnlyBlocksDelete(open *Open) bool {
+	return open.FileAttributes&wire.FileAttributeReadonly != 0 && !open.IsDir
+}
+
 // setDisposition 处理 FileDispositionInformation（MS-FSCC §2.4.11）：
 // 置位表示"关闭时删除"。
 func setDisposition(open *Open, buf []byte) error {
@@ -257,6 +271,13 @@ func setDisposition(open *Open, buf []byte) error {
 	if del {
 		if open.GrantedAccess&wire.Delete == 0 {
 			return status.AccessDenied
+		}
+		// bh3-F4 删除面：READONLY 目标不可标记删除。判据是打开时的属性
+		// 快照（readOnlyBlocksDelete），回 STATUS_CANNOT_DELETE 而不是
+		// ACCESS_DENIED —— Windows/Samba 对"对象在但只读"的既定错误码，
+		// Explorer 靠它给出正确的提示文案。
+		if readOnlyBlocksDelete(open) {
+			return status.CannotDelete
 		}
 		// 非空目录不能删：这里就要拒绝，等到 CLOSE 才发现就来不及回错了
 		// （CLOSE 的响应里没有位置报告删除失败）。
