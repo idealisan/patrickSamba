@@ -219,7 +219,7 @@ const (
 	// DefaultSigningAlgorithm 是 Server.SigningAlgorithm 的默认值：
 	// auto = 与历史版本行为完全一致（只按方言默认值签名，不协商 GMAC）。
 	DefaultSigningAlgorithm = "auto"
-	DefaultAppleModel = "MacSamba"
+	DefaultAppleModel       = "MacSamba"
 	// DefaultAppleMDNS 是 MDNS.Apple.Enabled 的默认值：默认开启 Apple 扩展记录。
 	// 理由见 AppleMDNS.Enabled 字段注释。与 DefaultFilesystemMode 同理保持 const。
 	DefaultAppleMDNS = true

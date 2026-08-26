@@ -3,7 +3,22 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"fmt"
 )
+
+// String 返回签名算法的可读名（日志与测试诊断用）。
+func (a SigningAlgorithm) String() string {
+	switch a {
+	case SigningHMACSHA256:
+		return "hmac-sha256"
+	case SigningAESCMAC:
+		return "aes-cmac"
+	case SigningAESGMAC:
+		return "aes-gmac"
+	default:
+		return fmt.Sprintf("signing-alg(%d)", uint16(a))
+	}
+}
 
 // GMAC 计算 AES-128-GMAC：GCM 的 AAD-only 口径（NIST SP 800-38D §5.2.1.2
 // 定义 GMAC 为 P 为空串的 GCM；[RFC 4543 §3] 同口径）。

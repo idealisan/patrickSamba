@@ -223,6 +223,21 @@ func buildSettings(cfg *config.Config, provider auth.Provider, shares []*command
 		return nil, err
 	}
 
+	// 签名算法策略：config 层已校验取值，这里做穷举映射；
+	// default 分支按不可达处理（防御未来新增取值忘了同步）。
+	var signingPref command.SigningPreference
+	switch cfg.Server.SigningAlgorithm {
+	case "", config.DefaultSigningAlgorithm:
+		signingPref = command.SigningAuto
+	case "aes-cmac":
+		signingPref = command.SigningPreferAESCMAC
+	case "aes-gmac":
+		signingPref = command.SigningPreferAESGMAC
+	default:
+		return nil, fmt.Errorf("server.signing_algorithm: 非法取值 %q（validate 未拦截？）",
+			cfg.Server.SigningAlgorithm)
+	}
+
 	return &command.Settings{
 		ServerName: cfg.Server.Name,
 		Domain:     cfg.Server.Domain,
@@ -232,7 +247,8 @@ func buildSettings(cfg *config.Config, provider auth.Provider, shares []*command
 		MinDialect: minD,
 		MaxDialect: maxD,
 
-		SigningRequired: cfg.Server.SigningRequired,
+		SigningRequired:   cfg.Server.SigningRequired,
+		SigningPreference: signingPref,
 		// 只要方言区间里有 SMB3 就允许加密；是否强制由配置决定。
 		EncryptionEnabled:  maxD.SupportsEncryption(),
 		EncryptionRequired: cfg.Server.EncryptionRequired,
