@@ -13,6 +13,7 @@ import (
 
 	"github.com/finalappstore/stupidsamba/internal/smb/command"
 	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
+	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 )
 
@@ -55,6 +56,12 @@ type Connection struct {
 	// handshakeDone 表示本连接已经有过认证成功的会话，握手期限已解除。
 	// 只由读 goroutine 读写。
 	handshakeDone bool
+
+	// vniDropPending 表示本帧处理中出现了 FSCTL_VALIDATE_NEGOTIATE_INFO
+	// 复核失败（bh5-F6）：按 MS-SMB2 §3.3.5.15.12，服务端在回完
+	// STATUS_ACCESS_DENIED 响应后 MUST terminate the transport connection。
+	// serve() 在响应帧写出成功后据此断开。只由读 goroutine 读写，无需加锁。
+	vniDropPending bool
 
 	closeOnce sync.Once
 }
@@ -157,6 +164,15 @@ func (c *Connection) serve(ctx context.Context) {
 		c.writeMu.Unlock()
 		if err != nil {
 			c.log.Debug("写出响应失败", "err", err)
+			return
+		}
+
+		if c.vniDropPending {
+			// bh5-F6：VALIDATE_NEGOTIATE_INFO 复核失败。错误响应已经送达，
+			// 现在按 MS-SMB2 §3.3.5.15.12 终止传输连接（defer c.Close()
+			// 会拆掉会话/树/句柄）。不断连的话，被篡改的客户端收到
+			// ACCESS_DENIED 后仍可继续用这条连接发命令。
+			c.log.Warn("VALIDATE_NEGOTIATE_INFO 复核失败，按规范断开连接")
 			return
 		}
 	}
@@ -446,7 +462,27 @@ func (c *Connection) processMessage(hdr wire.Header, msg []byte,
 	// 会话/树定位与签名校验都在 command.Dispatch 内完成
 	// （它需要在同一处决定响应是否签名）。
 	command.Dispatch(ctx)
+
+	// bh5-F6：VNI 复核失败必须断连（MS-SMB2 §3.3.5.15.12 MUST terminate
+	// the transport connection）。command 层的 handler 错误会转成 NTSTATUS
+	// 响应、不会向上传播，所以在这里按「请求是 VNI + 最终状态是
+	// ACCESS_DENIED」识别复核失败 —— 这正是 ioctlValidateNegotiate 所有
+	// 校验失败分支（GUID/SecurityMode/Capabilities/方言/输入畸形）的统一出口；
+	// 校验通过（SUCCESS）与 3.1.1 的 FILE_CLOSED 分支都不命中。
+	if ctx.Status == status.AccessDenied && isValidateNegotiate(hdr, msg) {
+		c.vniDropPending = true
+	}
 	return ctx
+}
+
+// isValidateNegotiate 报告这条请求是否为 FSCTL_VALIDATE_NEGOTIATE_INFO。
+// 报文解析失败按「不是」处理 —— 那种请求走不到 VNI handler。
+func isValidateNegotiate(hdr wire.Header, msg []byte) bool {
+	if hdr.Command != wire.CommandIoctl {
+		return false
+	}
+	req, err := wire.ParseIoctlRequest(msg)
+	return err == nil && req.IsFSCTL() && req.CtlCode == wire.FSCTLValidateNegotiateInfo
 }
 
 // pad8 把 dst 补齐到 8 字节对齐（复合响应链要求，MS-SMB2 §3.3.5.2.7）。
