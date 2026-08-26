@@ -25,7 +25,7 @@ func New(cfg config.MDNS, port int, shares []config.Share) (*Responder, error) {
 
 	defs := []serviceDef{smbServiceDef(uint16(port))}
 
-	if cfg.Apple.Enabled {
+	if cfg.Apple.EnabledOn() {
 		model := cfg.Apple.Model
 		if model == "" {
 			model = config.DefaultAppleModel

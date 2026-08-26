@@ -24,6 +24,9 @@ func baseConfig(t *testing.T) *Config {
 	return c
 }
 
+// boolPtr 是 *bool 配置项（smb1/browseable/apple.enabled）测试用的取址助手。
+func boolPtr(b bool) *bool { return &b }
+
 // assertInvalid 断言校验失败，且错误信息里出现了所有期望的关键字。
 func assertInvalid(t *testing.T, c *Config, wants ...string) {
 	t.Helper()
@@ -377,7 +380,7 @@ func TestValidateMDNSDisabledSkipsChecks(t *testing.T) {
 func TestValidateTimeMachineAdvertiseNeedsShare(t *testing.T) {
 	c := baseConfig(t)
 	c.MDNS.Enabled = true
-	c.MDNS.Apple.Enabled = true
+	c.MDNS.Apple.Enabled = boolPtr(true)
 	c.MDNS.Apple.AdvertiseTimeMachine = true
 	assertInvalid(t, c, "mdns.apple.advertise_time_machine", "time_machine: true")
 
@@ -390,7 +393,7 @@ func TestValidateTimeMachineAdvertiseNeedsShare(t *testing.T) {
 func TestValidateTimeMachineAdvertiseNeedsApple(t *testing.T) {
 	c := baseConfig(t)
 	c.MDNS.Enabled = true
-	c.MDNS.Apple.Enabled = false
+	c.MDNS.Apple.Enabled = boolPtr(false)
 	c.MDNS.Apple.AdvertiseTimeMachine = true
 	c.Shares[0].TimeMachine = true
 	assertInvalid(t, c, "mdns.apple.advertise_time_machine", "mdns.apple.enabled")
@@ -456,6 +459,26 @@ func TestWarningsGuestOKWithoutAllowGuest(t *testing.T) {
 	c.Auth.AllowGuest = false
 	if !strings.Contains(strings.Join(Warnings(c), "\n"), "guest_ok") {
 		t.Error("guest_ok 与 allow_guest 冲突时应告警")
+	}
+}
+
+// TestWarningsDemoAccount 钉住镜像内置演示账号的告警：公开凭据等于匿名，
+// 用户必须在启动日志里第一眼看到（configs/docker.yaml 的 stupidsamba/stupidsamba）。
+func TestWarningsDemoAccount(t *testing.T) {
+	c := baseConfig(t)
+	// 基准配置里是 alice/changeme，不应触发演示账号告警。
+	if ws := strings.Join(Warnings(c), "\n"); strings.Contains(ws, "演示账号") {
+		t.Errorf("非演示账号不应触发告警，实际:\n%s", ws)
+	}
+	c.Auth.Users[0] = User{Name: "stupidsamba", Password: "stupidsamba"}
+	ws := strings.Join(Warnings(c), "\n")
+	if !strings.Contains(ws, "演示账号") || !strings.Contains(ws, "公开凭据") {
+		t.Errorf("内置演示账号必须告警，实际:\n%s", ws)
+	}
+	// 只换掉口令就不再是那个公开凭据，不应误伤同名用户。
+	c.Auth.Users[0].Password = "my-own-password"
+	if ws := strings.Join(Warnings(c), "\n"); strings.Contains(ws, "公开凭据") {
+		t.Errorf("同名但口令已改的用户不应触发演示账号告警，实际:\n%s", ws)
 	}
 }
 

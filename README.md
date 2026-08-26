@@ -53,15 +53,15 @@
 
 ### 1. 准备配置文件
 
-最小可用配置只需要 `shares` 一段：
+最小可用配置只需要 `shares` 加一个用户（与官方镜像内置的演示账号是同一套）：
 
 ```yaml
 server:
   name: STUPIDSAMBA
 auth:
   users:
-    - name: alice
-      password: "changeme"        # 或改用 nt_hash（见下文）
+    - name: stupidsamba
+      password: "stupidsamba"     # 演示口令，正式使用请换掉；或改用 nt_hash（见下文）
 shares:
   - name: public
     path: /srv/share/public       # 必须是已存在的绝对路径目录
@@ -100,10 +100,10 @@ stupidsamba -config stupidsamba.yaml -check
 
 ```sh
 # 列出共享
-smbclient -L //127.0.0.1 -p 445 -U alice%changeme
+smbclient -L //127.0.0.1 -p 445 -U stupidsamba%stupidsamba
 
 # 进入某个共享做文件操作
-smbclient //127.0.0.1/public -p 445 -U alice%changeme -m SMB3
+smbclient //127.0.0.1/public -p 445 -U stupidsamba%stupidsamba -m SMB3
 smb: \> ls
 smb: \> put localfile.txt
 smb: \> get remotefile.txt
@@ -131,8 +131,12 @@ Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capabilit
 输入用户名 `alice` 与口令即可。若改了端口：`smb://127.0.0.1:445`。
 
 **Windows（资源管理器）**：
-地址栏输入 `\\127.0.0.1\public`（端口非 445 时：`\\127.0.0.1@445\public`），
-在弹出的凭据框里输入 `alice` 与口令。
+地址栏输入 `\\127.0.0.1\public`，在弹出的凭据框里输入用户名与口令。
+**Windows 10/11 默认拒绝 guest 匿名登录**，所以服务端要连得上，配置里必须有
+真实账号（默认配置内置了演示账号，见下文 Docker 一节）。
+另注意 **UNC 路径不支持冒号端口写法**：`\\IP:4445\share` 是无效地址，
+Windows 文件客户端只连 445/tcp——非 445 端口只有 `smbclient -p` 这类能显式
+指定端口的 CLI 客户端能用。
 
 ---
 
@@ -210,20 +214,42 @@ docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
 ```
 
 ```sh
-# 试跑：内置配置开着 guest 匿名读写，所以刻意只发布在回环地址上
+# 试跑：一条命令起服务，内置配置自带演示账号（stupidsamba/stupidsamba），
+# Windows 11 / macOS / Linux 客户端都能直接连。
 docker run -d --name stupidsamba \
-  -p 127.0.0.1:4445:445 \
+  -p 445:445 \
   -v /你的目录:/data \
   docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
 
-smbclient //127.0.0.1/public -p 4445 -N -m SMB3 -c ls
+smbclient //127.0.0.1/public -U stupidsamba%stupidsamba -m SMB3 -c ls
 ```
+
+> 注：已发布的 v0.4.0 镜像内置的还是旧版试用配置（guest 匿名 + 回环端口示例）。
+> 上面的用法（演示账号 + `-p 445:445`）自**包含本版新内置配置的下一个镜像**起生效。
 
 `docker pull` 会按当前平台自动挑架构，不需要指定。要在 amd64 机器上核对 arm64
 那一份，用 `docker pull --platform linux/arm64 ...`。
 
-⚠️ **内置配置 [`configs/docker.yaml`](configs/docker.yaml) 是试用配置，不要直接用于生产**：
-它开着 guest 匿名读写。正式使用请挂载自己的配置覆盖它：
+### 从 Windows 访问
+
+1. 资源管理器地址栏输入 `\\<运行 Docker 的机器 IP>\public`
+   （例如 `\\172.26.0.217\public`；也可以在「添加网络位置」向导里填同样的路径）。
+2. 弹出凭据框时输入用户名 `stupidsamba`、口令 `stupidsamba`
+   （可勾选"记住我的凭据"，之后就不再询问）。
+3. 想映射成网络驱动器：「此电脑 ▸ 映射网络驱动器」，填同一个 UNC 路径并勾选
+   "使用其他凭据连接"即可。
+
+两个最常见的坑：
+
+- **UNC 路径不支持冒号端口写法**：`\\IP:4445\public` 是无效地址，Windows 文件
+  客户端只会连 445/tcp。所以容器要发布成 `-p 445:445`；非 445 端口只有
+  `smbclient -p` 这类能显式指定端口的 CLI 客户端能用。
+- **guest 匿名连不上不是 bug**：Windows 10/11 默认拒绝不安全的 guest 登录，
+  这就是默认配置改用真实账号的原因。
+
+⚠️ **内置配置 [`configs/docker.yaml`](configs/docker.yaml) 是开箱即用的试用配置，
+不要直接用于生产**：演示账号是公开凭据（启动日志会打出 WARN 提醒）。正式使用请
+挂载自己的配置覆盖它：
 
 ```sh
 docker run -d --name stupidsamba \
@@ -240,7 +266,8 @@ docker run -d --name stupidsamba \
   要让 Finder / 资源管理器自动发现，用 `--network host` 起容器，
   并挂载一份把 `mdns.enabled` 改成 `true` 的配置。
 - 容器内固定监听 445。要用非特权端口就改**宿主侧**的映射（`-p 4445:445`），
-  不要改容器内端口。
+  不要改容器内端口。但注意：换掉宿主侧端口后 **Windows 资源管理器就连不上了**
+  （它只连 445，且 UNC 不支持端口写法），只有 `smbclient -p 4445` 这类 CLI 能用。
 
 ### 方式二：从源码构建
 
