@@ -1,6 +1,6 @@
-# v0.5 性能瓶颈定位分析（P1 草稿，2026-08-26）
+# v0.5 性能瓶颈定位分析与优化结果（perf 角色，2026-08-26）
 
-> **性质**：服务端 profile 实测分析，perf 角色（分支 `perf/v050-hotpath`）。
+> **性质**：服务端 profile 实测分析 + P2 优化结果，分支 `perf/v050-hotpath`。
 > 测量基础设施：`test/perf`（P0 收编的 go-smb2 基准）+ 服务端可选管理端口
 > `STUPIDSAMBA_ADMIN_ADDR=127.0.0.1:6455`（仅 loopback，默认关闭，
 > 提供 /debug/pprof/* 与传输帧计数 expvar；commit 见 git log `ci/test` 段）。
@@ -55,6 +55,12 @@ CPU profile（signing 模式，128 MiB 写+读负载期，总采样 2.61s）：
   写方向的请求体（客户端签名→我们验签）与读方向的响应体（我们签名）都要过这条
   慢路径，再叠加 overlayfs pwrite 慢于页缓存命中读、以及客户端自身在同 4 个
   vCPU 上的对称开销，写方向成为最先饱和的方向。
+
+> **⚠️ 口径订正（P2 复测后）**：profile 占比是「服务端活跃 CPU 内的占比」，
+> 不等于墙钟收益。overlay 微基准证实旧 CMAC 热缓存实为 ~758 MB/s（非当初从
+> profile 推算的 ~500），因此 CMAC 批处理化的真实单点收益是 1.27×（大消息）、
+> 2.1×（64 B 小消息，密钥状态缓存贡献一半）。端到端净收益见 §7，
+> 其中并发场景最显著——那正是 CMAC 在 4 vCPU 上最先打满的地方。
 - 微观上每字节成本 ≈ (1.04+0.47)s / (2×128MiB×2 方向…) 量级在
   **~0.5 GB/s**，远低于硬件 CBC 可达的数 GB/s。
 
@@ -151,3 +157,55 @@ TCP_NODELAY；WriteFrame 已用 net.Buffers 把 4 字节头与载荷一次 write
 
 - 二进制 pprof：`/tmp/opencode/perf-w2/prof/*.pbin`（易失，不入库）。
   本文 §2/§3/§4 的 top 文本即为入库凭据；如需复核可在本分支重建后按 §1 口径重采。
+
+## 7. P2 优化结果（2026-08-26 实测）
+
+四个优化 commit（每个含微基准前后对照，见各自 commit message）：
+
+| # | commit | 内容 | 微基准 |
+|---|---|---|---|
+| 1 | `9248948`+`4a427a5` | CMAC 批处理化 + 混合路径 + 密钥状态缓存 | 64B 215→458 MB/s(2.13×)；64KiB 760→969(1.27×)；1MiB 758→960(1.27×) |
+| 2 | `76f7f14` | CCM：CTR 批量化、CBC-MAC 分段、Open 免二次分配 | Seal/Open 1MiB 342→803 / 329→747 MB/s(≈2.3×) |
+| 3 | `efcdae1` | TRANSFORM AEAD 缓存 + Encrypt 单次分配 | 省每消息密钥扩展与整载荷二次拷贝（GC 压力） |
+| 4 | `383c766` | ReadFrame 帧缓冲复用 | 消除每帧 make 的稳定分配源 |
+
+**端到端 A/B**（交替 ×2 控噪声；old = 优化前代码 overlay 构建，同一测量设施；
+负载 = large c1 128MiB×3 轮 / c16 128MiB×2 轮 / small 500 文件；单位 MB/s 与服务端 CPU ticks）：
+
+| 场景（signing） | old | new | Δ |
+|---|---|---|---|
+| c1 写 | 249.3 / 250.3 | **287.2 / 291.4** | **+15.8%** |
+| c1 读 | 244.3 / 243.5 | 256.4 / 254.1 | +4.7% |
+| **c16 写** | 599.3 / 574.0 | **781.5 / 684.7** | **+25%** |
+| c16 读 | 622.9 / 595.6 | 711.4 / 572.1 | +5% |
+| c16 服务端 CPU（固定负载） | 202 / 200 ticks | **147 / 150 ticks** | **−26%** |
+| c1+small 服务端 CPU | 340.5 avg | 304 avg | −10.7% |
+
+| 场景（encryption） | old | new | Δ |
+|---|---|---|---|
+| c1 写 | 538.3 / 465.4 | **578.2 / 603.7** | **+17.7%** |
+| c1 读 | 422.5 / 433.6 | 485.1 / 432.3 | +7.2% |
+| 服务端 CPU | 295 / 323 | **252 / 262** | −16.8% |
+| small create/delete | ~575/690 | ~600/685 | 噪声内持平 |
+
+要点：
+
+1. **写方向收益最大**（+16~25%），因为服务端验签在写关键路径上；
+   读方向受客户端 go-smb2 自己的软件验签钳制（两端同机共享 4 vCPU），只 +5~7%
+   —— 这不是服务端没变快（CPU −11~26%），而是墙钟的短板在对面。
+   「读≈2×写」的原始谜题随签名路径提速已明显收窄。
+2. **小文件 IOPS 无变化**：其瓶颈是 CREATE 触发的 bbolt DOS 属性落库
+   （每文件一个带 fsync 的写事务，~1.8 ms/个），属 F4 上报项，非本角色文件。
+3. 正确性：RFC 4493 / SP800-38B / SP800-38C 全部向量、wire golden、
+   server 单测、integration tag 套件全绿。Encrypt 的 append 别名 bug 被
+   TestTransformRoundTrip 在提交前拦下（golden 即「语义零变化」的机器证明，
+   名不虚传）。race 门禁因容器无 gcc 无法执行，已如实记录。
+
+## 8. 遗留与移交清单
+
+| 项 | 归属 | 说明 |
+|---|---|---|
+| command.handleRead 双拷贝（buf + Append，占堆分配 66%） | command 角色 | 读路径每响应少一次整载荷拷贝需改 handler/Context 契约 |
+| bbolt DOS 落库写放大（CREATE/DELETE 各一次 fsync 事务） | oscap/builtin + vfs | 小文件 IOPS 的当前天花板；能否合批/延迟属持久化语义决策 |
+| AES-GMAC 协商（TODO M4） | 协商角色 | GMAC 走 GCM 硬件路径，比 CMAC 更快且规范允许 |
+| race 门禁补跑 | 有 gcc 的环境 | `CGO_ENABLED=1 go test -race ./internal/server/ ./internal/vfs/` |
