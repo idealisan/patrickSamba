@@ -148,10 +148,10 @@ func TestValidateNegotiateInfoMaxCommonMismatch(t *testing.T) {
 		name     string
 		dialects []wire.Dialect
 	}{
-		{"只剩更低的方言", []wire.Dialect{0x0202}},      // best=2.0.2 ≠ 2.1
+		{"只剩更低的方言", []wire.Dialect{0x0202}},         // best=2.0.2 ≠ 2.1
 		{"混入更高的方言", []wire.Dialect{0x0202, 0x0300}}, // best=3.0 ≠ 2.1
 		{"只发更高方言", []wire.Dialect{0x0311}},          // best=3.1.1 ≠ 2.1
-		{"空列表", nil},                                 // 无公共方言
+		{"空列表", nil}, // 无公共方言
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
