@@ -35,6 +35,22 @@ const (
 // 浏览服务器根目录（`\\host` / Finder `smb://host`）需要它。
 const IPCShareName = "IPC$"
 
+// SigningPreference 是配置层 server.signing_algorithm 在协议层的表达
+// （由 cmd 装配层从 config.Server.SigningAlgorithm 映射而来；
+// 本包不 import config，保持协议层可独立测试）。
+type SigningPreference uint8
+
+const (
+	// SigningAuto 是默认值：不回应 SIGNING_CAPABILITIES negotiate context，
+	// 签名算法按方言默认值（2.x HMAC-SHA256，3.x AES-CMAC）。
+	// 客户端宣告 GMAC 也不采用 —— 与引入协商之前的行为完全一致。
+	SigningAuto SigningPreference = iota
+	// SigningPreferAESCMAC 显式选择 AES-CMAC（RFC 4493）。
+	SigningPreferAESCMAC
+	// SigningPreferAESGMAC 选择 AES-GMAC（MS-SMB2 §3.1.4.1；GCM 硬件路径）。
+	SigningPreferAESGMAC
+)
+
 // Settings 是 command 层需要的服务端级设置。
 //
 // 由 internal/server 从 internal/config.Config 装配而来 —— 本包**不 import config**，
@@ -55,6 +71,10 @@ type Settings struct {
 
 	// SigningRequired 表示强制要求客户端对请求签名。
 	SigningRequired bool
+	// SigningPreference 控制 3.1.1 SIGNING_CAPABILITIES 协商策略
+	// （默认 SigningAuto = 历史行为）。选择规则见 negotiate.go 的
+	// negotiateSigning。
+	SigningPreference SigningPreference
 	// EncryptionEnabled 表示允许 SMB3 加密（协商 cipher）。
 	EncryptionEnabled bool
 	// EncryptionRequired 表示强制要求 SMB3 加密。

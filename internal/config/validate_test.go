@@ -291,6 +291,41 @@ func TestValidateEncryptionNeedsSMB3(t *testing.T) {
 	assertInvalid(t, c, "server.encryption_required", "3.0")
 }
 
+func TestValidateSigningAlgorithm(t *testing.T) {
+	t.Run("默认auto与显式合法值通过", func(t *testing.T) {
+		for _, v := range []string{"auto", "aes-cmac", "aes-gmac"} {
+			c := baseConfig(t) // ApplyDefaults 后 MaxDialect=3.1.1
+			c.Server.SigningAlgorithm = v
+			if err := Validate(c); err != nil {
+				t.Fatalf("signing_algorithm=%q 应当合法，实际: %v", v, err)
+			}
+		}
+	})
+
+	t.Run("aes-gmac要求max_dialect至少3.1.1", func(t *testing.T) {
+		for _, max := range []string{"2.0.2", "2.1", "3.0", "3.0.2"} {
+			c := baseConfig(t)
+			c.Server.MaxDialect = max
+			c.Server.SigningAlgorithm = "aes-gmac"
+			assertInvalid(t, c, "server.signing_algorithm", "3.1.1")
+		}
+		c := baseConfig(t)
+		c.Server.MaxDialect = "3.0"
+		c.Server.SigningAlgorithm = "aes-cmac" // 对照：cmac 不受方言上限约束
+		if err := Validate(c); err != nil {
+			t.Fatalf("aes-cmac 不应受 3.1.1 上限约束，实际: %v", err)
+		}
+	})
+
+	t.Run("非法取值被拒绝", func(t *testing.T) {
+		for _, v := range []string{"AES-GMAC", "gmac", "cmac", "Auto", "none"} {
+			c := baseConfig(t)
+			c.Server.SigningAlgorithm = v // 大小写敏感，"Auto"/"AES-GMAC" 一律拒绝
+			assertInvalid(t, c, "server.signing_algorithm", "可选值")
+		}
+	})
+}
+
 func TestValidateServerNameTooLong(t *testing.T) {
 	c := baseConfig(t)
 	c.Server.Name = strings.Repeat("X", 16)
