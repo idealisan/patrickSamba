@@ -2,6 +2,7 @@ package command
 
 import (
 	"sync"
+	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
@@ -10,6 +11,20 @@ import (
 func init() {
 	register(wire.CommandLock, true, true, handleLock)
 }
+
+// 阻塞锁等待参数（bh4-A#4）。
+const (
+	// blockingLockMaxWait 是单条阻塞锁的最长等待时长。超时回
+	// STATUS_LOCK_NOT_GRANTED —— 与 Samba 的「无限等待直到 CANCEL」相比
+	// 这是刻意的降级，理由见 handleLock 注释。
+	blockingLockMaxWait = 10 * time.Second
+
+	// maxBlockingLockWaiters 是锁表上同时挂起等待的阻塞锁请求上限
+	// （AGENTS.md §8 资源上限）。达到上限后新来的阻塞请求立即按非阻塞
+	// 处理 —— 宁可退化成立即拒绝，也不能让畸形客户端用海量挂起等待
+	// 耗尽 goroutine。
+	maxBlockingLockWaiters = 64
+)
 
 // byteRangeLock 是一条已授予的字节范围锁。
 type byteRangeLock struct {
@@ -57,6 +72,24 @@ func (l byteRangeLock) overlaps(off, length uint64) bool {
 type lockTable struct {
 	mu sync.Mutex
 	m  map[string][]byteRangeLock
+
+	// wake 是「锁表里有锁被释放」的广播通道：每次释放时 close 旧通道、
+	// 换上新通道，所有阻塞锁等待者同时被唤醒去重试（bh4-A#4）。
+	// 粒度是整表而非单条路径 —— 阻塞锁是低频事件，粗粒度换实现简单，
+	// 唤醒后各自重试冲突判定，正确性不受影响。
+	wake chan struct{}
+
+	// waiters 是当前挂起等待的阻塞锁请求数（受 maxBlockingLockWaiters
+	// 上限约束）。在 mu 保护下读写。
+	waiters int
+}
+
+// notifyRelease 广播「有锁被释放」。调用方必须已持有 t.mu。
+func (t *lockTable) notifyRelease() {
+	if t.wake != nil {
+		close(t.wake)
+	}
+	t.wake = make(chan struct{})
 }
 
 // conflict 在已有锁中查找与请求区间冲突的锁 —— **LOCK 命令语义**。
@@ -173,12 +206,6 @@ func (t *lockTable) lock(path string, o *Open, elems []wire.LockElement) status.
 		}
 		exclusive := e.Flags.IsExclusive()
 		if t.conflict(path, o, e.Offset, e.Length, exclusive) {
-			// 未置 FAIL_IMMEDIATELY 时规范要求把请求挂起、等锁释放再回应
-			// （异步 STATUS_PENDING）。当前所有 handler 都是同步执行的，
-			// 挂起会占住整条连接，反而更糟，所以一律立即拒绝。
-			//
-			// TODO: 待实现异步未决请求表后，改为对未置 FAIL_IMMEDIATELY
-			// 的请求回 STATUS_PENDING 并在锁释放时补发响应。
 			return status.LockNotGranted
 		}
 	}
@@ -233,6 +260,8 @@ func (t *lockTable) unlock(path string, o *Open, elems []wire.LockElement) statu
 		}
 	}
 	t.setLocked(path, kept)
+	// 有锁被释放：唤醒阻塞锁等待者去重试（bh4-A#4）。
+	t.notifyRelease()
 	return status.Success
 }
 
@@ -254,6 +283,7 @@ func (t *lockTable) releaseAll(_ string, o *Open) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	released := false
 	for path, cur := range t.m {
 		kept := cur[:0]
 		for _, l := range cur {
@@ -266,6 +296,73 @@ func (t *lockTable) releaseAll(_ string, o *Open) {
 			continue
 		}
 		t.setLocked(path, kept)
+		released = true
+	}
+	if released {
+		// 有锁被释放：唤醒阻塞锁等待者（bh4-A#4）。
+		t.notifyRelease()
+	}
+}
+
+// waitLock 是阻塞锁的**同步有界**等待（bh4-A#4）：区间空闲则立即授予；
+// 冲突则挂起等待锁释放后重试，直到授予 / 超时回 STATUS_LOCK_NOT_GRANTED /
+// 并发等待者超过 maxWaiters 立即拒绝 / 句柄在等待期间被关闭。
+//
+// ⚠️ 该方法会**阻塞调用方**。当前所有 handler 都在连接的读循环里同步执行，
+// 所以等待期间这条连接收不到任何新请求 —— 包括 CANCEL。这是与规范
+// （interim STATUS_PENDING + 异步补发）的已知差距，见 handleLock 注释。
+// timeout 建议用 blockingLockMaxWait；测试传小值。
+func (t *lockTable) waitLock(path string, o *Open, e wire.LockElement, timeout time.Duration, maxWaiters int) status.Status {
+	elems := []wire.LockElement{e}
+
+	t.mu.Lock()
+	if !validRange(e.Offset, e.Length) {
+		t.mu.Unlock()
+		return status.InvalidLockRange
+	}
+	if t.waiters >= maxWaiters {
+		// 上限已满：按非阻塞处理，立即给出结果而不是无限堆积等待者。
+		granted := !t.conflict(path, o, e.Offset, e.Length, e.Flags.IsExclusive())
+		t.mu.Unlock()
+		if granted {
+			return t.lock(path, o, elems)
+		}
+		return status.LockNotGranted
+	}
+	t.waiters++
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		t.waiters--
+		t.mu.Unlock()
+	}()
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if o.Closed() {
+			// 等待期间句柄被别的路径关闭（durable 回收等），别再给它授锁。
+			return status.LockNotGranted
+		}
+		if st := t.lock(path, o, elems); st != status.LockNotGranted {
+			return st // 授予或回绕拒绝，直接透传
+		}
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			return status.LockNotGranted
+		}
+
+		// 等下一次释放广播，至多等到期限。取 min(remain, 100ms) 兜底轮询：
+		// 广播通路覆盖 unlock/releaseAll 两条路，兜底只为防实现疏漏时
+		// 等待者永久沉睡。
+		t.mu.Lock()
+		wake := t.wake
+		t.mu.Unlock()
+		timer := time.NewTimer(min(remain, 100*time.Millisecond))
+		select {
+		case <-wake:
+			timer.Stop()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -281,11 +378,24 @@ func (t *lockTable) setLocked(path string, locks []byteRangeLock) {
 
 // handleLock 处理 SMB2 LOCK（MS-SMB2 §3.3.5.14）。
 //
-// 实现范围：字节范围锁的**非阻塞**语义 —— 无冲突即授予，有冲突立即回
+// 实现范围：字节范围锁的授予/释放，含**单元素阻塞锁**的同步有界等待
+// （bh4-A#4）—— 首元素未置 FAIL_IMMEDIATELY 的加锁请求在冲突时挂起等待，
+// 持锁方释放后被授予；至多等 blockingLockMaxWait，超时回
 // STATUS_LOCK_NOT_GRANTED。锁表挂在 Share 上，因此跨会话可见。
 //
-// 未实现：阻塞等待（需要异步未决请求表）、lock sequence 的重放抑制
-// （MS-SMB2 §3.3.5.14 里用于多通道重传去重，单通道下不会触发）。
+// 与规范的已知差距（需要异步未决请求表才能补齐，涉及 server 层装配，
+// 本包无法独立完成）：Samba 对阻塞锁回 interim STATUS_PENDING（500ms，
+// smb2_lock.c:157）后**异步**等待、期间可被 CANCEL 取消
+// （smb2_lock.c:528-566）。我们的 handler 在连接读循环里同步执行：
+//   - 回 PENDING 再异步补发需要 Connection 的异步写通路与 pending 表
+//     （internal/server 的 connection.go / command 层 conn.go）；
+//   - 同步等待期间本连接读不了 CANCEL，取消语义无从谈起。
+//
+// 因此选择「同步有界等待」：多数争用在窗口内自然消解，超时按非阻塞
+// 语义拒绝。等待者数量受 maxBlockingLockWaiters 上限保护。
+//
+// 未实现：lock sequence 的重放抑制（MS-SMB2 §3.3.5.14 里用于多通道重传
+// 去重，单通道下不会触发）。
 func handleLock(ctx *Context) error {
 	req, err := wire.ParseLockRequest(ctx.Msg)
 	if err != nil {
@@ -360,6 +470,16 @@ func handleLock(ctx *Context) error {
 		st = table.unlock(open.Path, open, req.Locks)
 	} else {
 		st = table.lock(open.Path, open, req.Locks)
+		if st == status.LockNotGranted && len(req.Locks) == 1 &&
+			!req.Locks[0].Flags.FailImmediately() {
+			// 阻塞锁（bh4-A#4）：单元素、未置 FAIL_IMMEDIATELY 的加锁请求
+			// 在冲突时挂起等待，而不是立即拒绝。Samba smb2_lock.c:341-347
+			// 同判：首元素裸 SHARED/EXCLUSIVE ⇒ blocking。
+			//
+			// 等待是同步有界的（见本函数注释的「已知差距」）。
+			st = table.waitLock(open.Path, open, req.Locks[0],
+				blockingLockMaxWait, maxBlockingLockWaiters)
+		}
 	}
 	if st != status.Success {
 		return st
