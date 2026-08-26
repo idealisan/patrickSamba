@@ -71,6 +71,7 @@ const (
 	LockNotGranted                   Status = 0xC0000055 // STATUS_LOCK_NOT_GRANTED
 	DeletePending                    Status = 0xC0000056 // STATUS_DELETE_PENDING
 	RangeNotLocked                   Status = 0xC000007E // STATUS_RANGE_NOT_LOCKED
+	InvalidLockRange                 Status = 0xC00001A1 // STATUS_INVALID_LOCK_RANGE
 	DiskFull                         Status = 0xC000007F // STATUS_DISK_FULL
 	InsufficientResources            Status = 0xC000009A // STATUS_INSUFFICIENT_RESOURCES
 	MediaWriteProtected              Status = 0xC00000A2 // STATUS_MEDIA_WRITE_PROTECTED
@@ -159,6 +160,7 @@ var names = map[Status]string{
 	LockNotGranted:         "STATUS_LOCK_NOT_GRANTED",
 	DeletePending:          "STATUS_DELETE_PENDING",
 	RangeNotLocked:         "STATUS_RANGE_NOT_LOCKED",
+	InvalidLockRange:       "STATUS_INVALID_LOCK_RANGE",
 	DiskFull:               "STATUS_DISK_FULL",
 	InsufficientResources:  "STATUS_INSUFFICIENT_RESOURCES",
 	MediaWriteProtected:    "STATUS_MEDIA_WRITE_PROTECTED",

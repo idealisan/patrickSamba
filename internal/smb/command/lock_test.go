@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -94,16 +95,42 @@ func TestLockSharedCoexistExclusiveDoesNot(t *testing.T) {
 	}
 }
 
-// TestLockSameHandleNoSelfConflict：同一个句柄自己的锁不与自己冲突。
-func TestLockSameHandleNoSelfConflict(t *testing.T) {
+// TestLockSameHandleExclusiveNoStack（bh4-A#6）：同一句柄对同一区间
+// 重复上独占锁必须被拒 —— torture smb2/lock.c:2311-2321
+// 「two exclusive locks do not stack」要求 LOCK_NOT_GRANTED。
+func TestLockSameHandleExclusiveNoStack(t *testing.T) {
 	var tbl lockTable
 	a := &Open{}
 
 	if !lockOne(&tbl, "f", a, 0, 100, true) {
-		t.Fatal("首次加锁应成功")
+		t.Fatal("首次加独占锁应成功")
 	}
+	if st := tbl.lock("f", a, []wire.LockElement{el(0, 100, true)}); st != status.LockNotGranted {
+		t.Fatalf("同句柄二次独占锁应回 STATUS_LOCK_NOT_GRANTED，实际 %v", st)
+	}
+}
+
+// TestLockSameHandleReadWriteStacks（bh4-A#6）：同句柄的共享/独占**混合**
+// 叠加允许 —— torture smb2/lock.c:2205-2236（shared-over-exclusive 可叠）；
+// brlock.c:225-245 brl_conflict 矩阵：READ×READ 不冲突、同 context 涉及
+// 至少一方 READ 的组合可叠、其余（W×W）冲突。
+func TestLockSameHandleReadWriteStacks(t *testing.T) {
+	var tbl lockTable
+	a := &Open{}
+
 	if !lockOne(&tbl, "f", a, 0, 100, true) {
-		t.Fatal("同句柄重复锁同区间应成功")
+		t.Fatal("先上独占锁应成功")
+	}
+	if st := tbl.lock("f", a, []wire.LockElement{el(0, 100, false)}); st != status.Success {
+		t.Fatalf("同句柄在独占锁上叠共享锁应授予，实际 %v", st)
+	}
+
+	var tbl2 lockTable
+	if !lockOne(&tbl2, "f", a, 0, 100, false) {
+		t.Fatal("先上共享锁应成功")
+	}
+	if st := tbl2.lock("f", a, []wire.LockElement{el(0, 100, true)}); st != status.Success {
+		t.Fatalf("同句柄在共享锁上叠独占锁应授予，实际 %v", st)
 	}
 }
 
@@ -230,50 +257,137 @@ func TestLockTableEmptiesOut(t *testing.T) {
 	}
 }
 
-// TestLockZeroLengthNeverConflicts：长度为 0 的锁不占据任何字节，
-// 与谁都不冲突（MS-FSA §2.1.4.10）。
-func TestLockZeroLengthNeverConflicts(t *testing.T) {
+// TestLockZeroLengthMarker（bh4-A#5）：零长度锁是「分界点」标记 ——
+// 它不占用字节，但挡住一切**跨过**该偏移点的区间。
+// torture smb2/lock.c:1319-1351 zero_byte_tests（Windows 归纳）：
+// 持 {10,0} 独占锁时，{9,2}/{9,3} 必须 LOCK_NOT_GRANTED，
+// {10,2}/{11,1} 则 OK。Samba brlock.c:158-210 byte_range_overlap 用
+// last = ofs+len-1 判交，空区间 last=ofs-1 恰好给出「跨点才冲突」。
+func TestLockZeroLengthMarker(t *testing.T) {
 	var tbl lockTable
 	a, b := &Open{}, &Open{}
 
-	if !lockOne(&tbl, "f", a, 0, 0, true) {
-		t.Fatal("零长度加锁应成功")
+	if !lockOne(&tbl, "f", a, 10, 0, true) {
+		t.Fatal("A 在偏移 10 上零长独占锁应成功")
 	}
-	if !lockOne(&tbl, "f", b, 0, 100, true) {
-		t.Fatal("零长度锁不应挡住别人")
-	}
-	if !lockOne(&tbl, "f", a, 50, 0, true) {
-		t.Fatal("在别人的独占区间内加零长度锁也应成功")
+	for _, tc := range []struct {
+		off, length uint64
+		want        bool
+	}{
+		{9, 2, false},  // [9,11) 跨过 10 → 拒
+		{9, 3, false},  // [9,12) 跨过 10 → 拒
+		{10, 2, true},  // [10,12) 从点开始 → 允许
+		{11, 1, true},  // [11,12) 点之后 → 允许
+		{0, 10, true},  // [0,10) 止于点之前 → 允许
+		{8, 1, true},   // [8,9) 不跨点 → 允许
+	} {
+		got := lockOne(&tbl, "f", b, tc.off, tc.length, true)
+		if got != tc.want {
+			t.Errorf("B 锁 {%d,%d}: 应授予=%v，实际授予=%v", tc.off, tc.length, tc.want, got)
+		}
+		if got {
+			if st := tbl.unlock("f", b, []wire.LockElement{unlockEl(tc.off, tc.length)}); st != status.Success {
+				t.Fatalf("清理 B 的锁 {%d,%d}: %v", tc.off, tc.length, st)
+			}
+		}
 	}
 }
 
-// TestLockOverlapNoIntegerOverflow：offset+length 在 uint64 上回绕时
-// 不能把"相交"误判成"不相交"（AGENTS.md §8 整数溢出防御）。
-//
-// 若实现用裸加法算区间终点，[max-10, max-10+20) 的终点会回绕成一个极小值，
-// 冲突判定就会错误放行 —— 那等于锁在文件尾部完全失效。
-func TestLockOverlapNoIntegerOverflow(t *testing.T) {
-	const max = uint64(math.MaxUint64)
+// TestLockZeroLengthAtOriginInert：{0,0} 是唯一必须特判的零长锁 ——
+// ofs-1 在 0 处下溢成 MaxUint64，若不特判它会「与一切冲突」。
+// Samba brlock.c 对此同样特判；locking.c:305 明注「0 byte ranges ARE
+// allowed and should be stored」。
+func TestLockZeroLengthAtOriginInert(t *testing.T) {
+	var tbl lockTable
+	a := &Open{}
+
+	if !lockOne(&tbl, "f", a, 0, 0, true) {
+		t.Fatal("A 的 {0,0} 独占锁应成功")
+	}
+	// {0,0} 不挡任何区间，也不被任何区间挡。
+	b := &Open{}
+	if !lockOne(&tbl, "f", b, 0, 100, true) {
+		t.Fatal("B 锁 [0,100) 不应受 {0,0} 影响")
+	}
+	c := &Open{}
+	if !lockOne(&tbl, "g", c, 5, 0, true) {
+		t.Fatal("另一路径上的零长锁不受影响")
+	}
+}
+
+// TestLockForeignExclusiveBlocksZeroLenInside：别人的独占区间内的零长锁
+// 必须被拒 —— 零长请求在偏移 P 处的空区间与覆盖「P-1|P 边界」的锁相交。
+// 这是 overlaps 改为 last=ofs+len-1 后的自然结论（与 torture 语义一致）。
+func TestLockForeignExclusiveBlocksZeroLenInside(t *testing.T) {
+	var tbl lockTable
 	a, b := &Open{}, &Open{}
 
+	if !lockOne(&tbl, "f", a, 50, 10, true) {
+		t.Fatal("A 锁 [50,60) 应成功")
+	}
+	if lockOne(&tbl, "f", b, 55, 0, true) {
+		t.Fatal("B 在 A 的独占区间内部上零长锁应被拒")
+	}
+	// 区间边界上的零长锁：起点在独占区间终点处不冲突。
+	if !lockOne(&tbl, "f", b, 60, 0, true) {
+		t.Fatal("B 在 A 区间右端点上零长锁应允许")
+	}
+}
+
+// TestLockIOStillExemptOwnLocks（bh4-A#6 回归钉子）：brl 冲突矩阵收紧后，
+// READ/WRITE 入口的同句柄豁免**不得**跟着收紧 —— 句柄写自己持有的
+// 独占锁区间必须照常放行（Samba STRICT_LOCK_CHECK 按 fsp 豁免自己，
+// smb2_read.c:584 / smb2_write.c:392）。
+func TestLockIOStillExemptOwnLocks(t *testing.T) {
+	p := newLockIOPair(t, bytes.Repeat([]byte("m"), 64))
+	if !lockOne(p.table, "f", p.a, 0, 64, true) {
+		t.Fatal("A 加独占锁应成功")
+	}
+	if err := p.runWrite(t, p.a, 0, []byte("self-write")); err != nil {
+		t.Fatalf("A 写自己的独占锁区间不应冲突: %v", err)
+	}
+}
+
+// TestLockWrapRangeRejected（bh4-A#7）：offset+length 在 uint64 上回绕的
+// 锁区间必须整条回 STATUS_INVALID_LOCK_RANGE，而不是入库后被当成
+// 「与一切冲突」或被误判成不相交（MS-FSA §2.1.4.10 的 byte_range_valid
+// 判据；Samba brlock.c:392-400 同）。AGENTS.md §8 整数溢出防御。
+func TestLockWrapRangeRejected(t *testing.T) {
+	const max = uint64(math.MaxUint64)
+	a := &Open{}
+
 	var tbl lockTable
-	if !lockOne(&tbl, "f", a, max-10, 20, true) {
-		t.Fatal("A 在回绕区间加锁应成功")
+	// {max-10, 20}：终点回绕。旧实现会把它当「与一切冲突」，更早的实现
+	// 会把它误判成不相交 —— 两种都错，正确答案是拒绝。
+	if st := tbl.lock("f", a, []wire.LockElement{el(max-10, 20, true)}); st != status.InvalidLockRange {
+		t.Fatalf("回绕锁区间应回 STATUS_INVALID_LOCK_RANGE，实际 %v", st)
 	}
-	if lockOne(&tbl, "f", b, max-5, 20, true) {
-		t.Fatal("回绕区间仍然相交，B 必须被拒")
-	}
-	if !lockOne(&tbl, "f", b, 0, 10, true) {
-		t.Fatal("低位不相交区间应放行")
+	if n := countLocks(&tbl, a); n != 0 {
+		t.Fatalf("被拒的请求不得留下任何锁，实际留下 %d 条", n)
 	}
 
-	// 反向顺序同样成立：先锁高位小区间，再锁跨越它的大区间。
-	var tbl2 lockTable
-	if !lockOne(&tbl2, "f", a, max-5, 5, true) {
-		t.Fatal("A 加锁应成功")
+	// 全有或全无：批量里第二条回绕时第一条也不得入库。
+	b := &Open{}
+	st := tbl.lock("f", b, []wire.LockElement{el(0, 10, true), el(max-5, 10, true)})
+	if st != status.InvalidLockRange {
+		t.Fatalf("含回绕条目的批量加锁应整体失败，实际 %v", st)
 	}
-	if lockOne(&tbl2, "f", b, max-10, 20, true) {
-		t.Fatal("包含关系也是相交，B 必须被拒")
+	if n := countLocks(&tbl, b); n != 0 {
+		t.Fatalf("失败的批量请求不得留下任何锁，实际留下 %d 条", n)
+	}
+
+	// 恰好顶到地址空间末尾的不回绕区间仍然合法：[max-9, max]。
+	c := &Open{}
+	if st := tbl.lock("f", c, []wire.LockElement{el(max-9, 10, true)}); st != status.Success {
+		t.Fatalf("[max-9,max] 不回绕，应授予，实际 %v", st)
+	}
+
+	// 零长标记在任意偏移（含 max）本身恒有效；但注意它有分界点语义 ——
+	// 上面的 [max-9,max] 跨过 max-1|max 边界，会挡住 {max,0}，
+	// 所以这里用另一条路径验证「有效性」本身。
+	d := &Open{}
+	if st := tbl.lock("g", d, []wire.LockElement{el(max, 0, true)}); st != status.Success {
+		t.Fatalf("{max,0} 零长标记应授予，实际 %v", st)
 	}
 }
 
