@@ -257,3 +257,29 @@ README 三态措辞订正尾巴（第一波 §5 待决第 3 条）不在本波�
 > 本快照之后 pm 收板。后续巡检由下一时段接手（或各 Owner 完成一项后知会 pm 回填）。
 
 
+
+## W2.7 合并记录（team-lead 回填，2026-08-26 13:22 CST，`date` 实测）
+
+第二波六支分支由 team-lead 逐一评审后**全部合入 main**。评审要点：锁冲突矩阵与
+blocksIO 的同句柄豁免分离正确（对齐 Samba brlock.c / STRICT_LOCK_CHECK）；阻塞锁
+为「同步有界等待」并如实标注与规范（interim PENDING + CANCEL）的差距；VNI 失败
+断连符合 MS-SMB2 §3.3.5.15.12 MUST 语义；CMAC/CCM 批处理的数学结构与 RFC 4493 /
+SP 800-38C 一致且既有标准向量测试全绿；管理端口强制 loopback、默认关闭。
+
+| 分支 | 远端 HEAD（合并时） | 合并方式 | 状态 |
+|---|---|---|---|
+| pm/wave2-board | `bc5b087` | merge --no-ff 进 main | ✅ DONE |
+| stream/bh5-f10-f12 | `eb036d8` | merge --no-ff 进 main | ✅ DONE（bh5 F10/F11/F12） |
+| meta/bh3-f4-f8 | `049d14c` | merge --no-ff 进 main | ✅ DONE（bh3 F4 残余 + F5–F8） |
+| fsctl/bh5-f4-f9-vni | `73e7fb5` | merge --no-ff 进 main | ✅ DONE（bh5 F4/F7/F8/F9 + VNI F5/F6） |
+| lock/bh4-a3-a13 | `ff997f7` | merge --no-ff 进 main | ✅ DONE（bh4 A#4–A#13；A#3 上游已修） |
+| perf/v050-hotpath | `e411ffc` | merge --no-ff 进 main | ✅ DONE（调优 + 基准设施 + 分析报告） |
+
+合并后门禁：`CGO_ENABLED=0 go build/vet/test ./...` 全绿 +
+`test/ci/check-test-compile.sh`（四平台 × 全 tag）绿。
+同日另有 `config/win11-default-apple` 两笔合入（默认配置 Win11 开箱即用 +
+mdns.apple 默认开启 + Windows 带端口直连文档订正），见 CHANGELOG Unreleased。
+
+遗留移交（perf 分析报告 §8，需后续立项）：command.handleRead 双拷贝、bbolt DOS
+落库写放大、AES-GMAC 协商评估；A#4 异步未决请求表（server 层）；README 三态措辞
+订正尾巴仍待派。
