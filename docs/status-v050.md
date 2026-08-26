@@ -169,11 +169,11 @@ bh1/bh2 findings 文件确认丢失，不再追（见 §W2.3）。
 
 | 角色 | 分支 | 工作目录 | 任务 | 端口 | 状态 |
 |---|---|---|---|---|---|
-| lock | `lock/bh4-a3-a13` | /work/w2-lock | bh4 A#3–A#13 锁/读写边界 11 条 | 4451 | TODO |
-| meta | `meta/bh3-f4-f8` | /work/w2-meta | bh3 F4 残余+F5–F8 元数据 5 条 | 4452 | TODO |
-| fsctl | `fsctl/bh5-f4-f9-vni` | /work/w2-fsctl | bh5 F4/F7/F8/F9 + VNI F5/F6 | 4453 | TODO |
-| stream | `stream/bh5-f10-f12` | /work/w2-stream | bh5 F10/F11/F12 命名流 3 条 | 4454 | TODO |
-| perf | `perf/v050-hotpath` | /work/w2-perf | 协议栈性能调优专项 | 4455 | TODO |
+| lock | `lock/bh4-a3-a13` | /work/w2-lock | bh4 A#3–A#13 锁/读写边界 11 条 | 4451 | INPROGRESS(`6af9f8e`) |
+| meta | `meta/bh3-f4-f8` | /work/w2-meta | bh3 F4 残余+F5–F8 元数据 5 条 | 4452 | INPROGRESS(`fd8aad1`) |
+| fsctl | `fsctl/bh5-f4-f9-vni` | /work/w2-fsctl | bh5 F4/F7/F8/F9 + VNI F5/F6 | 4453 | INPROGRESS(`bf8a1a3`) |
+| stream | `stream/bh5-f10-f12` | /work/w2-stream | bh5 F10/F11/F12 命名流 3 条 | 4454 | TODO ⚠️ 催办（见 §W2.6） |
+| perf | `perf/v050-hotpath` | /work/w2-perf | 协议栈性能调优专项 | 4455 | INPROGRESS(`35496f7`) |
 | pm（本板） | `pm/wave2-board` | /work/w2-pm | 进度板 | — | INPROGRESS |
 
 缺陷详情证据档：各 worktree 内 `docs/bughunt-20260825/findings-bh{3,4,5}.md`（已在库，
@@ -217,4 +217,21 @@ README 三态措辞订正尾巴（第一波 §5 待决第 3 条）不在本波�
 | 1 | 10:07:59 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 均无新提交（距基线 6 分钟，未到催办阈值） |
 | 2 | 10:13:02 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 均无新提交（距基线 11 分钟，未到催办阈值） |
 | 3 | 10:16:20 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 均无新提交（距基线 14 分钟）；加跑第 4 轮以覆盖 20 分钟催办线 |
+| 4 | 10:23:12 | `6af9f8e` | `fd8aad1` | `bf8a1a3` | **73f96cf** ⚠️ | `35496f7` | lock/meta/fsctl/perf 四支首批提交落地；stream 距基线 21 分钟零提交 → 触发催办线 |
+
+各分支已见提交明细（10:23:29 实测，`git log origin/main..origin/<分支>`）：
+
+- **lock**（1 commit）：`6af9f8e` 锁冲突矩阵对齐 brl_conflict + 零长分界点语义 + 回绕区间拒绝（bh4-A#5/A#6/A#7）
+- **meta**（1 commit）：`fd8aad1` SET_INFO 落库的 DOS 属性过滤客观位（bh3-F8）
+- **fsctl**（2 commits）：`bf8a1a3` VNI 方言校验改最大公共方言匹配（bh5-F5）；`87a2d2b` F4/F7/F8/F9 一并落地
+- **perf**（2 commits）：`c76303a` 收编可复现性能基准程序 test/perf；`35496f7` 移除误入库的基准构建产物并 .gitignore 防再犯
+- **stream**（0 commits）：见 §W2.6
+
+## W2.6 催办与风险清单
+
+| 时间(CST) | 对象 | 事项 | 状态 |
+|---|---|---|---|
+| 10:23:12 | `stream/bh5-f10-f12` | ⚠️ **催办**：距开工基线（10:01:59，五分支同刻 @ 73f96cf）约 21 分钟零独立提交，是五支中唯一未动的一条。按纪律本板只记录、不去对方工作树打扰；请 stream 角色（或 team-lead 转告）确认开工状态：若已在本地干活，尽快按 §7.2「尽快提交尽快推送」落一笔到远端，消除「是否开工」的不可见性 | OPEN |
+| — | README 三态措辞订正尾巴（第一波 §5 待决第 3 条） | 不在本波分工表内，仍无 owner | 维持待派 |
+
 
