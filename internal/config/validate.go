@@ -532,7 +532,7 @@ func validateMDNS(c *Config, errs *ValidationErrors) {
 		}
 	}
 
-	if c.MDNS.Apple.Enabled && c.MDNS.Apple.Model == "" {
+	if c.MDNS.Apple.EnabledOn() && c.MDNS.Apple.Model == "" {
 		errs.add("mdns.apple.model", "启用 Apple 扩展时 model 不能为空（决定 Finder 中显示的图标）")
 	}
 	// _device-info._tcp 的 model= 是单条 TXT 记录，长度上限 255 字节（RFC 6763 §6.1）。
@@ -540,7 +540,7 @@ func validateMDNS(c *Config, errs *ValidationErrors) {
 		errs.add("mdns.apple.model", "model 过长（%d 字节），单条 TXT 记录上限 255 字节", n)
 	}
 
-	if c.MDNS.Apple.AdvertiseTimeMachine && !c.MDNS.Apple.Enabled {
+	if c.MDNS.Apple.AdvertiseTimeMachine && !c.MDNS.Apple.EnabledOn() {
 		errs.add("mdns.apple.advertise_time_machine", "需要同时设置 mdns.apple.enabled: true")
 	}
 	if c.MDNS.Apple.AdvertiseTimeMachine && !hasTimeMachineShare(c) {
@@ -653,6 +653,12 @@ func warningsOn(c *Config, hostOS string) []string {
 		if c.Auth.Users[i].Password != "" {
 			w = append(w, fmt.Sprintf("auth.users[%d] %q 使用明文口令，建议改用 nt_hash 避免口令落盘",
 				i, c.Auth.Users[i].Name))
+		}
+		// 容器镜像内置的演示账号（configs/docker.yaml）。公开凭据等于匿名，
+		// 必须让用户在日志里第一眼看到这一点。
+		if c.Auth.Users[i].Name == "stupidsamba" && c.Auth.Users[i].Password == "stupidsamba" {
+			w = append(w, "检测到内置演示账号 stupidsamba/stupidsamba：这是公开凭据，任何知道"+
+				"镜像地址的人都能读写共享。仅限本机试用；对外服务请挂载自己的配置覆盖内置配置")
 		}
 	}
 

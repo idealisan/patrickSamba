@@ -99,6 +99,35 @@ func TestLoadMinimalAppliesDefaults(t *testing.T) {
 	if c.MDNS.Apple.Model != DefaultAppleModel {
 		t.Errorf("mdns.apple.model = %q, 期望默认 %q", c.MDNS.Apple.Model, DefaultAppleModel)
 	}
+	// Apple 扩展记录默认开启（2026-08-26 项目所有者拍板的默认规则）：
+	// 没有苹果设备时这些 TXT 记录对其他客户端没有影响，开着方便调试。
+	if c.MDNS.Apple.Enabled == nil || !*c.MDNS.Apple.Enabled {
+		t.Errorf("mdns.apple.enabled 默认应为 true，实际 %v", c.MDNS.Apple.Enabled)
+	}
+}
+
+// TestAppleMDNSDisabledRespected 钉住三态语义：显式 false 不被默认值覆盖。
+func TestAppleMDNSDisabledRespected(t *testing.T) {
+	c, err := Parse([]byte("auth:\n  users:\n    - name: alice\n      password: x\nshares:\n  - name: public\n    path: " +
+		t.TempDir() + "\nmdns:\n  enabled: true\n  apple:\n    enabled: false\n"))
+	if err != nil {
+		t.Fatalf("期望解析成功，实际: %v", err)
+	}
+	if c.MDNS.Apple.Enabled == nil || *c.MDNS.Apple.Enabled {
+		t.Fatalf("显式 mdns.apple.enabled=false 应当被保留，实际 %v", c.MDNS.Apple.Enabled)
+	}
+	if c.MDNS.Apple.EnabledOn() {
+		t.Error("EnabledOn() 应当返回 false")
+	}
+}
+
+// TestAppleMDNSEnabledOnNilDefault 钉住未设置时的取值：nil → DefaultAppleMDNS。
+// 这是 EnabledOn 的契约，validate 与 mdns 两处消费方都依赖它不炸 nil。
+func TestAppleMDNSEnabledOnNilDefault(t *testing.T) {
+	var a AppleMDNS
+	if a.EnabledOn() != DefaultAppleMDNS {
+		t.Errorf("nil 时 EnabledOn() = %v, 期望 %v", a.EnabledOn(), DefaultAppleMDNS)
+	}
 }
 
 func TestLoadRejectsUnknownField(t *testing.T) {

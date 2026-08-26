@@ -161,12 +161,26 @@ type MDNS struct {
 // AppleMDNS 是 Apple 生态的 mDNS 扩展字段。
 type AppleMDNS struct {
 	// Enabled 是否广播 _device-info._tcp 等 Apple 专用记录。
-	Enabled bool `yaml:"enabled"`
+	//
+	// 默认 **true**（项目所有者 2026-08-26 拍板的默认规则）：没有苹果设备时
+	// 这些 TXT 记录对其他客户端没有任何影响，开着方便用 Finder 调试。
+	// 用 *bool 是因为要区分「未设置（→true）」与「显式 false」，
+	// 同 Server.SMB1 与 Share.Browseable 的做法（见 ApplyDefaults 开头注释）。
+	Enabled *bool `yaml:"enabled"`
 	// Model 是 _device-info._tcp 的 model= 值，决定 Finder 里显示的图标。
 	// 例如 "MacSamba"、"Xserve"、"TimeCapsule8,119"。
 	Model string `yaml:"model"`
 	// AdvertiseTimeMachine 广播 _adisk._tcp（Time Machine 磁盘宣告）。
 	AdvertiseTimeMachine bool `yaml:"advertise_time_machine"`
+}
+
+// EnabledOn 返回 Apple 扩展记录的生效取值：未设置时为 DefaultAppleMDNS（true）。
+// 供 ApplyDefaults 之外的读取方使用，避免各自解引用 nil 指针。
+func (a AppleMDNS) EnabledOn() bool {
+	if a.Enabled == nil {
+		return DefaultAppleMDNS
+	}
+	return *a.Enabled
 }
 
 // Log 是日志设置。
@@ -188,6 +202,9 @@ const (
 	DefaultMaxDialect = "3.1.1"
 	DefaultMinDialect = "2.0.2"
 	DefaultAppleModel = "MacSamba"
+	// DefaultAppleMDNS 是 MDNS.Apple.Enabled 的默认值：默认开启 Apple 扩展记录。
+	// 理由见 AppleMDNS.Enabled 字段注释。与 DefaultFilesystemMode 同理保持 const。
+	DefaultAppleMDNS = true
 	// DefaultSMB1Negotiate 是 Server.SMB1 的默认值：开启 SMB1 多协议协商入口。
 	// 只是协商入口，不含任何 SMB1 文件操作，见 Server.SMB1 字段注释。
 	DefaultSMB1Negotiate = true
