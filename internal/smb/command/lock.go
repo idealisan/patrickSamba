@@ -304,6 +304,13 @@ func handleLock(ctx *Context) error {
 		// 管道不支持字节范围锁。
 		return status.InvalidDeviceRequest
 	}
+	if open.IsDir {
+		// 目录句柄上的字节范围锁无意义（bh4-A#10）。Samba
+		// locking/locking.c do_lock：!fsp->can_lock && is_directory ⇒
+		// NT_STATUS_INVALID_DEVICE_REQUEST。加锁/解锁一并拒绝 ——
+		// 目录上本就不可能有锁，解锁同样没有可匹配的对象。
+		return status.InvalidDeviceRequest
+	}
 	if ctx.Tree == nil || ctx.Tree.Share == nil {
 		return status.NetworkNameDeleted
 	}
@@ -312,14 +319,36 @@ func handleLock(ctx *Context) error {
 	// UNLOCK，则全部必须是 UNLOCK，否则 STATUS_INVALID_PARAMETER）。
 	unlocking := req.Locks[0].Flags.IsUnlock()
 	for _, e := range req.Locks {
-		if e.Flags.IsUnlock() != unlocking {
+		if unlocking {
+			if e.Flags != wire.LockFlagUnlock {
+				// 解锁元素的 flags 必须精确等于 UNLOCK：混入 SHARED /
+				// EXCLUSIVE / 未知位都是畸形请求（Samba smb2_lock.c:341-360
+				// 精确 switch，bh4-A#9）。
+				return status.InvalidParameter
+			}
+			continue
+		}
+		switch e.Flags {
+		case wire.LockFlagSharedLock,
+			wire.LockFlagExclusiveLock,
+			wire.LockFlagSharedLock | wire.LockFlagFailImmediately,
+			wire.LockFlagExclusiveLock | wire.LockFlagFailImmediately:
+			// 合法四态（MS-SMB2 §2.2.26.1）。
+		default:
+			// SHARED 与 EXCLUSIVE 同时置位、两者都不置、或带未知位，
+			// 一律 STATUS_INVALID_PARAMETER（bh4-A#9）。
 			return status.InvalidParameter
 		}
-		if !unlocking {
-			// 加锁时 SHARED 与 EXCLUSIVE 必须二选一。
-			shared := e.Flags&wire.LockFlagSharedLock != 0
-			excl := e.Flags&wire.LockFlagExclusiveLock != 0
-			if shared == excl {
+	}
+
+	if !unlocking && len(req.Locks) > 1 {
+		// 多元素**加锁**请求里只要有一个元素未置 FAIL_IMMEDIATELY，
+		// 就必须整条回 STATUS_INVALID_PARAMETER（MS-SMB2 §3.3.5.14.2 的
+		// SHOULD；Samba smb2_lock.c:364-378 同判。bh4-A#9）。理由：
+		// 阻塞语义只对单元素定义，多元素混合阻塞会让「部分授予后等待」
+		// 的原子性无从谈起。
+		for _, e := range req.Locks {
+			if !e.Flags.FailImmediately() {
 				return status.InvalidParameter
 			}
 		}
