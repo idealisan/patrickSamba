@@ -2,7 +2,7 @@
 
 - 维护人：`pm`（AGENTS.md §7.1：专职项目管理，不写产品代码）
 - 工作目录：`/work/pm2`（worktree，分支 `pm/v050-board`，基于 origin/main = `0deebf5`）
-- 最后更新：2026-08-25 19:40 CST（`date` 实测）
+- 最后更新：2026-08-26 10:05 CST（第二波开板；`date` 实测）
 
 ---
 
@@ -144,3 +144,74 @@ PM 判读：三条支均已切出并推上远端（空分支可见，符合 §7.
 - 本板只由 `pm` 维护；各 Owner 完成一项后知会 pm 回填状态（TODO → INPROGRESS(分支@sha) → DONE(PR#)）。
 - 所有时间戳一律 `date` 实测后落笔（AGENTS.md §7.6）。
 - 证据档（findings 原文）只增不改；订正在本板引用处标注勘误，不动原文。
+
+---
+
+# 第二波（2026-08-26）
+
+> 本章由 `pm` 于第二波开工时追加。第一波内容（§0–§6）为历史证据，**不再改动**；
+> 第一波遗留的待决项在本章 §W2.4 关闭。
+
+## W2.0 结论先行
+
+**第二波范围 = 四组缺陷修复 + 一个性能专项**：
+
+1. **bh4 A#3–A#13**（锁/读写边界 11 条）→ `lock`
+2. **bh3 F4 残余 + F5–F8**（元数据 5 条；F4 即第一波 §5 待决第 4 条那个高危 READONLY 缺口，本轮已分派）→ `meta`
+3. **bh5 F4/F7/F8/F9 + VNI F5/F6**（6 条；F4 即第一波 §5 待决第 5 条，本轮拍板归 fsctl 而非随 lock 支带走）→ `fsctl`
+4. **bh5 F10/F11/F12**（命名流 3 条）→ `stream`
+5. **协议栈性能调优专项** → `perf`
+
+team-lead 已拍板两项决策（见 §W2.4）：bh5-F4 归 fsctl；CHANGE_NOTIFY 本波不做、留待下一版讨论。
+bh1/bh2 findings 文件确认丢失，不再追（见 §W2.3）。
+
+## W2.1 分工表（开工基线，状态 TODO）
+
+| 角色 | 分支 | 工作目录 | 任务 | 端口 | 状态 |
+|---|---|---|---|---|---|
+| lock | `lock/bh4-a3-a13` | /work/w2-lock | bh4 A#3–A#13 锁/读写边界 11 条 | 4451 | TODO |
+| meta | `meta/bh3-f4-f8` | /work/w2-meta | bh3 F4 残余+F5–F8 元数据 5 条 | 4452 | TODO |
+| fsctl | `fsctl/bh5-f4-f9-vni` | /work/w2-fsctl | bh5 F4/F7/F8/F9 + VNI F5/F6 | 4453 | TODO |
+| stream | `stream/bh5-f10-f12` | /work/w2-stream | bh5 F10/F11/F12 命名流 3 条 | 4454 | TODO |
+| perf | `perf/v050-hotpath` | /work/w2-perf | 协议栈性能调优专项 | 4455 | TODO |
+| pm（本板） | `pm/wave2-board` | /work/w2-pm | 进度板 | — | INPROGRESS |
+
+缺陷详情证据档：各 worktree 内 `docs/bughunt-20260825/findings-bh{3,4,5}.md`（已在库，
+commit `2bb02a3` @ 2026-08-25 19:36）。上一波 B1–B6 已全部合入 main。
+
+## W2.2 开工时间线（时间均为 `date` 实测 CST）
+
+| 时间 | 动作 |
+|---|---|
+| 09:59:55 | pm 上岗：确认工位 `/work/w2-pm`、分支 `pm/wave2-board` @ `73f96cf`（= origin/main），树干净；`ls /work` 见 6 个 wave2 工位齐 |
+| 10:00:59 | 复查证据档：`docs/bughunt-20260825/` 现有 bh3/bh4/bh5 三份（146 行板子 + 342 行报告在库）；`/tmp/opencode/findings-bh{1,2}.md` **均不存在**（→ §W2.3） |
+| 10:01:59 | 巡检第 0 轮（开工基线）：五条工作分支远端 HEAD 全部 = `73f96cf`，零独立提交 |
+| 10:05 | 第二波章节建板并推送 |
+
+## W2.3 bh1/bh2 回收复查结果
+
+2026-08-26 10:00:00 CST 实测：`/tmp/opencode/findings-bh1.md` 与
+`/tmp/opencode/findings-bh2.md` **仍不存在**（`ls` 返回「没有那个文件或目录」）。
+判定：两份 findings 随环境丢失，**不再追**，也不重跑排查。
+第一波 §5 待决第 2 条就此关闭——若后续任何角色在自己的工作目录里发现 bh1/bh2 的副本，
+再知会 pm 原样入库（只增不改），届时重新打开本条。
+
+## W2.4 决策记录（team-lead 已拍板）
+
+| # | 决策 | 内容 | 关闭的第一波待决项 |
+|---|---|---|---|
+| D1 | bh5-F4 归属 | SET_ZERO_DATA 缺字节范围锁检查归 **fsctl 角色**修（不随 lock 支顺路带走） | §5 待决第 5 条 |
+| D2 | CHANGE_NOTIFY | **本波不做**，留待下一版讨论是否立项 | §5 待决第 1 条 |
+
+注：第一波 §5 待决第 4 条（bh3-F4 归属）亦已闭环——分派给 meta 角色（见 §W2.1 分工表）。
+README 三态措辞订正尾巴（第一波 §5 待决第 3 条）不在本波分工表内，维持待派状态。
+
+## W2.5 巡检记录（分支 HEAD 变化）
+
+巡检命令：`git fetch origin && git ls-remote --heads origin`，取五条工作分支 HEAD。
+催办阈值：某分支超过 20 分钟零提交 → 板内 ⚠️ 催办。
+
+| 轮次 | 时间(CST) | lock/bh4-a3-a13 | meta/bh3-f4-f8 | fsctl/bh5-f4-f9-vni | stream/bh5-f10-f12 | perf/v050-hotpath | 备注 |
+|---|---|---|---|---|---|---|---|
+| 0 | 10:01:59 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 开工基线，均零独立提交 |
+
