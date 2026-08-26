@@ -21,12 +21,16 @@ import (
 func TestValidateNegotiateInfoSMB21(t *testing.T) {
 	c := newValidateTestConn(t, dialect.SMB210)
 
-	// 客户端重放它当初 NEGOTIATE 时发出的方言列表（顺序敏感）。
+	// 客户端重放它当初 NEGOTIATE 时发出的方言列表（忠实重放）。
+	replayed := make([]wire.Dialect, len(c.ClientDialects))
+	for i, d := range c.ClientDialects {
+		replayed[i] = wire.Dialect(uint16(d))
+	}
 	in := &wire.ValidateNegotiateInfoRequest{
 		Capabilities: c.ClientCapabilities,
 		ClientGUID:   c.ClientGUID,
 		SecurityMode: c.ClientSecurityMode,
-		Dialects:     []wire.Dialect{0x0202, 0x0210, 0x0300},
+		Dialects:     replayed,
 	}
 	input, err := in.Encode()
 	if err != nil {
@@ -111,8 +115,74 @@ func TestValidateNegotiateInfoMismatch(t *testing.T) {
 	}
 }
 
+// TestValidateNegotiateInfoDialectSubsetReordered（bh5-F5）：规范允许客户端
+// 重放**裁剪或重排**后的方言列表，只要最大公共方言不变（MS-SMB2 §3.3.5.15.12；
+// Samba smbd_smb2_protocol_dialect_match，smb2_ioctl_network_fs.c:533-620）。
+// 整表顺序相等的旧算法把这类合法客户端误判成降级攻击回 ACCESS_DENIED。
+func TestValidateNegotiateInfoDialectSubsetReordered(t *testing.T) {
+	c := newValidateTestConn(t, dialect.SMB210)
+
+	in := &wire.ValidateNegotiateInfoRequest{
+		Capabilities: c.ClientCapabilities,
+		ClientGUID:   c.ClientGUID,
+		SecurityMode: c.ClientSecurityMode,
+		Dialects:     []wire.Dialect{0x0210, 0x0202}, // 与记录的顺序相反
+	}
+	input, _ := in.Encode()
+	req := &wire.IoctlRequest{
+		CtlCode:           wire.FSCTLValidateNegotiateInfo,
+		Flags:             wire.IoctlIsFSCTL,
+		MaxOutputResponse: 4096,
+		Input:             input,
+	}
+	ctx := &Context{Conn: c, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := ioctlValidateNegotiate(ctx, req); err != nil {
+		t.Fatalf("最大公共方言未变的重放应通过, 实际 err=%v", err)
+	}
+}
+
+// TestValidateNegotiateInfoMaxCommonMismatch（bh5-F5）：最大公共方言变了才是
+// 降级/升级篡改，必须拒绝 —— 无论列表怎么裁剪。
+func TestValidateNegotiateInfoMaxCommonMismatch(t *testing.T) {
+	cases := []struct {
+		name     string
+		dialects []wire.Dialect
+	}{
+		{"只剩更低的方言", []wire.Dialect{0x0202}},      // best=2.0.2 ≠ 2.1
+		{"混入更高的方言", []wire.Dialect{0x0202, 0x0300}}, // best=3.0 ≠ 2.1
+		{"只发更高方言", []wire.Dialect{0x0311}},          // best=3.1.1 ≠ 2.1
+		{"空列表", nil},                                 // 无公共方言
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newValidateTestConn(t, dialect.SMB210)
+			in := &wire.ValidateNegotiateInfoRequest{
+				Capabilities: c.ClientCapabilities,
+				ClientGUID:   c.ClientGUID,
+				SecurityMode: c.ClientSecurityMode,
+				Dialects:     tc.dialects,
+			}
+			input, _ := in.Encode()
+			req := &wire.IoctlRequest{
+				CtlCode:           wire.FSCTLValidateNegotiateInfo,
+				Flags:             wire.IoctlIsFSCTL,
+				MaxOutputResponse: 4096,
+				Input:             input,
+			}
+			ctx := &Context{Conn: c, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if err := ioctlValidateNegotiate(ctx, req); err != status.AccessDenied {
+				t.Errorf("err = %v, 期望 %v", err, status.AccessDenied)
+			}
+		})
+	}
+}
+
 // newValidateTestConn 造一个「协商已完成」的连接桩，只填充
 // ioctlValidateNegotiate 需要的字段（其余字段真实协商时由 handleNegotiate 填）。
+//
+// ClientDialects 取「本端支持且 ≤ 协商结果」的完整列表，与真实 NEGOTIATE
+// 的自洽性一致：真实客户端重放自己发过的列表时，最大公共方言必然等于
+// 协商出的那个（bh5-F5 之前这里存的是与协商结果矛盾的桩数据）。
 func newValidateTestConn(t *testing.T, d dialect.Dialect) *Conn {
 	t.Helper()
 	var guid [16]byte
@@ -122,7 +192,11 @@ func newValidateTestConn(t *testing.T, d dialect.Dialect) *Conn {
 	c.ClientGUID = guid
 	c.ClientCapabilities = wire.Capabilities(0x00000001)
 	c.ClientSecurityMode = wire.NegotiateSigningEnabled
-	c.ClientDialects = []dialect.Dialect{0x0202, 0x0210, 0x0300}
+	for _, x := range dialect.All {
+		if x <= d {
+			c.ClientDialects = append(c.ClientDialects, x)
+		}
+	}
 	// 这些值由 NEGOTIATE handler 在真实协商时填充。
 	c.ServerCapabilities = wire.Capabilities(0x00000001)
 	c.ServerSecurityMode = wire.NegotiateSigningEnabled

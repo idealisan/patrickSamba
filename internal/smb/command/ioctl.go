@@ -113,7 +113,7 @@ func ioctlValidateNegotiate(ctx *Context, req *wire.IoctlRequest) error {
 	if in.ClientGUID != c.ClientGUID ||
 		in.SecurityMode != c.ClientSecurityMode ||
 		in.Capabilities != c.ClientCapabilities ||
-		!sameDialects(in.Dialects, c.ClientDialects) {
+		!validateNegotiateDialects(in.Dialects, c) {
 		ctx.Log.Warn("VALIDATE_NEGOTIATE_INFO 校验失败，疑似降级攻击",
 			"remote", c.RemoteAddr)
 		return status.AccessDenied
@@ -482,18 +482,29 @@ func appendIoctlResponse(ctx *Context, req *wire.IoctlRequest, output []byte) er
 	return nil
 }
 
-// sameDialects 比较两个方言列表是否完全一致（顺序敏感）。
+// validateNegotiateDialects 按「最大公共方言匹配」复核客户端重放的方言列表
+// （bh5-F5）。
 //
-// 顺序敏感是有意的：VALIDATE_NEGOTIATE_INFO 的意义就是逐字节复核客户端
-// 当初发过的内容，放松成集合比较会给攻击者留下重排的空间。
-func sameDialects(a []wire.Dialect, b []dialect.Dialect) bool {
-	if len(a) != len(b) {
-		return false
+// MS-SMB2 §3.3.5.15.12 的校验语义：当初协商出的方言，必须仍然是重放列表里
+// 能协商出的**最大公共方言** —— 不是整表逐项相等。规范明确允许客户端重放
+// 裁剪或重排后的列表；Samba 用 smbd_smb2_protocol_dialect_match() 求最大
+// 公共方言再与 conn->protocol 比较（smb2_ioctl_network_fs.c:533-620）。
+// 旧的整表顺序比较把这类合法客户端误判成降级攻击。
+//
+// 协商区间与 NEGOTIATE 命令同源（Settings.MinDialect/MaxDialect，
+// 见 handleNegotiate），保证两条路径对「可协商出」的判定一致：
+// 服务端配置封顶时，重放完整原始列表也依然能对上协商结果。
+func validateNegotiateDialects(replayed []wire.Dialect, c *Conn) bool {
+	best, ok := dialect.Negotiate(wireDialects(replayed),
+		c.Settings.MinDialect, c.Settings.MaxDialect)
+	return ok && best == c.Dialect
+}
+
+// wireDialects 把线上方言值转成 dialect 包类型（两者都是 u16 值类型，无重编码）。
+func wireDialects(in []wire.Dialect) []dialect.Dialect {
+	out := make([]dialect.Dialect, len(in))
+	for i, d := range in {
+		out[i] = dialect.Dialect(uint16(d))
 	}
-	for i := range a {
-		if uint16(a[i]) != uint16(b[i]) {
-			return false
-		}
-	}
-	return true
+	return out
 }
