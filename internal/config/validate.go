@@ -221,6 +221,28 @@ func validateServer(c *Config, errs *ValidationErrors) {
 			c.Server.MinDialect)
 	}
 
+	// 签名算法策略（MS-SMB2 §2.2.3.1.7 / §3.3.5.4）。
+	switch c.Server.SigningAlgorithm {
+	case "", DefaultSigningAlgorithm, "aes-cmac":
+		// auto 是默认值；aes-cmac 对方言没有额外下限 —— CMAC 本来就是
+		// 3.x 的默认签名算法，2.x 的 HMAC-SHA256 与它无关。
+	case "aes-gmac":
+		// AES-GMAC 只能通过 3.1.1 的 SIGNING_CAPABILITIES negotiate context
+		// 协商出来（§2.2.3.1.7：该 context 仅在方言列表含 3.1.1 时有效）。
+		// max_dialect < 3.1.1 意味着谁都协商不出 GMAC，配置自相矛盾，
+		// 启动时一次性报错（人话错误，指出字段与原因），不做静默纠正。
+		if maxRank >= 0 && maxRank < dialectRank("3.1.1") {
+			errs.add("server.signing_algorithm",
+				"aes-gmac 要求 max_dialect >= 3.1.1（当前 %s）—— "+
+					"SMB2_SIGNING_CAPABILITIES 协商只在 3.1.1 上有效。"+
+					"请把 max_dialect 设为 \"3.1.1\"，或改用 aes-cmac/auto",
+				c.Server.MaxDialect)
+		}
+	default:
+		errs.add("server.signing_algorithm",
+			"非法取值 %q，可选值: auto, aes-cmac, aes-gmac", c.Server.SigningAlgorithm)
+	}
+
 	if c.Server.MaxConnections < 0 {
 		errs.add("server.max_connections", "不能为负数（0 表示使用默认上限 256），当前 %d", c.Server.MaxConnections)
 	}
