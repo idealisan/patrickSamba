@@ -140,6 +140,28 @@
   证据档位：微基准 + 端到端 A/B 实测（容器 loopback）；race 门禁本容器无 gcc 未跑，
   由 CI 兜底（新增共享态均为 sync.Map/atomic/pool 设计）。
 
+- **READ 路径单次分配（分支 `cmdio/handleread-single-alloc`，第三波）**：v0.5 分析报告移交的
+  「handleRead 双拷贝」（堆分配 66% 所在）已消除——wire 新增预留式组装 API（Reserve/Commit），
+  文件内容经 ReadAt 直写响应缓冲。同载 alloc_space profile 实证：旧路径
+  `handleRead`(262.5MB)+`ReadResponse.Append`(250MB) 两热点归零，读路径分配字节 **−51%**；
+  线上字节逐字节不变（穷举对照 + legacy 复刻对照机器证明），encryption c1 读端到端 CPU −9%。
+  证据档位：allocs/op 基准 + 成对 A/B + 四门禁绿。
+- **bbolt 按桶分级持久化，小文件元数据操作提速数倍（分支 `bolts/dos-nosync`，第三波）**：
+  v0.5 分析报告 F4 的 bbolt 写放大已消除——旁路库按桶分类：可再生桶（创建时间/DOS 属性，
+  崩溃后可按既有合成基线回落）以 NoSync 打开、关闭时显式 Sync；**命名流/xattr/稀疏区间/
+  FileID 等内容与关键桶保持逐事务强制落盘，持久性与改动前一致**。进程崩溃不丢任何记录
+  （数据过 write() 进页缓存），仅掉电可能丢最近的派生元数据——语义边界由 team-lead 拍板并
+  写入代码注释。成对 A/B：small create **4.3~5.2×**（~700→2900–3600 ops/s）、delete
+  **7.3~8.6×**、c16 写 p95 毛刺收敛 ~20%。metadata_path 文件名规则/flock/跨进程语义未动。
+  证据档位：A/B 实测 + 重开存活回归用例（注明验证的是进程崩溃而非掉电）+ 四门禁绿。
+- **SMB 3.1.1 签名算法协商与 AES-GMAC 支持（分支 `gmac/signing-algorithm`，第三波）**：
+  新增 `server.signing_algorithm: auto/aes-cmac/aes-gmac` 配置，**默认 auto 与历史行为完全
+  一致**（不回应签名算法协商，零兼容风险）。aes-gmac 按 MS-SMB2 §2.2.3.1.7 / §3.1.4.1 实现
+  （nonce=MessageId 小端+方向/CANCEL 位；原语以 NIST CAVP GCMVS 官方向量钉住；GCM 硬件路径，
+  微基准 1MiB 签名 **7.1×** 于 CMAC）；客户端不支持时显式协商失败、绝不静默降级；
+  max_dialect<3.1.1 时启动报错。smbclient 4.22 双向签名互通为协议级实测。
+  ⚠️ **尚未在 Windows/macOS 真机验收，真机验证通过前建议保持 auto**。
+
 ---
 
 ## v0.4.0（2026-08-25，正式版）

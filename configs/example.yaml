@@ -98,6 +98,15 @@ server:
   # smb1: true
   # 强制 SMB 签名（防中间人篡改）。不强制时会有一条启动 WARN。
   signing_required: false
+  # 3.1.1 签名算法协商策略。取值大小写敏感：
+  #   auto      默认。行为与历史版本完全一致：不回应签名算法协商，
+  #             按方言默认值签名（2.x HMAC-SHA256，3.x AES-CMAC）。
+  #   aes-cmac  显式选择并宣告 AES-CMAC；客户端不支持则该连接协商失败。
+  #   aes-gmac  选择 AES-GMAC（GCM 硬件加速，大报文签名快数倍）。
+  #             仅 3.1.1 客户端且其声明支持时生效，其余一律拒绝连接，
+  #             绝不静默降级。要求 max_dialect >= 3.1.1，否则启动报错。
+  # ⚠️ aes-gmac 尚未经 Windows/macOS 真机验证；验证通过前建议保持 auto。
+  # signing_algorithm: "auto"
   # 强制 SMB3 加密。开启时 min_dialect 与 max_dialect 都要 >= 3.0，否则启动直接报错
   # （SMB 2.x 没有加密能力，会被拒绝连接）。
   encryption_required: false
