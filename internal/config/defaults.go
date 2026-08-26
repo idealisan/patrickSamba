@@ -69,6 +69,12 @@ func ApplyDefaults(c *Config) {
 	if c.MDNS.Apple.Model == "" {
 		c.MDNS.Apple.Model = DefaultAppleModel
 	}
+	// Apple 扩展记录默认开启（DefaultAppleMDNS）：没有苹果设备时对其他客户端
+	// 无任何影响，开着方便用 Finder 调试。显式写 false 仍然尊重。
+	if c.MDNS.Apple.Enabled == nil {
+		t := DefaultAppleMDNS
+		c.MDNS.Apple.Enabled = &t
+	}
 
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel

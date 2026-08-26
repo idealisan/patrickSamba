@@ -135,20 +135,28 @@ func TestNewServiceComposition(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "关闭 Apple 扩展只广播 SMB",
+			// 零值（未设置）= 默认开启：DefaultAppleMDNS 的规则在 EnabledOn 里，
+			// 不依赖 ApplyDefaults 先跑一遍。
+			name:   "未设置默认开启 Apple 扩展",
 			apple:  config.AppleMDNS{},
+			shares: tmShares,
+			want:   []string{serviceTypeSMB, serviceTypeDeviceInfo},
+		},
+		{
+			name:   "显式关闭 Apple 扩展只广播 SMB",
+			apple:  config.AppleMDNS{Enabled: boolPtr(false)},
 			shares: tmShares,
 			want:   []string{serviceTypeSMB},
 		},
 		{
 			name:   "开 Apple 但不宣告 TM",
-			apple:  config.AppleMDNS{Enabled: true, Model: "MacSamba"},
+			apple:  config.AppleMDNS{Enabled: boolPtr(true), Model: "MacSamba"},
 			shares: tmShares,
 			want:   []string{serviceTypeSMB, serviceTypeDeviceInfo},
 		},
 		{
 			name:   "开 TM 宣告且有 TM 共享",
-			apple:  config.AppleMDNS{Enabled: true, AdvertiseTimeMachine: true},
+			apple:  config.AppleMDNS{Enabled: boolPtr(true), AdvertiseTimeMachine: true},
 			shares: tmShares,
 			want:   []string{serviceTypeSMB, serviceTypeDeviceInfo, serviceTypeADisk},
 		},
@@ -156,7 +164,7 @@ func TestNewServiceComposition(t *testing.T) {
 			// 没有任何 time_machine: true 的共享时不能宣告 _adisk：
 			// 宣告一个空的备份磁盘列表会让 Finder 显示一个连不上的条目。
 			name:   "开 TM 宣告但没有 TM 共享",
-			apple:  config.AppleMDNS{Enabled: true, AdvertiseTimeMachine: true},
+			apple:  config.AppleMDNS{Enabled: boolPtr(true), AdvertiseTimeMachine: true},
 			shares: []config.Share{{Name: "public"}},
 			want:   []string{serviceTypeSMB, serviceTypeDeviceInfo},
 		},
@@ -188,7 +196,7 @@ func TestNewAppleModelDefault(t *testing.T) {
 	r, err := New(config.MDNS{
 		Enabled:  true,
 		Instance: "TESTBOX",
-		Apple:    config.AppleMDNS{Enabled: true},
+		Apple:    config.AppleMDNS{Enabled: boolPtr(true)},
 	}, 445, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -216,7 +224,7 @@ func TestAppleRecords(t *testing.T) {
 		Enabled:  true,
 		Instance: instance,
 		Apple: config.AppleMDNS{
-			Enabled:              true,
+			Enabled:              boolPtr(true),
 			Model:                "TimeCapsule8,119",
 			AdvertiseTimeMachine: true,
 		},
@@ -312,3 +320,6 @@ func TestAppleRecordsPackable(t *testing.T) {
 		t.Errorf("往返后 TXT = %q, 期望 %q", rec.Strings, def.TXT)
 	}
 }
+
+// boolPtr 是 *bool 配置项测试用的取址助手。
+func boolPtr(b bool) *bool { return &b }

@@ -1,14 +1,18 @@
 # stupidSamba 配置示例
 #
-# 最小可用配置只需要 shares 一段，其余都有合理默认值：
+# 最小可用配置只需要 shares + 一个用户，其余都有合理默认值：
 #
 #   shares:
 #     - name: public
 #       path: /srv/share/public
 #   auth:
 #     users:
-#       - name: alice
-#         password: "changeme"
+#       - name: stupidsamba
+#         password: "stupidsamba"
+#
+# 这份最小配置与官方容器镜像内置的 configs/docker.yaml 是**同一套默认值**
+# （同一演示账号、同一共享名 public；容器里共享路径固定为 /data）。
+# 演示账号是公开凭据，正式使用请换成自己的口令。
 #
 # 本文件把每个可用字段都写了出来并逐条注释，按需删减即可。
 # 改完用 `stupidsamba -config <本文件> -check` 校验，它会一次性报出全部问题。
@@ -210,6 +214,8 @@ mdns:
   interfaces: []
   apple:
     # 是否携带苹果生态对 SMB 的扩展记录（_device-info._tcp 等）。
+    # **默认即 true**（没有苹果设备时这些记录对其他客户端没有影响，开着方便
+    # 用 Finder 调试）；这里显式写出是展示写法。
     enabled: true
     # 决定 Finder 侧边栏显示的图标，例如 MacSamba / Xserve / TimeCapsule8,119。
     model: "MacSamba"

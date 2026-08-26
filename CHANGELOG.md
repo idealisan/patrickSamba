@@ -75,6 +75,22 @@
   `docs/bughunt-20260825/findings-bh{3,4,5}.md`（三份对照 Samba 的排查报告，92/122/128 行共 342 行，
   自 `/tmp/opencode` 原样抢救拷贝入库；bh1/bh2 未找到对应文件，已在板内列为待决事项）。
   纯文档入库，二进制行为不受影响。
+- **默认配置统一为「Windows 11 开箱即用」**：镜像内置配置（`configs/docker.yaml`）弃用
+  guest 匿名方案，改为内置演示账号 `stupidsamba`/`stupidsamba`——Windows 10/11 默认拒绝
+  不安全的 guest 登录，guest 配置对 Windows 用户等于连不上（2026-08-26 实测复现并定位）；
+  演示账号是公开凭据，启动日志新增对应的 WARN 提醒（`config.Warnings`）。README 快速开始、
+  Docker 运行一节与最小配置示例同步对齐同一套默认值：`-p 445:445` 端口映射 + 凭据连接，
+  并补「从 Windows 访问」步骤与两个高频坑的说明（UNC 路径不支持冒号端口写法；
+  guest 匿名被 Windows 默认拒绝不是 bug）。**已发布的 v0.4.0 镜像不受影响**，
+  新内置配置随下一个镜像版本生效。证据档位：单测级（演示账号 WARN 用例）+
+  本地容器实测 smbclient 连通；Windows 真机回归未做。
+- **`mdns.apple.enabled` 默认值改为 true**：此前默认关闭，现按项目所有者要求改为
+  默认开启 Apple 扩展记录（`_device-info._tcp` 等）——没有苹果设备时这些 TXT 记录对
+  其他客户端没有影响，开着方便用 Finder 调试。实现沿用 `*bool` 三态模式
+  （同 `server.smb1` / `share.browseable`）：未设置 → true，显式 `false` 仍然尊重；
+  新增 `AppleMDNS.EnabledOn()` 作为 nil 安全的读取口。注意 SMB 协议层的 AAPL
+  create context 支持本就始终启用，不受此开关控制；开关只影响 mDNS 广播记录。
+  证据档位：单测级（默认值三态 + mdns 服务定义生成两用例先红后绿）。
 
 ---
 
