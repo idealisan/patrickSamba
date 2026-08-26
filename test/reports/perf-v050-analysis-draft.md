@@ -209,3 +209,30 @@ TCP_NODELAY；WriteFrame 已用 net.Buffers 把 4 字节头与载荷一次 write
 | bbolt DOS 落库写放大（CREATE/DELETE 各一次 fsync 事务） | oscap/builtin + vfs | 小文件 IOPS 的当前天花板；能否合批/延迟属持久化语义决策 |
 | AES-GMAC 协商（TODO M4） | 协商角色 | GMAC 走 GCM 硬件路径，比 CMAC 更快且规范允许 |
 | race 门禁补跑 | 有 gcc 的环境 | `CGO_ENABLED=1 go test -race ./internal/server/ ./internal/vfs/` |
+
+## 9. 合并后 main 复测（2026-08-26 13:58 CST，team-lead 补记）
+
+第二波六支分支全部合入 main（HEAD `130f99b`）后，用同一设施（test/perf/run-bench.sh，
+128 MiB 口径）重跑一轮。原始输出存 `/tmp/opencode/perf_main_{signing,enc}.log`
+（易失），SUMMARY 如下：
+
+| 场景 | signing | encryption |
+|---|---|---|
+| large c1 写 | **257.9 MB/s** [p50=3751µs p95=4623µs] | **573.6 MB/s** [p50=1564µs p95=2476µs] |
+| large c1 读 | 204.9 MB/s [p50=4595µs p95=6111µs] | 495.1 MB/s [p50=1752µs p95=3028µs] |
+| large c16 写（聚合） | **726.0 MB/s** [p50=14.0ms p95=37.8ms] | **1119.6 MB/s** [p50=6.2ms p95=16.2ms] |
+| large c16 读（聚合） | 745.5 MB/s [p50=17.7ms p95=39.2ms] | **1371.2 MB/s** [p50=8.5ms p95=22.3ms] |
+| small create/delete | 531 / 609 ops/s | 465 / 555 ops/s |
+
+解读（沿用 §1 噪声声明：本容器同负载可差 2×，绝对值仅参考）：
+
+- 与 §7 分支内成对 A/B 一致：签名 c1 写落在当时测得的 new 区间附近（287→258，
+  噪声内）；「加密比签名快」的结构性现象保持（GCM 硬件路径 vs CMAC 软件链，
+  现在约 2.2×）。
+- 与 v040 报告的 94.7/199.6 **不可直接对比**：那是另一套基准程序（512 MiB +
+  客户端逐 chunk MD5），口径不同；同 harness 的可信对照只有 §7 的 A/B
+  （c1 写 +15.8% / c16 写 +25% / 服务端 CPU −26%）。
+- c16 读 1371 MB/s（加密）为该项目迄今实测最高聚合读；p95 未出现 v040 报告的
+  45 ms 级恶化（本轮 c16 写 p95=37.8 ms，其中含 bbolt DOS 落库毛刺，见 F4）。
+- 小文件 IOPS 维持 §8 移交项结论：天花板是 CREATE 触发的 bbolt 单事务 fsync
+  （~1.8 ms/个），非协议栈。
