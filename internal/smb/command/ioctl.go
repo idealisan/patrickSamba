@@ -113,7 +113,7 @@ func ioctlValidateNegotiate(ctx *Context, req *wire.IoctlRequest) error {
 	if in.ClientGUID != c.ClientGUID ||
 		in.SecurityMode != c.ClientSecurityMode ||
 		in.Capabilities != c.ClientCapabilities ||
-		!sameDialects(in.Dialects, c.ClientDialects) {
+		!validateNegotiateDialects(in.Dialects, c) {
 		ctx.Log.Warn("VALIDATE_NEGOTIATE_INFO 校验失败，疑似降级攻击",
 			"remote", c.RemoteAddr)
 		return status.AccessDenied
@@ -203,18 +203,17 @@ func sparseTarget(ctx *Context, req *wire.IoctlRequest, write bool) (*Open, vfs.
 		if err := ctx.RequireWritable(); err != nil {
 			return nil, nil, err
 		}
-		// MS-FSA §2.1.5.9.29：FILE_WRITE_DATA 或 FILE_WRITE_ATTRIBUTES 之一即可。
-		if open.GrantedAccess&(wire.FileWriteData|wire.FileWriteAttributes) == 0 {
+		// MS-FSA §2.1.5.9.29：FILE_WRITE_DATA / FILE_WRITE_ATTRIBUTES /
+		// FILE_APPEND_DATA 之一即可。bh5-F8 补上 APPEND_DATA —— Windows
+		// Server 2008/2012 同样认它（Samba dosmode.c:1118-1128 引的正是
+		// 这三家任一）。宽掩码只服务 SET_SPARSE；SET_ZERO_DATA 在自己的
+		// handler 里仍单独要求 FILE_WRITE_DATA（置零是真写语义）。
+		if open.GrantedAccess&(wire.FileWriteData|wire.FileWriteAttributes|wire.FileAppendData) == 0 {
 			return nil, nil, status.AccessDenied
 		}
 	}
 
-	sp, ok := h.(vfs.SparseFile)
-	if !ok {
-		// 后端没有打洞能力：明确回不支持，别假装成功。
-		// 假装成功会让客户端以为空间已释放，容量统计从此对不上。
-		return nil, nil, status.NotSupported
-	}
+	sp, _ := h.(vfs.SparseFile)
 	return open, sp, nil
 }
 
@@ -248,6 +247,23 @@ func ioctlSetSparse(ctx *Context, req *wire.IoctlRequest) error {
 		return err
 	}
 
+	// bh5-F9：流句柄上 SET_SPARSE 无操作成功。
+	//
+	// Samba 的 vfswrap_fsctl 开头就 fsp = metadata_fsp(fsp)，对流句柄的
+	// 稀疏位设置更是直接假装成功（dosmode.c:1147-1155，引 MS-FSA §2.1.1.5：
+	// 流永远不是稀疏文件，设不设都改变不了它的形态）。回 NOT_SUPPORTED 会让
+	// 对 `file:stream` 句柄做常规稀疏初始化的客户端把整个共享当成「不支持
+	// 稀疏」而放弃打洞 —— 比假装成功伤害大得多。macOS 对 band 文件本体
+	// 操作，正常流量走不到这里；这是对齐参照实现的兜底。
+	if sp == nil {
+		if open.Stream == "" {
+			// 主数据流且后端没有打洞能力：明确回不支持，别假装成功。
+			// 假装成功会让客户端以为空间已释放，容量统计从此对不上。
+			return status.NotSupported
+		}
+		return ioctlEmptyOK(ctx, req)
+	}
+
 	// ⚠️ 输入为空必须视为 TRUE（MS-FSCC §2.3.69）。macOS 与 Windows 都会发
 	// 不带 Input 的 SET_SPARSE，按 FALSE 处理的话 .sparsebundle 的 band
 	// 一个都稀疏不了。
@@ -276,12 +292,33 @@ func ioctlSetZeroData(ctx *Context, req *wire.IoctlRequest) error {
 	if open.GrantedAccess&wire.FileWriteData == 0 {
 		return status.AccessDenied
 	}
+	// bh5-F9：流句柄与无稀疏能力的后端都如实回 NOT_SUPPORTED（同 QAR，
+	// 见 ioctlQueryAllocatedRanges 里对 metadata_fsp 映射的记录）。
+	if sp == nil {
+		return status.NotSupported
+	}
 
 	z, perr := wire.ParseZeroDataInput(req.Input)
 	if perr != nil {
 		return status.InvalidParameter
 	}
 	if n := z.BeyondFinalZero - z.FileOffset; n > 0 {
+		// bh5-F4：strict locking 检查。打洞会改写区间内容，属于写操作，
+		// 必须与 READ/WRITE 入口共用同一张锁表、同一个冲突矩阵
+		// （lockTable.checkIO，WRITE_LOCK 语义）。Samba 对照：
+		// smb2_ioctl_filesys.c:459-468 对 zero_data 先做
+		// SMB_VFS_STRICT_LOCK_CHECK，冲突回 NT_STATUS_FILE_LOCK_CONFLICT；
+		// 缺了这道闸，持锁客户端锁定的字节会被别人的打洞悄悄清零。
+		//
+		// 键必须与 handleLock 的登记键一致（open.Path），豁免单位同样是
+		// 句柄 —— 自己的锁不挡自己的打洞。
+		if open.Tree == nil || open.Tree.Share == nil {
+			return status.NetworkNameDeleted
+		}
+		if st := open.Tree.Share.locks.checkIO(open.Path, open,
+			uint64(z.FileOffset), uint64(n), true); st != status.Success {
+			return st
+		}
 		if err := sp.PunchHole(z.FileOffset, n); err != nil {
 			ctx.Log.Warn("SET_ZERO_DATA 打洞失败", "path", open.Path, "err", err)
 			return status.FromVFSError(err)
@@ -300,8 +337,19 @@ func ioctlQueryAllocatedRanges(ctx *Context, req *wire.IoctlRequest) error {
 	if err != nil {
 		return err
 	}
-	// 读区间分布至少要有读或写权限之一。macOS 的 band 文件是读写打开的。
-	if open.GrantedAccess&(wire.FileReadData|wire.FileWriteData) == 0 {
+	// bh5-F9：流句柄与无稀疏能力的后端都如实回 NOT_SUPPORTED（sp 为 nil）。
+	// Samba 在 vfswrap_fsctl 开头 fsp = metadata_fsp(fsp) 把 fsctl 映射到
+	// 基础文件；我们不在命令层为流重开基础文件 —— 那要绕过共享模式检查并
+	// 凭空多出一个 fd，代价远超收益（macOS 对 band 本体操作，正常流量
+	// 走不到这条），记录在案即可（findings-bh5 F9 修复方向原文允许）。
+	if sp == nil {
+		return status.NotSupported
+	}
+	// bh5-F7：读区间分布只要求 FILE_READ_DATA。此前放宽到「读或写任一」，
+	// 让只写句柄也能探到分配分布；Samba 只认 READ_DATA
+	// （smb2_ioctl_filesys.c:632 check_any_access_fsp(fsp, FILE_READ_DATA)），
+	// 收紧对齐。
+	if open.GrantedAccess&wire.FileReadData == 0 {
 		return status.AccessDenied
 	}
 
@@ -434,18 +482,29 @@ func appendIoctlResponse(ctx *Context, req *wire.IoctlRequest, output []byte) er
 	return nil
 }
 
-// sameDialects 比较两个方言列表是否完全一致（顺序敏感）。
+// validateNegotiateDialects 按「最大公共方言匹配」复核客户端重放的方言列表
+// （bh5-F5）。
 //
-// 顺序敏感是有意的：VALIDATE_NEGOTIATE_INFO 的意义就是逐字节复核客户端
-// 当初发过的内容，放松成集合比较会给攻击者留下重排的空间。
-func sameDialects(a []wire.Dialect, b []dialect.Dialect) bool {
-	if len(a) != len(b) {
-		return false
+// MS-SMB2 §3.3.5.15.12 的校验语义：当初协商出的方言，必须仍然是重放列表里
+// 能协商出的**最大公共方言** —— 不是整表逐项相等。规范明确允许客户端重放
+// 裁剪或重排后的列表；Samba 用 smbd_smb2_protocol_dialect_match() 求最大
+// 公共方言再与 conn->protocol 比较（smb2_ioctl_network_fs.c:533-620）。
+// 旧的整表顺序比较把这类合法客户端误判成降级攻击。
+//
+// 协商区间与 NEGOTIATE 命令同源（Settings.MinDialect/MaxDialect，
+// 见 handleNegotiate），保证两条路径对「可协商出」的判定一致：
+// 服务端配置封顶时，重放完整原始列表也依然能对上协商结果。
+func validateNegotiateDialects(replayed []wire.Dialect, c *Conn) bool {
+	best, ok := dialect.Negotiate(wireDialects(replayed),
+		c.Settings.MinDialect, c.Settings.MaxDialect)
+	return ok && best == c.Dialect
+}
+
+// wireDialects 把线上方言值转成 dialect 包类型（两者都是 u16 值类型，无重编码）。
+func wireDialects(in []wire.Dialect) []dialect.Dialect {
+	out := make([]dialect.Dialect, len(in))
+	for i, d := range in {
+		out[i] = dialect.Dialect(uint16(d))
 	}
-	for i := range a {
-		if uint16(a[i]) != uint16(b[i]) {
-			return false
-		}
-	}
-	return true
+	return out
 }
