@@ -85,6 +85,7 @@ func handleNegotiate(ctx *Context) error {
 	if set.SigningPreference == SigningPreferAESGMAC && !d.SupportsNegotiateContexts() {
 		ctx.Log.Warn("配置要求 AES-GMAC 签名但客户端协商到非 3.1.1 方言，拒绝协商",
 			"dialect", d)
+		c.Dialect = 0 // 协商失败，连接回到未协商状态
 		return status.NotSupported
 	}
 
@@ -225,6 +226,7 @@ func negotiateContexts(ctx *Context, req *wire.NegotiateRequest) ([]wire.Negotia
 
 	sigCtx, err := negotiateSigning(ctx, req)
 	if err != nil {
+		c.Dialect = 0 // 协商失败，连接回到未协商状态
 		return nil, err
 	}
 	if sigCtx.Type != 0 {
