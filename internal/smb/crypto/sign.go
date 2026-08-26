@@ -1,8 +1,6 @@
 package crypto
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -144,17 +142,11 @@ func computeMAC(alg SigningAlgorithm, key, msg []byte) ([]byte, error) {
 		return CMAC(key, msg)
 
 	case SigningAESGMAC:
-		b, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, err
-		}
-		g, err := cipher.NewGCM(b)
-		if err != nil {
-			return nil, err
-		}
 		nonce := gmacNonce(msg)
 		// RFC 4543 AES-GMAC = GCM 下明文为空、消息全部作为 AAD，输出即 16 字节 tag。
-		return g.Seal(nil, nonce[:], nil, msg), nil
+		// 签名密钥与 CMAC 同源（MS-SMB2 §3.1.4.2 按"用途"派生，与具体
+		// MAC 算法无关），因此这里不需要新的 KDF。
+		return GMAC(key, nonce[:], msg)
 
 	default:
 		return nil, ErrSigningAlgorithm

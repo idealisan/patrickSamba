@@ -31,6 +31,12 @@ func ApplyDefaults(c *Config) {
 		c.Server.MaxDialect = DefaultMaxDialect
 	}
 
+	// 签名算法策略默认 auto：与引入该配置之前的行为逐字节一致
+	// （不回应 SIGNING_CAPABILITIES、按方言默认值签名）。
+	if c.Server.SigningAlgorithm == "" {
+		c.Server.SigningAlgorithm = DefaultSigningAlgorithm
+	}
+
 	// SMB1 多协议协商入口默认开启（见 config.go 该字段注释）：
 	// impacket 等客户端默认先发 SMB1 协商，关掉会让它们开箱即用失败。
 	// 只是协商入口，不提供 SMB1 文件操作，没有额外攻击面。

@@ -43,6 +43,21 @@ type Server struct {
 	MinDialect string `yaml:"min_dialect"`
 	// SigningRequired 强制要求 SMB 签名。
 	SigningRequired bool `yaml:"signing_required"`
+	// SigningAlgorithm 控制 3.1.1 签名算法协商策略
+	// （MS-SMB2 §2.2.3.1.7 SMB2_SIGNING_CAPABILITIES）。
+	//
+	//	auto      （默认）行为与历史版本完全一致：不回应 SIGNING_CAPABILITIES，
+	//	          签名算法按方言默认值（2.x HMAC-SHA256，3.x AES-CMAC）。
+	//	          客户端即便宣告支持 AES-GMAC 也**不会**被采用。
+	//	aes-cmac  显式选择 AES-CMAC：3.1.1 且客户端宣告了 CMAC 时回应并钉死 CMAC；
+	//	          客户端宣告的列表里没有 CMAC 则协商失败（显式失败优于静默降级）。
+	//	aes-gmac  选择 AES-GMAC（GCM 硬件路径，比 CMAC 快）：仅当协商到 3.1.1
+	//	          且客户端宣告 GMAC 时生效；客户端不支持或协商到更低方言时，
+	//          该连接直接协商失败，**绝不静默降级回 CMAC**。
+	//          要求 server.max_dialect >= 3.1.1（validate.go 启动校验）。
+	//
+	// 取值大小写敏感、只接受上述小写拼写（与 filesystem_mode 同规矩）。
+	SigningAlgorithm string `yaml:"signing_algorithm"`
 	// EncryptionRequired 强制要求 SMB3 加密。
 	EncryptionRequired bool `yaml:"encryption_required"`
 	// MaxConnections 是并发连接数上限。
@@ -201,7 +216,10 @@ const (
 	DefaultLogFormat  = "text"
 	DefaultMaxDialect = "3.1.1"
 	DefaultMinDialect = "2.0.2"
-	DefaultAppleModel = "MacSamba"
+	// DefaultSigningAlgorithm 是 Server.SigningAlgorithm 的默认值：
+	// auto = 与历史版本行为完全一致（只按方言默认值签名，不协商 GMAC）。
+	DefaultSigningAlgorithm = "auto"
+	DefaultAppleModel       = "MacSamba"
 	// DefaultAppleMDNS 是 MDNS.Apple.Enabled 的默认值：默认开启 Apple 扩展记录。
 	// 理由见 AppleMDNS.Enabled 字段注释。与 DefaultFilesystemMode 同理保持 const。
 	DefaultAppleMDNS = true
