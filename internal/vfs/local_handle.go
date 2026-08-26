@@ -37,6 +37,13 @@ type localHandle struct {
 	writable     bool
 	writeThrough bool
 
+	// writeTimeForced 非 IsZero 表示客户端在本句柄上显式设置过
+	// LastWriteTime（SET_INFO FileBasicInformation），进入 sticky 语义
+	// （bh3-F6）：后续写入/截断造成的内核 mtime 更新都要被补偿回所设值，
+	// 直到本句柄关闭。与 Samba 的 fsp.write_time_forced 同粒度（per-fsp）：
+	// 别的句柄写入不受影响。由 h.mu 保护。
+	writeTimeForced time.Time
+
 	mu            sync.Mutex
 	closed        bool
 	deleteOnClose bool
@@ -106,6 +113,12 @@ func (h *localHandle) WriteAt(p []byte, off int64) (int, error) {
 	n, err := h.f.WriteAt(p, off)
 	if err != nil {
 		return n, mapError(err)
+	}
+	if n > 0 {
+		// sticky write time（bh3-F6）：内核刚把 mtime 刷成了现在，
+		// 补偿回客户端显式设置的值。放在 writeThrough 同步**之前**，
+		// 让 FILE_WRITE_THROUGH 的 fsync 连补偿结果一起落盘。
+		h.restoreStickyWriteTime()
 	}
 	if h.writeThrough {
 		// FILE_WRITE_THROUGH：客户端要求每次写都落盘。
@@ -237,6 +250,15 @@ func (h *localHandle) SetAttr(attr *Attr, mask AttrMask) error {
 		}
 		if err := setTimes(h.host, at, mt); err != nil {
 			return err
+		}
+		// bh3-F6：显式设置 write time 即进入 sticky 语义（MS-FSCC §2.4.7
+		// 的 set-then-preserve；Samba set_sticky_write_time_fsp，
+		// source3/smbd/dosmode.c:1274–1285）。此后本句柄的每次写入与
+		// 关闭都把 mtime 补偿回该值，见 restoreStickyWriteTime。
+		if mask&AttrWriteTime != 0 && !attr.WriteTime.IsZero() {
+			h.mu.Lock()
+			h.writeTimeForced = attr.WriteTime
+			h.mu.Unlock()
 		}
 	}
 	if mask&AttrCreateTime != 0 && !attr.CreateTime.IsZero() {
@@ -544,6 +566,33 @@ func (h *localHandle) Xattr() (XattrAccessor, error) {
 	return h.fs.xattrAt(h.host, h.f), nil
 }
 
+// restoreStickyWriteTime 把 mtime 补偿回客户端显式设置的值（bh3-F6）。
+//
+// POSIX 内核在任何写入/截断之后必然更新 mtime，没有「冻结时间戳」的接口
+// （Windows 的 FILE_ATTRIBUTE 有、POSIX 没有），所以只能事后把所设值写回去：
+// WriteAt 每次成功写入后一次，Close 收尾一次（兜住 Truncate / 预分配这类
+// 绕过 WriteAt 的元数据变更）。
+//
+// 尽力而为：读当前 atime 失败或 Chtimes 失败都静默放弃 —— 补偿失败只影响
+// 一个时间戳的观感，把它当硬错误回给客户端只会让一次成功的写入被误判失败。
+func (h *localHandle) restoreStickyWriteTime() {
+	h.mu.Lock()
+	forced := h.writeTimeForced
+	h.mu.Unlock()
+	if forced.IsZero() {
+		return
+	}
+	fi, err := os.Stat(h.host)
+	if err != nil {
+		return
+	}
+	at, ok := fileAccessTime(fi)
+	if !ok {
+		return
+	}
+	_ = os.Chtimes(h.host, at, forced)
+}
+
 // Close 实现 Handle。
 func (h *localHandle) Close() error {
 	h.mu.Lock()
@@ -560,6 +609,9 @@ func (h *localHandle) Close() error {
 
 	var firstErr error
 	if f != nil {
+		// sticky write time 的收尾补偿（bh3-F6）：赶在关 fd 与删文件之前，
+		// 对象还在盘上时把 mtime 钉回所设值。
+		h.restoreStickyWriteTime()
 		if err := f.Close(); err != nil {
 			firstErr = mapError(err)
 		}

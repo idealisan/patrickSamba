@@ -34,3 +34,13 @@ func fillSysAttrFromFile(*os.File, *Attr) {}
 
 // statCreateTime 在 macOS 上是多余的（Birthtimespec 已在 fillSysAttr 里取到）。
 func statCreateTime(string) (time.Time, bool) { return time.Time{}, false }
+
+// fileAccessTime 从 FileInfo 取当前 atime（sticky write time 补偿用，
+// 见 attr_linux.go 同名函数的说明）。
+func fileAccessTime(fi fs.FileInfo) (time.Time, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(st.Atimespec.Unix()), true
+}

@@ -73,3 +73,17 @@ func statCreateTime(path string) (time.Time, bool) {
 	}
 	return time.Unix(stx.Btime.Sec, int64(stx.Btime.Nsec)), true
 }
+
+// fileAccessTime 从 FileInfo 取当前 atime。
+//
+// 唯一消费方是 sticky write time 的补偿回写（bh3-F6）：os.Chtimes 必须
+// 同时给 atime 与 mtime，而 POSIX 拿不到「只改其一」的接口，所以先把
+// 当前 atime 读出来原样写回去。取不到时返回 false，调用方放弃补偿
+// （尽力而为，不让补偿动作污染数据路径的错误处理）。
+func fileAccessTime(fi fs.FileInfo) (time.Time, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(st.Atim.Unix()), true
+}
