@@ -483,6 +483,10 @@ func smallRound(dir string) (cs, ds opStat) {
 	}
 
 	_ = s.fs.Remove(dir) // 忽略不存在
+	if err := s.fs.Mkdir(dir, 0o755); err != nil {
+		// 目录已存在等情形不致命；真正建不出来会在下面 create 报错。
+		fmt.Fprintf(os.Stderr, "mkdir %s: %v（若已存在可忽略）\n", dir, err)
+	}
 	names := make([]string, *smallN)
 
 	// create + write + close
