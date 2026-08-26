@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -135,6 +136,10 @@ func openStore(o oscap.Options) (*store, error) {
 	return st, nil
 }
 
+// warnNoSyncOnce 保证「旁路库运行于 NoSync 模式」的提示每个进程至多一行。
+// 多个共享各开各的库时会多次走到实际打开处，运维只需要被告知一次。
+var warnNoSyncOnce sync.Once
+
 // acquireDB 取得库文件 p 的句柄，已经打开过就复用并把引用计数加一。
 func acquireDB(p string, readOnly bool) (*dbRef, error) {
 	key, err := filepath.Abs(p)
@@ -162,13 +167,29 @@ func acquireDB(p string, readOnly bool) (*dbRef, error) {
 		return r, nil
 	}
 
-	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout, ReadOnly: readOnly})
+	db, err := bolt.Open(p, 0o600, &bolt.Options{
+		Timeout:  openFlockTimeout,
+		ReadOnly: readOnly,
+		// NoSync（持久化语义边界见 bucketIsRegenerable 的成段注释）：
+		// 提交只进页缓存 —— 进程崩溃不丢，掉电只威胁可再生桶；
+		// 内容类桶在每笔写事务后显式 Sync() 补回真持久性，
+		// 关闭路径统一再 Sync 一次（releaseDB）。
+		NoSync: !readOnly,
+	})
 	if err != nil {
 		if readOnly {
 			return nil, fmt.Errorf("oscap/builtin: 以只读方式打开旁路存储 %s 失败: %w", p, err)
 		}
 		return nil, fmt.Errorf(
 			"oscap/builtin: 打开旁路存储 %s 失败（是否已被另一个进程占用？）: %w", p, err)
+	}
+	if !readOnly {
+		warnNoSyncOnce.Do(func() {
+			slog.Warn("oscap/builtin: 旁路库以 NoSync 模式运行",
+				"path", key,
+				"语义", "进程崩溃不丢；内核崩溃/掉电仅可能丢最近的 DOS 属性/创建时间"+
+					"（可再生元数据，按合成基线回落）；命名流等内容按事务强制落盘")
+		})
 	}
 	r := &dbRef{db: db, readOnly: readOnly, refs: 1}
 	openDBs[key] = r
@@ -194,7 +215,18 @@ func releaseDB(p string, ref *dbRef) error {
 	if cur, ok := openDBs[key]; ok && cur == ref {
 		delete(openDBs, key)
 	}
-	return ref.db.Close()
+	// 关闭前强制落盘：这是**所有关闭路径**（服务优雅退出、共享卸载、测试收尾）
+	// 共用的最后一道闸。NoSync 库的已提交数据此刻可能还在页缓存里，这里补一次
+	// 真 fdatasync，把「优雅退出=全量落盘」钉死。只读句柄没写过任何页，跳过
+	// （Windows 上 FlushFileBuffers 还要求句柄有写权限，对只读句柄调用必失败）。
+	var closeErr error
+	if !ref.readOnly {
+		closeErr = ref.db.Sync()
+	}
+	if err := ref.db.Close(); err != nil && closeErr == nil {
+		closeErr = err
+	}
+	return closeErr
 }
 
 // resolveMetadataPath 决定库文件落在哪。
@@ -342,6 +374,10 @@ func (s *store) get(bucket, key []byte) (val []byte, ok bool, err error) {
 }
 
 // put 写一条记录（已存在则覆盖）。
+//
+// 持久性按桶分类（bucketIsRegenerable）：可再生桶的提交只进页缓存
+// （NoSync 的收益所在）；其余桶提交成功后立即 db.Sync() 强制真落盘，
+// 持久性与 NoSync 化之前完全一致。
 func (s *store) put(bucket, key, val []byte) error {
 	if s.readOnly || s.db == nil {
 		return oscap.ErrReadOnly
@@ -349,19 +385,33 @@ func (s *store) put(bucket, key, val []byte) error {
 	rec := make([]byte, 0, len(val)+1)
 	rec = append(rec, recVersion)
 	rec = append(rec, val...)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	if err := s.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(bucket)
 		if err != nil {
 			return err
 		}
 		return b.Put(key, rec)
-	})
+	}); err != nil {
+		return err
+	}
+	return s.syncUnlessRegenerable(bucket)
+}
+
+// syncUnlessRegenerable 在非可再生桶的写事务之后补真落盘。
+func (s *store) syncUnlessRegenerable(bucket []byte) error {
+	if bucketIsRegenerable(bucket) {
+		return nil
+	}
+	return s.db.Sync()
 }
 
 // del 删一条记录，existed 报告它原本在不在。
 //
 // 区分「删掉了」与「本来就没有」是必须的：ports.go 要求删不存在的属性/流
 // 返回 ErrNotFound，而不是静默成功。
+//
+// 现有的两个调用方（RemoveXattr/RemoveStream）都落在关键桶上，删除照 put 的
+// 规则补真落盘；将来若有人给可再生桶加单条删除，同样由分类器自动豁免。
 func (s *store) del(bucket, key []byte) (existed bool, err error) {
 	if s.readOnly || s.db == nil {
 		return false, oscap.ErrReadOnly
@@ -377,7 +427,10 @@ func (s *store) del(bucket, key []byte) (existed bool, err error) {
 		existed = true
 		return b.Delete(key)
 	})
-	return existed, err
+	if err != nil {
+		return existed, err
+	}
+	return existed, s.syncUnlessRegenerable(bucket)
 }
 
 // kvPair 是一次前缀扫描的结果项。Key 是**去掉前缀之后**的部分。
@@ -391,6 +444,29 @@ type kvPair struct {
 // 漏掉任何一个桶就是一条「改名后属性凭空消失/串到别人身上」的 bug。
 var allBuckets = [...][]byte{
 	bucketXattr, bucketHoles, bucketStream, bucketFileID, bucketTimes, bucketDOS,
+}
+
+// bucketIsRegenerable 判定一个桶的内容是否属于「可再生派生元数据」。
+//
+// 这是**持久化语义边界**的落点（v0.5 team-lead 拍板，本文件全部写路径据此
+// 决定要不要强制真落盘；不得自行放宽，也不得自行收窄）：
+//
+//  1. 库以 NoSync 打开（见 acquireDB）：事务提交只把脏页 write() 进内核页缓存，
+//     **进程崩溃不丢**（SMB 服务崩了属性还在），只有内核崩溃/掉电才可能丢最近写入。
+//  2. btime / dosattr 两桶是可再生派生元数据：丢记录后读路径按既有合成基线回落
+//     （bh3-F5 的「存储值优先」语义不变，回落行为已有单测覆盖），因此允许吃这个
+//     掉电窗口 —— 这正是本文件引入 NoSync 要换的东西：小文件 CREATE/DELETE 路径
+//     不再被逐事务 fsync 钳死（perf-v050 报告 §4 F4：小文件 IOPS 的天花板）。
+//     掉电回退的最坏后果是「同路径新对象继承了旧对象的陈旧属性值」，
+//     它与「记录丢失后回落合成基线」是同一枚硬币的两面。
+//  3. 其余桶（stream/xattr/holes/fileid）**每次写事务提交成功后立即 db.Sync()**
+//     强制真 fdatasync —— bbolt 的 Sync 在 NoSync 下照常落盘，文档明说就是给
+//     这种用法留的通道。命名流内容=用户数据，持久性一寸不让；这四类桶的
+//     持久性与引入 NoSync 之前逐字节一致。
+//
+// 判据用 string 比较：bucket 名是包内常量，比较成本可忽略，且不必关心切片容量。
+func bucketIsRegenerable(bucket []byte) bool {
+	return string(bucket) == string(bucketTimes) || string(bucket) == string(bucketDOS)
 }
 
 // keyRanges 是一个路径在库内的全部键边界：
@@ -450,9 +526,26 @@ func (s *store) renameKeys(oldPath, newPath string) error {
 	if string(src.exact) == string(dst.exact) {
 		return nil // 同名 no-op（大小写折叠等场景）
 	}
+	// 空账快速路：两侧都无任何旁路记录时，下面的迁移事务是纯 no-op
+	// （收集不到任何键、也无陈旧记录可清）。原子保存式改名（临时名→正式名）
+	// 是客户端高频操作，没账的改名不再为它付一次 fsync。
+	srcHas, err := s.rangeHasRecords(src)
+	if err != nil {
+		return err
+	}
+	dstHas := true // 已知 src 有账就必须进事务；dst 无须再查
+	if !srcHas {
+		if dstHas, err = s.rangeHasRecords(dst); err != nil {
+			return err
+		}
+	}
+	if !srcHas && !dstHas {
+		return nil
+	}
 	dsrc := string(src.exact)
 	ddst := string(dst.exact)
-	return s.db.Update(func(tx *bolt.Tx) error {
+	needSync := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		for _, bn := range allBuckets {
 			b := tx.Bucket(bn)
 			if b == nil {
@@ -474,6 +567,9 @@ func (s *store) renameKeys(oldPath, newPath string) error {
 					val:  append([]byte{}, val...),
 				})
 			})
+			if (len(staleKeys) > 0 || len(moves) > 0) && !bucketIsRegenerable(bn) {
+				needSync = true
+			}
 			for _, k := range staleKeys {
 				if err := b.Delete(k); err != nil {
 					return err
@@ -490,16 +586,46 @@ func (s *store) renameKeys(oldPath, newPath string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if needSync {
+		// 关键桶有账被搬动/清除：整体落盘。若不 Sync，掉电回退可能让旧路径的
+		// 流/xattr 记录复活 —— 旧路径上如今住着的若是另一个对象，就是跨对象
+		// 元数据泄漏（B5 要堵的那类），所以这里一寸不让。
+		return s.db.Sync()
+	}
+	return nil
 }
 
 // deleteKeys 删掉 path 名下（含子树与具名子项）的全部记录。幂等：
 // 一条都没有也是成功 —— 调用方刚 os.Remove 完，旁路里可能本来就没账。
+//
+// 两层写放大治理（都不改变可观测语义）：
+//
+//  1. **空账快速路**：绝大多数被删对象在旁路库里根本没账。此前这里照样开一个
+//     空写事务并 fsync；现在先做只读预检，没账直接返回 —— 与「开一个空事务再
+//     提交」一样是幂等 no-op。
+//  2. **按桶决定要不要 Sync**：只清了 btime/dosattr 的常见情形不付 fsync ——
+//     这些删除即使因掉电回退，也只是「已删对象的可再生属性记录复活」，
+//     对象本身已随宿主 unlink 消失，记录不会被任何读路径看到（除非同一路径
+//     后来被重建，那是 bucketIsRegenerable 注释里拍板接受的掉电窗口）。
+//     只要动过 stream/xattr/holes/fileid 任一关键桶，就整体 Sync，
+//     杜绝「旧流内容复活到新对象头上」这类跨对象泄漏窗口（B5 同源）。
 func (s *store) deleteKeys(path string) error {
 	if s.readOnly || s.db == nil {
 		return oscap.ErrReadOnly
 	}
 	rng := newKeyRanges(s.pathKey(path))
-	return s.db.Update(func(tx *bolt.Tx) error {
+	has, err := s.rangeHasRecords(rng)
+	if err != nil {
+		return err
+	}
+	if !has {
+		return nil
+	}
+	needSync := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
 		for _, bn := range allBuckets {
 			b := tx.Bucket(bn)
 			if b == nil {
@@ -509,6 +635,9 @@ func (s *store) deleteKeys(path string) error {
 			collectKeys(b, rng, func(k []byte) {
 				keys = append(keys, append([]byte{}, k...))
 			})
+			if len(keys) > 0 && !bucketIsRegenerable(bn) {
+				needSync = true
+			}
 			for _, k := range keys {
 				if err := b.Delete(k); err != nil {
 					return err
@@ -517,6 +646,44 @@ func (s *store) deleteKeys(path string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if needSync {
+		// 同一个事务里顺带删掉的可再生记录一并被这次 fdatasync 覆盖。
+		return s.db.Sync()
+	}
+	return nil
+}
+
+// rangeHasRecords 只读地报告 keyRanges 范围内是否存在至少一条记录。
+// deleteKeys / renameKeys 用它做空账快速路，避免为「其实无东西可做」的
+// 写事务支付一次 fsync。
+func (s *store) rangeHasRecords(rng keyRanges) (bool, error) {
+	if s.db == nil {
+		return false, nil
+	}
+	found := false
+	err := s.db.View(func(tx *bolt.Tx) error {
+		for _, bn := range allBuckets {
+			b := tx.Bucket(bn)
+			if b == nil {
+				continue
+			}
+			c := b.Cursor()
+			for k, _ := c.Seek(rng.lowerBound()); k != nil && rng.within(k); k, _ = c.Next() {
+				if rng.hits(k) {
+					found = true
+					return nil // 找到一条就够了
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 // collectKeys 遍历 b 中落在 rng 范围内的键交给 fn。只读，不改表。
@@ -638,6 +805,12 @@ func (s *store) assignFileID(key []byte) (uint64, error) {
 		return b.Put(key, rec)
 	})
 	if err != nil {
+		return 0, err
+	}
+	// fileid 是关键桶（bucketIsRegenerable 之外）：一个发出去的 ID 若因掉电
+	// 回退而「失忆」，重启后会重新分配出新号 —— 「同一对象多次查询返回相同值」
+	// 的硬契约就被打穿。这里补真落盘；本路径本身极冷（仅宿主给不出 inode 时走到）。
+	if err := s.db.Sync(); err != nil {
 		return 0, err
 	}
 	return id, nil
