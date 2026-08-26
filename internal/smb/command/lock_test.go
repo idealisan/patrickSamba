@@ -274,12 +274,12 @@ func TestLockZeroLengthMarker(t *testing.T) {
 		off, length uint64
 		want        bool
 	}{
-		{9, 2, false},  // [9,11) 跨过 10 → 拒
-		{9, 3, false},  // [9,12) 跨过 10 → 拒
-		{10, 2, true},  // [10,12) 从点开始 → 允许
-		{11, 1, true},  // [11,12) 点之后 → 允许
-		{0, 10, true},  // [0,10) 止于点之前 → 允许
-		{8, 1, true},   // [8,9) 不跨点 → 允许
+		{9, 2, false}, // [9,11) 跨过 10 → 拒
+		{9, 3, false}, // [9,12) 跨过 10 → 拒
+		{10, 2, true}, // [10,12) 从点开始 → 允许
+		{11, 1, true}, // [11,12) 点之后 → 允许
+		{0, 10, true}, // [0,10) 止于点之前 → 允许
+		{8, 1, true},  // [8,9) 不跨点 → 允许
 	} {
 		got := lockOne(&tbl, "f", b, tc.off, tc.length, true)
 		if got != tc.want {
