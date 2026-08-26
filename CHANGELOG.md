@@ -92,6 +92,53 @@
   新增 `AppleMDNS.EnabledOn()` 作为 nil 安全的读取口。注意 SMB 协议层的 AAPL
   create context 支持本就始终启用，不受此开关控制；开关只影响 mDNS 广播记录。
   证据档位：单测级（默认值三态 + mdns 服务定义生成两用例先红后绿）。
+- **bh4 锁/读写边界语义九连修（分支 `lock/bh4-a3-a13`，merge `ff997f7`）**：对照 Samba
+  brlock.c/torture 用例逐条对齐——锁冲突矩阵复刻 `brl_conflict`（同句柄独占不叠、共享/独占混合可叠）；
+  零长锁改「分界点」语义（持 {10,0} 时 {9,2} 拒、{10,2} 允许，`brl_conflict` 闭区间模型）；
+  回绕区间回新增的 `STATUS_INVALID_LOCK_RANGE`；多元素含阻塞元素回 INVALID_PARAMETER；
+  目录句柄 LOCK 回 INVALID_DEVICE_REQUEST；阻塞锁实现为**同步有界等待**（至多 10s、并发等待者
+  ≤64、释放广播唤醒 + 100ms 兜底轮询；与规范的差距——interim STATUS_PENDING 与等待期 CANCEL——
+  需 server 层异步未决请求表，已在注释与板内列为移交项）；FLUSH 补访问校验（只读句柄/无 ADD
+  目录拒绝）；WRITE DataOffset 精确校验、CreditCharge 覆盖校验（保守放行子 quantum，标 TODO）、
+  WRITE_UNBUFFERED 在 ≥3.0.2 并入落盘。bh4-A#3（零长读）经核对已由上游 `d22fbd0` 覆盖，
+  无需重复修复。证据档位：单测级先红后绿（lock_block/lock_validate/rw_hardening 等新用例组）+
+  四门禁绿；真机多客户端互斥未测。
+- **bh3 元数据残余四修 + READONLY 删除面补齐（分支 `meta/bh3-f4-f8`，merge `049d14c`）**：
+  READONLY 目标的 DELETE_ON_OPEN/Create 携带 DELETE_ON_CLOSE 在 fs.Open **之前**拦截（回
+  STATUS_CANNOT_DELETE——打开后再拒文件已被 vfs 删掉，测试专门断言文件幸存），判据与 #196 写面
+  同为「打开时属性快照」，目录豁免；DOS 属性读路径改 Samba 默认的「存储值优先」合成
+  （存储记录覆盖可设置位，「清除只读」不再被 POSIX 推导位静默冲掉，旧 bbolt 记录读侧过滤兼容）；
+  显式设置 write time 后获得 sticky 语义（句柄粒度，写入/关闭补偿，防截断类变更冲掉所设值）；
+  btime 回退口径对齐 Samba MIN(ctime,mtime,atime)；SET_INFO 落库前过滤 DIRECTORY/SPARSE/REPARSE
+  客观位（对照 dosmode.c SAMBA_ATTRIBUTES_MASK）。证据档位：单测级先红后绿 +
+  四门禁绿；协议级实测未做。
+- **bh5 FSCTL 权限/映射与 VNI 校验六修（分支 `fsctl/bh5-f4-f9-vni`，merge `73e7fb5`）**：
+  SET_ZERO_DATA 接入 strict locking 检查（复用 B1 的锁表谓词，冲突回 FILE_LOCK_CONFLICT，
+  即第一波拍板的 D1 归属落地）；QUERY_ALLOCATED_RANGES 收紧为仅 ReadData；SET_SPARSE 补认
+  APPEND_DATA；流句柄上的 SET_SPARSE 按Samba dosmode.c 改无操作成功（QAR/ZERO 维持
+  NOT_SUPPORTED 并用例钉住，findings 原文允许）；FSCTL_VALIDATE_NEGOTIATE_INFO 方言校验从
+  「整表顺序相等」改为规范的最大公共方言匹配（篡改类子用例仍全拒）；VNI 复核失败按
+  MS-SMB2 §3.3.5.15.12 MUST 断开传输连接（server 层在响应写出后终止连接，忠实重放不误伤）。
+  证据档位：单测级先红后绿 + go-smb2 第三方客户端对本分支构建的服务端完整验收 + 四门禁绿。
+- **bh5 命名流解析与枚举三修（分支 `stream/bh5-f10-f12`，merge `eb036d8`）**：
+  通用流名在不区分大小写的共享上增加兜底匹配（精确命中优先，EqualFold 一次，open/remove
+  两路接入，防止 OpenIf 回访凭空建流）；「file:」尾冒号拒绝（OBJECT_NAME_INVALID）且流名类型
+  后缀 VFS 与命令层统一只认 `:$DATA`（Samba streams_xattr_get_name 口径）；AFP_AfpInfo
+  「创建后首次写入才进流清单」经对照 vfs_fruit netatalk 档确认为一致语义，钉测试固化并记录依据。
+  证据档位：单测级先红后绿（stream_delete 回归守卫保持绿）+ 四门禁绿。
+- **协议栈热路径性能调优（分支 `perf/v050-hotpath`，merge `e411ffc`）**：v0.4.0 基线显示瓶颈在
+  协议栈自身（loopback 单流写 94.7 MB/s / 读 199.6 MB/s，加密反而比签名快 1.49×）。本轮先建
+  可复现基准与 pprof 测量设施（test/perf + 可选 loopback 管理端口，环境变量开启、默认关闭），
+  profile 定位后做四项优化：AES-CMAC 批处理化（CBC 化整段走 AES-NI 路径 + 字长 XOR + 按密钥
+  缓存展开状态，64B 小消息 2.13×、1MiB 1.27×）；AES-CCM 批处理化（CTR 走标准库批量路径，
+  Seal/Open ~2.3×）；TRANSFORM 报文单次分配布局（去掉整载荷二次拷贝）；ReadFrame 帧缓冲复用
+  （串行性论证见 transport.go 注释）。端到端 A/B 实测：signing 单流写 +15.8%、16 流写 +25%
+  （CPU −26%）、encryption 单流写 +17.7%；读方向受客户端自身软件验签钳制仅 +5~7%。
+  **正确性边界**：不改任何协议语义——RFC 4493 / SP 800-38B/C 标准向量、wire golden、全仓测试、
+  集成套件全绿；签名/加密默认值与协商行为零变化。分析报告与移交清单（handleRead 双拷贝、
+  bbolt DOS 写放大、AES-GMAC 协商评估）见 test/reports/perf-v050-analysis-draft.md。
+  证据档位：微基准 + 端到端 A/B 实测（容器 loopback）；race 门禁本容器无 gcc 未跑，
+  由 CI 兜底（新增共享态均为 sync.Map/atomic/pool 设计）。
 
 ---
 
