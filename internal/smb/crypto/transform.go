@@ -7,6 +7,8 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"errors"
+	"sync"
+	"sync/atomic"
 )
 
 // TransformHeaderSize 是 SMB2 TRANSFORM_HEADER 的固定长度。
@@ -128,6 +130,35 @@ func (c Cipher) aead(key []byte) (cipher.AEAD, error) {
 	}
 }
 
+// aeadCache 按（算法, 密钥）缓存构造好的 AEAD，省掉每条报文的
+// 密钥扩展与模式装配。键空间 = 会话加密密钥种类，受认证与会话数约束；
+// 会话密钥逐会话随机，长期运行仍会无界增长，超过上限整体换新 ——
+// 缓存只是加速结构，清空不影响正确性。
+// AEAD 值本身无每调用可变状态：stdlib GCM 并发安全，本包 CCM 的
+// Seal/Open 也不修改接收者，多连接复用同一实例是安全的。
+var (
+	aeadCache     sync.Map // string(algo||key) -> cipher.AEAD
+	aeadCacheSize atomic.Int64
+	aeadCacheMax  = int64(4096)
+)
+
+func (c Cipher) cachedAEAD(key []byte) (cipher.AEAD, error) {
+	ck := string([]byte{byte(c), byte(c >> 8)}) + string(key)
+	if v, ok := aeadCache.Load(ck); ok {
+		return v.(cipher.AEAD), nil
+	}
+	a, err := c.aead(key)
+	if err != nil {
+		return nil, err
+	}
+	if aeadCacheSize.Add(1) > aeadCacheMax {
+		aeadCache = sync.Map{}
+		aeadCacheSize.Store(0)
+	}
+	aeadCache.Store(ck, a)
+	return a, nil
+}
+
 // TransformHeader 是解析后的 SMB2 TRANSFORM_HEADER。
 type TransformHeader struct {
 	Signature           [SignatureSize]byte
@@ -183,8 +214,12 @@ func ParseTransformHeader(b []byte) (*TransformHeader, error) {
 // 同一密钥下 nonce 重用会直接泄露明文异或值）。
 //
 // 返回的字节 = TRANSFORM_HEADER(52) || 密文（长度与明文相同，tag 已写入 Signature 字段）。
+//
+// 布局实现：输出缓冲一次分配到位（头+密文+tag），Seal 直接把 密文||tag
+// 追加进头的后面，最后把 tag 搬进 Signature 字段并截掉尾部 —— 全程
+// 不再有整载荷的二次拷贝。
 func Encrypt(c Cipher, key, nonce []byte, sessionID uint64, plaintext []byte) ([]byte, error) {
-	a, err := c.aead(key)
+	a, err := c.cachedAEAD(key)
 	if err != nil {
 		return nil, err
 	}
@@ -193,28 +228,29 @@ func Encrypt(c Cipher, key, nonce []byte, sessionID uint64, plaintext []byte) ([
 		return nil, ErrTransformHeader
 	}
 
-	out := make([]byte, TransformHeaderSize, TransformHeaderSize+len(plaintext)+a.Overhead())
+	out := make([]byte, TransformHeaderSize+len(plaintext)+SignatureSize)
 	h := &TransformHeader{
 		OriginalMessageSize: uint32(len(plaintext)),
 		Flags:               TransformFlagEncrypted,
 		SessionID:           sessionID,
 	}
 	copy(h.Nonce[:n], nonce[:n]) // 尾部保持为 0
-	h.marshalInto(out)
+	h.marshalInto(out[:TransformHeaderSize])
 
 	// AAD 必须在写入 Signature 之前取（Signature 不参与 AAD）。
-	aad := make([]byte, aadLen)
-	copy(aad, out[aadOffset:aadOffset+aadLen])
+	var aad [aadLen]byte
+	copy(aad[:], out[aadOffset:aadOffset+aadLen])
 
-	sealed := a.Seal(nil, h.Nonce[:n], plaintext, aad)
-	if len(sealed) < len(plaintext)+SignatureSize {
+	// Seal 把 密文||tag 追加到 out[:52] 之后 —— 传 out[:52]（len=52）
+	// 而不是 out[52:]（len=密文长度）：append 语义是在 len 之后写入。
+	sealed := a.Seal(out[:TransformHeaderSize], h.Nonce[:n], plaintext, aad[:])
+	if len(sealed) != TransformHeaderSize+len(plaintext)+SignatureSize {
 		return nil, ErrTransformDecrypt
 	}
 	// AEAD 的输出是 密文||tag，SMB 把 tag 放进头的 Signature 字段。
-	ct := sealed[:len(plaintext)]
-	tag := sealed[len(plaintext):]
-	copy(out[offTSignature:], tag[:SignatureSize])
-	return append(out, ct...), nil
+	copy(out[offTSignature:offTSignature+SignatureSize],
+		sealed[len(sealed)-SignatureSize:])
+	return out[:TransformHeaderSize+len(plaintext)], nil
 }
 
 // NonceCounter 生成 TRANSFORM 加密用的**单调递增** nonce。
@@ -251,7 +287,7 @@ func Decrypt(c Cipher, key, msg []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := c.aead(key)
+	a, err := c.cachedAEAD(key)
 	if err != nil {
 		return nil, err
 	}
@@ -263,15 +299,16 @@ func Decrypt(c Cipher, key, msg []byte) ([]byte, error) {
 		return nil, ErrTransformHeader
 	}
 
-	aad := make([]byte, aadLen)
-	copy(aad, msg[aadOffset:aadOffset+aadLen])
+	var aad [aadLen]byte
+	copy(aad[:], msg[aadOffset:aadOffset+aadLen])
 
-	// 还原 AEAD 期望的 密文||tag 布局。
+	// 还原 AEAD 期望的 密文||tag 布局（tag 在头部的 Signature 字段里，
+	// 与密文不连续，必须拼一次）。
 	sealed := make([]byte, 0, len(ct)+SignatureSize)
 	sealed = append(sealed, ct...)
 	sealed = append(sealed, h.Signature[:]...)
 
-	plain, err := a.Open(nil, h.Nonce[:n], sealed, aad)
+	plain, err := a.Open(nil, h.Nonce[:n], sealed, aad[:])
 	if err != nil {
 		return nil, ErrTransformDecrypt
 	}
