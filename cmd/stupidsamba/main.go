@@ -118,6 +118,11 @@ func run(configPath string, checkOnly bool) error {
 		return bindError(cfg, err)
 	}
 
+	// 可选测量端口（STUPIDSAMBA_ADMIN_ADDR，仅 loopback）。
+	if err := startAdminFromEnv(log); err != nil {
+		return err
+	}
+
 	log.Info("SMB 服务已监听",
 		"addrs", addrStrings(srv),
 		"dialects", fmt.Sprintf("%s..%s", settings.MinDialect, settings.MaxDialect),

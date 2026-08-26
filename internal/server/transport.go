@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,6 +58,22 @@ var (
 	// ErrEmptyFrame 表示长度为 0 的帧（无意义，视为协议错误）。
 	ErrEmptyFrame = errors.New("smb transport: zero-length frame")
 )
+
+// 传输帧观测计数器（性能分析用，AGENTS.md §3 观测口径）。
+//
+// 每帧一次原子自增，常开代价约几纳秒/帧，不影响语义；
+// 数值经 TransportStats 暴露给管理端口（cmd 层可选开启）。
+var (
+	framesIn  atomic.Uint64
+	bytesIn   atomic.Uint64
+	framesOut atomic.Uint64
+	bytesOut  atomic.Uint64
+)
+
+// TransportStats 返回传输层累计帧计数（收/发的帧数与载荷字节数）。
+func TransportStats() (inFrames, inBytes, outFrames, outBytes uint64) {
+	return framesIn.Load(), bytesIn.Load(), framesOut.Load(), bytesOut.Load()
+}
 
 // Transport 在一条 TCP 连接上收发 Direct TCP 帧。
 //
@@ -164,6 +181,8 @@ func (t *Transport) ReadFrame() ([]byte, error) {
 		}
 		return nil, err
 	}
+	framesIn.Add(1)
+	bytesIn.Add(uint64(n))
 	return buf, nil
 }
 
@@ -216,5 +235,9 @@ func (t *Transport) WriteFrame(payload []byte) error {
 	bufs := net.Buffers{t.whdr[:], payload}
 	// net.Buffers.WriteTo 内部会处理短写与 writev 回退。
 	_, err := bufs.WriteTo(t.conn)
+	if err == nil {
+		framesOut.Add(1)
+		bytesOut.Add(uint64(n))
+	}
 	return err
 }
