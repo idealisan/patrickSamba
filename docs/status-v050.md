@@ -169,11 +169,11 @@ bh1/bh2 findings 文件确认丢失，不再追（见 §W2.3）。
 
 | 角色 | 分支 | 工作目录 | 任务 | 端口 | 状态 |
 |---|---|---|---|---|---|
-| lock | `lock/bh4-a3-a13` | /work/w2-lock | bh4 A#3–A#13 锁/读写边界 11 条 | 4451 | INPROGRESS(`6af9f8e`) |
-| meta | `meta/bh3-f4-f8` | /work/w2-meta | bh3 F4 残余+F5–F8 元数据 5 条 | 4452 | INPROGRESS(`fd8aad1`) |
-| fsctl | `fsctl/bh5-f4-f9-vni` | /work/w2-fsctl | bh5 F4/F7/F8/F9 + VNI F5/F6 | 4453 | INPROGRESS(`bf8a1a3`) |
-| stream | `stream/bh5-f10-f12` | /work/w2-stream | bh5 F10/F11/F12 命名流 3 条 | 4454 | TODO ⚠️ 催办（见 §W2.6） |
-| perf | `perf/v050-hotpath` | /work/w2-perf | 协议栈性能调优专项 | 4455 | INPROGRESS(`35496f7`) |
+| lock | `lock/bh4-a3-a13` | /work/w2-lock | bh4 A#3–A#13 锁/读写边界 11 条 | 4451 | INPROGRESS(`e69ecc7`)，已见提交覆盖 A#5/A#6/A#7/A#9/A#10 |
+| meta | `meta/bh3-f4-f8` | /work/w2-meta | bh3 F4 残余+F5–F8 元数据 5 条 | 4452 | INPROGRESS(`c32f0eb`)，已见提交覆盖 F5/F7/F8 |
+| fsctl | `fsctl/bh5-f4-f9-vni` | /work/w2-fsctl | bh5 F4/F7/F8/F9 + VNI F5/F6 | 4453 | INPROGRESS(`648590c`)，已见提交覆盖全部 6 条（F4–F9） |
+| stream | `stream/bh5-f10-f12` | /work/w2-stream | bh5 F10/F11/F12 命名流 3 条 | 4454 | INPROGRESS(`eb036d8`)，已见提交覆盖全部 3 条；催办已解除（§W2.6） |
+| perf | `perf/v050-hotpath` | /work/w2-perf | 协议栈性能调优专项 | 4455 | INPROGRESS(`35496f7`)，基准程序已收编 test/perf |
 | pm（本板） | `pm/wave2-board` | /work/w2-pm | 进度板 | — | INPROGRESS |
 
 缺陷详情证据档：各 worktree 内 `docs/bughunt-20260825/findings-bh{3,4,5}.md`（已在库，
@@ -218,20 +218,42 @@ README 三态措辞订正尾巴（第一波 §5 待决第 3 条）不在本波�
 | 2 | 10:13:02 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 均无新提交（距基线 11 分钟，未到催办阈值） |
 | 3 | 10:16:20 | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 73f96cf | 均无新提交（距基线 14 分钟）；加跑第 4 轮以覆盖 20 分钟催办线 |
 | 4 | 10:23:12 | `6af9f8e` | `fd8aad1` | `bf8a1a3` | **73f96cf** ⚠️ | `35496f7` | lock/meta/fsctl/perf 四支首批提交落地；stream 距基线 21 分钟零提交 → 触发催办线 |
+| 5 | 10:28:03 | `e69ecc7` | `c32f0eb` | `648590c` | `eb036d8` ✅ | `35496f7` | **催办解除**：stream 首推即 3 笔（F10/F11/F12 全部，见明细）——属「本地干完攒着、被催才推」形态，印证 §7.2；其余三支各 +1 提交 |
 
-各分支已见提交明细（10:23:29 实测，`git log origin/main..origin/<分支>`）：
+各分支已见提交明细（10:28:14 实测，`git log origin/main..origin/<分支>`）：
 
-- **lock**（1 commit）：`6af9f8e` 锁冲突矩阵对齐 brl_conflict + 零长分界点语义 + 回绕区间拒绝（bh4-A#5/A#6/A#7）
-- **meta**（1 commit）：`fd8aad1` SET_INFO 落库的 DOS 属性过滤客观位（bh3-F8）
-- **fsctl**（2 commits）：`bf8a1a3` VNI 方言校验改最大公共方言匹配（bh5-F5）；`87a2d2b` F4/F7/F8/F9 一并落地
+- **lock**（2 commits）：`6af9f8e` 锁冲突矩阵对齐 brl_conflict + 零长分界点语义 + 回绕区间拒绝（bh4-A#5/A#6/A#7）；`e69ecc7` LOCK 入口校验收紧——多元素阻塞元素/精确 flags 枚举/目录句柄（bh4-A#9/A#10）
+- **meta**（3 commits）：`fd8aad1` SET_INFO 落库的 DOS 属性过滤客观位（F8）；`f869d09` DOS 属性读路径改存储值优先语义（F5）；`c32f0eb` btime 回退口径对齐 Samba MIN(ctime,mtime,atime)（F7）
+- **fsctl**（3 commits）：`87a2d2b` F4/F7/F8/F9 一并落地；`bf8a1a3` VNI 方言校验改最大公共方言匹配（F5）；`648590c` VNI 复核失败后按规范断开传输连接（F6）
+- **stream**（3 commits，均于 10:23–10:28 间首推）：`8c1803a` 通用流名大小写不敏感兜底匹配（F10）；`e5fcfa8` 流名类型后缀统一只认 $DATA、尾冒号拒绝（F11）；`eb036d8` 钉住 AFP_AfpInfo 创建后不进流清单的 netatalk 语义（F12）
 - **perf**（2 commits）：`c76303a` 收编可复现性能基准程序 test/perf；`35496f7` 移除误入库的基准构建产物并 .gitignore 防再犯
-- **stream**（0 commits）：见 §W2.6
 
 ## W2.6 催办与风险清单
 
 | 时间(CST) | 对象 | 事项 | 状态 |
 |---|---|---|---|
-| 10:23:12 | `stream/bh5-f10-f12` | ⚠️ **催办**：距开工基线（10:01:59，五分支同刻 @ 73f96cf）约 21 分钟零独立提交，是五支中唯一未动的一条。按纪律本板只记录、不去对方工作树打扰；请 stream 角色（或 team-lead 转告）确认开工状态：若已在本地干活，尽快按 §7.2「尽快提交尽快推送」落一笔到远端，消除「是否开工」的不可见性 | OPEN |
+| 10:23:12 | `stream/bh5-f10-f12` | ⚠️ **催办**：距开工基线（10:01:59，五分支同刻 @ 73f96cf）约 21 分钟零独立提交，是五支中唯一未动的一条。按纪律本板只记录、不去对方工作树打扰；请 stream 角色（或 team-lead 转告）确认开工状态：若已在本地干活，尽快按 §7.2「尽快提交尽快推送」落一笔到远端，消除「是否开工」的不可见性 | ✅ **RESOLVED**（10:28:03：首推即 3 笔 F10/F11/F12 全部落地。教训归档：属「本地攒提交」形态，未推送的进度对全队不可见——正是 §7.2 要求每完成最小单元即推的原因） |
 | — | README 三态措辞订正尾巴（第一波 §5 待决第 3 条） | 不在本波分工表内，仍无 owner | 维持待派 |
+
+## W2.7 最终快照（2026-08-26 10:28 CST，pm 收板时点）
+
+各分支当时远端 HEAD 与已见提交数（`git ls-remote` + `git log origin/main..origin/<分支>` 实测）：
+
+| 分支 | 远端 HEAD@快照 | 已见提交数 | 任务覆盖面判读 |
+|---|---|---|---|
+| lock/bh4-a3-a13 | `e69ecc7` | 2 | 已覆盖 A#5/A#6/A#7/A#9/A#10 共 5/11 条；A#3/A#4/A#8/A#11/A#12/A#13 待续 |
+| meta/bh3-f4-f8 | `c32f0eb` | 3 | 已覆盖 F5/F7/F8 共 3/5 条；F4/F6 待续 |
+| fsctl/bh5-f4-f9-vni | `648590c` | 3 | 6/6 条全部有对应提交（含 D1 拍板的 bh5-F4）；待评审 |
+| stream/bh5-f10-f12 | `eb036d8` | 3 | 3/3 条全部有对应提交；待评审 |
+| perf/v050-hotpath | `35496f7` | 2 | 基准程序已收编 test/perf；调优主体待续 |
+| pm/wave2-board | 本板最后 commit | — | 板子自身 |
+
+**阻塞/风险清单**：
+1. 无阻塞级事项。唯一一次催办（stream @ 10:23:12）已于 10:28:03 自行解除。
+2. 观察到的工作流风险（已归档进 §W2.6）：「本地干完攒着不推」形态出现过一例（stream），建议 team-lead 在下次例会上重申 §7.2。
+3. README 三态措辞订正尾巴（第一波遗留）仍无 owner，两波均无人认领。
+4. 各支任务均为部分覆盖或待评审状态，本板状态列停在 INPROGRESS；DONE(PR#) 回填待各 Owner 知会 pm。
+
+> 本快照之后 pm 收板。后续巡检由下一时段接手（或各 Owner 完成一项后知会 pm 回填）。
 
 
