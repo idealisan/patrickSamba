@@ -531,6 +531,91 @@ func TestStreamCreateBuildsMissingBase(t *testing.T) {
 	}
 }
 
+// TestAfpInfoCreateNotListedUntilWrite 钉住 bh5 F12 的取舍：**维持现状**。
+//
+// AFP_AfpInfo 新建后直到第一次真实写入才进入流清单 —— 这不是 bug，
+// 是 netatalk 元数据模式的固有语义：
+//
+//   - 我们把 FinderInfo 存在 user.org.netatalk.Metadata xattr 里，流的
+//     「存在」与该 xattr 的存在绑定；而 writeAfpInfo 对全零 FinderInfo 是
+//     **删除**语义（Samba ai_empty_finderinfo）—— 新建的 AfpInfo 恰好就是
+//     全零，落盘等于不落。
+//   - Samba 的 fruit:metadata=netatalk 档行为一致：fruit_open_meta_netatalk
+//     （vfs_fruit.c:1455-1490）同样以 xattr 存在性为准。「创建即占位」是
+//     fruit:metadata=stream 档（streams_xattr 写占位字节）的行为，我们
+//     不是那个档。
+//   - 若强行在 CREATE 后落一个默认 blob，Netatalk/Finder 会认为每个被碰过
+//     的对象都「有 FinderInfo」，与 netatalk 语义直接冲突。
+//
+// 对照组钉住通用流的相反行为：DosStream.* xattr 本身就是存储本体，
+// 「存在 == xattr 存在」，所以创建即入清单（Windows/Samba streams 档语义）。
+// 两者的不对称是有意的，改任何一侧都要先推翻这里的依据。
+func TestAfpInfoCreateNotListedUntilWrite(t *testing.T) {
+	fs := newTestFS(t, false)
+	requireXattr(t, fs)
+	writeFile(t, fs, "doc.txt", "x")
+
+	h, act, err := fs.Open(&OpenRequest{
+		Path: "doc.txt", Stream: StreamAFPInfo,
+		Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+	})
+	if err != nil {
+		t.Fatalf("打开 AFP_AfpInfo: %v", err)
+	}
+	if act != ActionCreated {
+		t.Errorf("action = %d, 期望 ActionCreated", act)
+	}
+	// 不写任何内容，直接关闭。
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 流清单里没有 AFP_AfpInfo。
+	for _, si := range mustStreamList(t, fs, "doc.txt") {
+		if si.Name == StreamName(StreamAFPInfo) {
+			t.Error("未写入的 AfpInfo 不应出现在流清单里（netatalk 模式语义）")
+		}
+	}
+	// FILE_OPEN 也报不存在。
+	if _, _, err := fs.Open(&OpenRequest{
+		Path: "doc.txt", Stream: StreamAFPInfo,
+		Flags: OpenRead, Disposition: OpenExisting,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("未写入的 AfpInfo 以 FILE_OPEN 打开 = %v, 期望 ErrNotFound", err)
+	}
+
+	// 对照组：通用流「创建即入清单」，0 字节也报告。
+	hg, _, err := fs.Open(&OpenRequest{
+		Path: "doc.txt", Stream: "Ghost",
+		Flags: OpenRead | OpenWrite, Disposition: OpenAlways,
+	})
+	if err != nil {
+		t.Fatalf("打开通用流: %v", err)
+	}
+	if err := hg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, si := range mustStreamList(t, fs, "doc.txt") {
+		if si.Name == StreamName("Ghost") && si.Size == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("通用流创建后应立即出现在流清单里（长度 0）")
+	}
+}
+
+// mustStreamList 是 Streams() 的测试辅助：失败直接 Fatal。
+func mustStreamList(t *testing.T, fs *LocalFS, p string) []StreamInfo {
+	t.Helper()
+	list, err := fs.Streams(p)
+	if err != nil {
+		t.Fatalf("Streams(%s): %v", p, err)
+	}
+	return list
+}
+
 // TestStreamPathTraversal：流名不能成为路径穿越的新入口。
 func TestStreamPathTraversal(t *testing.T) {
 	fs := newTestFS(t, false)

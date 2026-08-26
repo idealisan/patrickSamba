@@ -10,7 +10,10 @@ package vfs
 //
 //	<文件路径>:<流名>:<流类型>
 //
-// 流类型对文件恒为 `$DATA`，对目录是 `$INDEX_ALLOCATION`。
+// 流类型后缀只认 `$DATA`（MS-FSCC §2.1.5.3）。`$INDEX_ALLOCATION` 是
+// 目录索引的类型，Samba streams_xattr_get_name()
+// （vfs_streams_xattr.c:527-539）同样只认 ":$DATA"，其余一律拒绝
+// （bh5 F11：与命令层 splitCreateName 统一口径）。
 // 主数据流有两种等价写法：`file.txt` 与 `file.txt::$DATA`。
 //
 // # 与 Samba vfs_fruit 的关系
@@ -37,10 +40,8 @@ const (
 )
 
 // 流类型后缀。MS-FSCC §2.1.5.3。
-const (
-	streamTypeData  = "$DATA"
-	streamTypeIndex = "$INDEX_ALLOCATION"
-)
+// 只认 `$DATA`；`$INDEX_ALLOCATION` 等其余类型一律拒绝，见 SplitStreamPath。
+const streamTypeData = "$DATA"
 
 // DefaultStreamName 是主数据流在 FileStreamInformation 里的写法。
 const DefaultStreamName = "::$DATA"
@@ -88,8 +89,11 @@ func SplitStreamPath(p string) (base, stream string, err error) {
 			// "f:s:$DATA:extra" —— 多余的冒号，非法。
 			return "", "", ErrInvalidPath
 		}
-		if !strings.EqualFold(typ, streamTypeData) &&
-			!strings.EqualFold(typ, streamTypeIndex) {
+		// 类型后缀只认 `$DATA`。曾经这里还放行 `$INDEX_ALLOCATION`（目录
+		// 索引的类型），把它折叠进数据流是错的：Samba 的
+		// streams_xattr_get_name() 只认 ":$DATA"，其余 EINVAL
+		// （bh5 F11：两层解析器统一到这个口径）。
+		if !strings.EqualFold(typ, streamTypeData) {
 			return "", "", ErrInvalidPath
 		}
 	}

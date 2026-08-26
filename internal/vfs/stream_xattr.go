@@ -164,6 +164,41 @@ func validateDosStreamName(stream string) error {
 	return nil
 }
 
+// resolveDosStreamName 把请求的通用流名解析成磁盘上的真实拼写。
+//
+// 精确命中优先，未命中且共享配置为大小写不敏感时再 EqualFold 兜底一次 ——
+// 与路径查找的口径一致（Resolver.caseFallback：先精确 Lstat，miss 才全扫）。
+//
+// 这是 bh5 F10：Samba 在不区分大小写的共享上对流名做同样的事，
+// filename.c 在精确匹配 NOT_FOUND 后调 get_real_stream_name()
+// （bh5 报告引证 :444-476，调用点 :983-999）做大小写不敏感匹配再开。
+// 修复前 xattr 名按字节精确匹配，先写 ":Meta" 后读 ":meta" 会凭空
+// 多出一条空流而不是读到旧内容；delete-on-close 则会静默删到空气。
+//
+// 没有命中返回 ("", false)，调用方按「流不存在」继续走自己的路径
+// （FILE_OPEN 回 NotFound / 创建语义建新流）。枚举失败同样视为未命中：
+// 「列不出就当没有」与 dosStreamsOf 的容错口径一致。
+func (l *LocalFS) resolveDosStreamName(host, stream string) (string, bool) {
+	infos, err := l.caps.Streams().ListStreams(l.streamRef(host))
+	if err != nil {
+		return "", false
+	}
+	for _, si := range infos {
+		if si.Name == stream {
+			return si.Name, true
+		}
+	}
+	if !l.cfg.CaseInsensitive {
+		return "", false
+	}
+	for _, si := range infos {
+		if strings.EqualFold(si.Name, stream) {
+			return si.Name, true
+		}
+	}
+	return "", false
+}
+
 // readDosStream 读出一个通用流的内容。
 //
 // 流不存在返回 ErrNotFound。**不会**再返回「本平台不支持」——

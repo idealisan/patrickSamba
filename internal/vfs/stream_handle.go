@@ -129,6 +129,13 @@ func (l *LocalFS) openStream(req *OpenRequest, host, name, stream string) (Handl
 		if err := validateDosStreamName(slot); err != nil {
 			return nil, 0, err
 		}
+		// bh5 F10：共享配置为大小写不敏感时，折到磁盘上的真实拼写再开。
+		// 必须在存在性判定**之前**解析 —— 否则 OpenIf 会把大小写回访
+		// 误判成「新建」，凭空多出一条流；CreateNew 也拦不住与既有流
+		// 只差大小写的冲突。精确命中优先，见 resolveDosStreamName。
+		if real, ok := l.resolveDosStreamName(host, slot); ok {
+			slot = real
+		}
 		kind = streamKindXattr
 	}
 
