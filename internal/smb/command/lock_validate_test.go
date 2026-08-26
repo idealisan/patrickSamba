@@ -96,11 +96,11 @@ func TestLockWrapRangeInvalidAtHandler(t *testing.T) {
 func TestLockMultiElementMustFailImmediately(t *testing.T) {
 	ctx, open, _ := newLockHandlerCtx(t, false)
 
-	nonBlocking := el(0, 10, true)                       // 未置 FAIL_IMMEDIATELY
-	blocking := el(20, 10, false)                        // 未置
-	blocking.Flags |= wire.LockFlagFailImmediately       // 置位版
-	blockingExcl := el(40, 10, true)                     // 未置
-	blockingExcl.Flags |= wire.LockFlagFailImmediately   // 置位版
+	nonBlocking := el(0, 10, true)                     // 未置 FAIL_IMMEDIATELY
+	blocking := el(20, 10, false)                      // 未置
+	blocking.Flags |= wire.LockFlagFailImmediately     // 置位版
+	blockingExcl := el(40, 10, true)                   // 未置
+	blockingExcl.Flags |= wire.LockFlagFailImmediately // 置位版
 
 	// [blocking, nonBlocking] → 拒。
 	wantStatus(t, "第二条未置 FAIL_IMMEDIATELY",
