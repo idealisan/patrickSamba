@@ -24,8 +24,8 @@ listen:
   # 写死任何地址都会 bind 失败。留空表示监听全部地址（Go 的 tcp 监听是双栈的）。
   #
   # 容器内固定用 445。要以非 root 运行时不要改这里 —— 改宿主侧的端口映射
-  # （宿主侧换端口只影响 smbclient 这类能显式指定端口的 CLI 客户端；
-  # Windows 资源管理器只会连 445，见 README「从 Windows 访问」）。
+  # （换端口后 Windows 资源管理器照样能连：地址带端口 `\\IP:端口\share` 即可，
+  # Windows 11 实测可用；省略端口则走默认 445。见 README「从 Windows 访问」）。
   port: 445
 
 auth:
