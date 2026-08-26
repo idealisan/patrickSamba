@@ -79,7 +79,7 @@ func runNegotiate(t *testing.T, pref SigningPreference, msg []byte) (status.Stat
 		MinDialect:        dialect.SMB202,
 		MaxDialect:        dialect.SMB311,
 		SigningPreference: pref,
-		Auth: auth.NewNTLMProvider(auth.Options{ServerName: "TEST", DomainName: "WORKGROUP"}),
+		Auth:              auth.NewNTLMProvider(auth.Options{ServerName: "TEST", DomainName: "WORKGROUP"}),
 	}, "client", "server")
 
 	hdr := wire.Header{Command: wire.CommandNegotiate, Credits: 1}

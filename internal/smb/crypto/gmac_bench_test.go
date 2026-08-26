@@ -23,7 +23,7 @@ func benchGMACSign(b *testing.B, n int) {
 }
 
 func BenchmarkGMACSign_64B(b *testing.B)         { benchGMACSign(b, 64) }
-func BenchmarkGMACSign_1KiB(b *testing.B)        { benchGMACSign(b, 1 << 10) }
-func BenchmarkGMACSign_64KiB(b *testing.B)       { benchGMACSign(b, 1 << 16) }
-func BenchmarkGMACSign_1MiB(b *testing.B)        { benchGMACSign(b, 1 << 20) }
+func BenchmarkGMACSign_1KiB(b *testing.B)        { benchGMACSign(b, 1<<10) }
+func BenchmarkGMACSign_64KiB(b *testing.B)       { benchGMACSign(b, 1<<16) }
+func BenchmarkGMACSign_1MiB(b *testing.B)        { benchGMACSign(b, 1<<20) }
 func BenchmarkGMACSign_1MiBPlus512(b *testing.B) { benchGMACSign(b, 1<<20+512) }
