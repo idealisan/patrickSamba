@@ -20,3 +20,7 @@ func fillSysAttr(fs.FileInfo, *Attr) {}
 func fillSysAttrFromFile(*os.File, *Attr) {}
 
 func statCreateTime(string) (time.Time, bool) { return time.Time{}, false }
+
+// fileAccessTime 在仅保证可编译的平台（freebsd/openbsd/solaris/js）上没有
+// Stat_t 映射可走：返回 false 让调用方放弃补偿（bh3-F6 是尽力而为语义）。
+func fileAccessTime(fs.FileInfo) (time.Time, bool) { return time.Time{}, false }

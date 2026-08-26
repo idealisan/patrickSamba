@@ -55,3 +55,13 @@ func fillSysAttrFromFile(f *os.File, a *Attr) {
 
 // statCreateTime 在 Windows 上是多余的（CreationTime 已在 fillSysAttr 里取到）。
 func statCreateTime(string) (time.Time, bool) { return time.Time{}, false }
+
+// fileAccessTime 从 FileInfo 取当前 atime（sticky write time 补偿用，
+// 见 attr_linux.go 同名函数的说明）。
+func fileAccessTime(fi fs.FileInfo) (time.Time, bool) {
+	d, ok := fi.Sys().(*syscall.Win32FileAttributeData)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(0, d.LastAccessTime.Nanoseconds()), true
+}
