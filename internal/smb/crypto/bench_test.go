@@ -47,6 +47,36 @@ func benchCMAC(b *testing.B, n int) {
 // 对照组：签名算法协商的另一侧与加密路径的参照吞吐。
 // 数字解读见 test/reports/perf-v050-analysis-draft.md。
 
+func BenchmarkCCMSeal_64B(b *testing.B)  { benchCCM(b, 64, true) }
+func BenchmarkCCMSeal_1MiB(b *testing.B) { benchCCM(b, 1<<20, true) }
+func BenchmarkCCMOpen_64B(b *testing.B)  { benchCCM(b, 64, false) }
+func BenchmarkCCMOpen_1MiB(b *testing.B) { benchCCM(b, 1<<20, false) }
+
+func benchCCM(b *testing.B, n int, seal bool) {
+	block, err := aes.NewCipher(benchKey(b, 16))
+	if err != nil {
+		b.Fatal(err)
+	}
+	a, err := NewCCM(block, ccmNonceSize, SignatureSize)
+	if err != nil {
+		b.Fatal(err)
+	}
+	nonce := benchMsg(b, ccmNonceSize)
+	pt := benchMsg(b, n)
+	ct := a.Seal(nil, nonce, pt, nil)
+	b.SetBytes(int64(n))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if seal {
+			_ = a.Seal(nil, nonce, pt, nil)
+		} else {
+			if _, err := a.Open(nil, nonce, ct, nil); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
 func BenchmarkHMACSHA256_1MiB(b *testing.B) {
 	key := benchKey(b, 16)
 	msg := benchMsg(b, 1<<20)

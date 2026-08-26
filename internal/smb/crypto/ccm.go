@@ -92,24 +92,23 @@ func (c *ccm) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error
 
 	// 解密：CTR 从计数器 1 开始；ctrCrypt 顺带把 S0 异或进 mask，
 	// 于是 mask 最终就是 S0（初值全零）。
+	// 明文直接落进返回缓冲（sliceForAppend），认证失败时整体清零 ——
+	// 省掉「临时明文缓冲 + 拷贝」的两次线性开销。
 	var mask [blockSize]byte
-	plain := make([]byte, len(ctBody))
-	c.ctrCrypt(plain, ctBody, nonce, &mask)
+	ret, out := sliceForAppend(dst, len(ctBody))
+	c.ctrCrypt(out, ctBody, nonce, &mask)
 
 	var tag [blockSize]byte
-	c.cbcMAC(&tag, nonce, plain, additionalData)
+	c.cbcMAC(&tag, nonce, out, additionalData)
 	xorInto(tag[:], mask[:])
 
 	if subtle.ConstantTimeCompare(tag[:c.tagSize], wantTag) != 1 {
 		// 认证失败时不得泄露任何明文。
-		for i := range plain {
-			plain[i] = 0
+		for i := range out {
+			out[i] = 0
 		}
 		return nil, ErrCCMOpen
 	}
-
-	ret, out := sliceForAppend(dst, len(plain))
-	copy(out, plain)
 	return ret, nil
 }
 
@@ -158,7 +157,59 @@ func (c *ccm) cbcMAC(tag *[blockSize]byte, nonce, plaintext, aad []byte) {
 
 // macBlocks 把若干段数据串接后按 16 字节分组做 CBC-MAC，
 // 末尾不足一整块的部分用 0x00 补齐（SP 800-38C 的格式化要求）。
+//
+// 混合实现：短输入（≤cmacDirectBlocks 块，控制 PDU 绝大多数如此）
+// 走逐块直算 —— 暂存缓冲与批量装配的固定开销反而是纯损耗；
+// 长输入汇入复用的暂存缓冲（cmacChunk 段，与 CMAC 共用池），每满一段
+// 就以当前链值为 IV 提交一次批量 CBC（amd64 上是 AES-NI 汇编路径）。
+// 中途提交点恒为 blockSize 整数倍，末尾零补齐后单独提交一次。
+// 两条路径链值语义一致，由同一组 SP 800-38C 向量覆盖。
 func (c *ccm) macBlocks(tag *[blockSize]byte, parts ...[]byte) {
+	total := 0
+	for _, p := range parts {
+		total += len(p)
+	}
+	if total <= cmacDirectBlocks*blockSize {
+		c.macBlocksDirect(tag, parts)
+		return
+	}
+
+	bp := cmacScratch.Get().(*[]byte)
+	buf := *bp
+	defer cmacScratch.Put(bp)
+
+	chain := *tag
+	n := 0
+	flush := func() {
+		mode := cipher.NewCBCEncrypter(c.b, chain[:])
+		mode.CryptBlocks(buf[:n], buf[:n])
+		copy(chain[:], buf[n-blockSize:n])
+		n = 0
+	}
+
+	for _, p := range parts {
+		for len(p) > 0 {
+			k := copy(buf[n:], p)
+			p = p[k:]
+			n += k
+			if n == cmacChunk {
+				flush()
+			}
+		}
+	}
+	if n > 0 {
+		// 末尾补零到分组边界。
+		for i := n; i%blockSize != 0; i++ {
+			buf[i] = 0
+			n++
+		}
+		flush()
+	}
+	*tag = chain
+}
+
+// macBlocksDirect 是 macBlocks 的逐块路径（语义同旧版实现）。
+func (c *ccm) macBlocksDirect(tag *[blockSize]byte, parts [][]byte) {
 	var buf [blockSize]byte
 	n := 0
 	for _, p := range parts {
@@ -195,13 +246,35 @@ func (c *ccm) counterBlock(out *[blockSize]byte, nonce []byte, i uint64) {
 
 // ctrCrypt 用 CTR 模式加/解密 src 到 dst（长度相同），
 // 同时把 S0 异或进 tag（tag 为 CBC-MAC 的输出，全零表示不需要掩码）。
+//
+// 混合实现：短流（≤cmacDirectBlocks 块）逐块直算，省掉 NewCTR 的
+// 装配固定开销；长流走标准 CTR —— A_1 起的计数流恰好是标准 CTR，
+// q 字节大端计数域内自增且消息长度受 maxPlaintextLen 约束时块数 < 2^q，
+// 不会向 nonce 域进位，与整 128 位大端自增等价，可交给
+// cipher.NewCTR（amd64 上是批量 AES-NI 路径）。
 func (c *ccm) ctrCrypt(dst, src []byte, nonce []byte, tag *[blockSize]byte) {
+	var a0, s0 [blockSize]byte
+
+	c.counterBlock(&a0, nonce, 0)
+	c.b.Encrypt(s0[:], a0[:])
+	xorInto(tag[:], s0[:]) // T ^= S0
+
+	if len(src) == 0 {
+		return
+	}
+
+	if len(src) <= cmacDirectBlocks*blockSize {
+		c.ctrDirect(dst, src, nonce)
+		return
+	}
+	var iv [blockSize]byte
+	c.counterBlock(&iv, nonce, 1)
+	cipher.NewCTR(c.b, iv[:]).XORKeyStream(dst, src)
+}
+
+// ctrDirect 是短流的逐块 CTR 路径（语义同旧版实现）。
+func (c *ccm) ctrDirect(dst, src []byte, nonce []byte) {
 	var a, s [blockSize]byte
-
-	c.counterBlock(&a, nonce, 0)
-	c.b.Encrypt(s[:], a[:])
-	xorInto(tag[:], s[:]) // T ^= S0
-
 	for i := uint64(1); len(src) > 0; i++ {
 		c.counterBlock(&a, nonce, i)
 		c.b.Encrypt(s[:], a[:])
