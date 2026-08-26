@@ -585,10 +585,10 @@ func (l *LocalFS) statHost(host, name string) (*Attr, error) {
 	// 用 caps 的稳定 FileID 覆盖 fillSysAttr 填的 st.Ino：native 档直接给
 	// 原生稳定 ID，builtin 档给 inode / 旁路分配号；拿不到时回落 st.Ino。
 	a.FileID = l.fileIDAt(host, nil, a.FileID)
-	// 把客户端显式设置过的 DOS 位 OR 进合成后的 base（DIRECTORY/SPARSE/
-	// REPARSE 与「点开头 → HIDDEN」「属主无写权限 → READONLY」都不归 caps 管，
-	// 由本文件其它逻辑负责）。
-	l.mergeStoredDOS(host, nil, a)
+	// 把存储值优先合并进合成结果（bh3-F5）。DIRECTORY/SPARSE/REPARSE 与
+	// 「点开头 → HIDDEN」的宿主推导先在这里完成，mergeStoredDOS 只负责
+	// 用存储记录覆盖可设置部分。
+	l.mergeStoredDOS(host, nil, a, name)
 	l.applyMetadata(host, a)
 	return a, nil
 }
@@ -629,20 +629,41 @@ func (l *LocalFS) fileIDAt(host string, f *os.File, fallback uint64) uint64 {
 	return fallback
 }
 
-// mergeStoredDOS 把客户端**显式设置过**的 DOS 属性位 OR 进 a.FileAttributes。
+// mergeStoredDOS 把旁路库里的 DOS 属性存储值合并进 a.FileAttributes。
 //
-// 边界（ports.go 已划清）：由文件系统客观事实推导的位（DIRECTORY / SPARSE /
-// REPARSE_POINT）与 POSIX 约定合成的位（点开头 → HIDDEN、属主无写权限 →
-// READONLY）由 vfs 层负责合成，caps.DOS() 只回答「有没有人显式设置过、设的是什么」。
+// 合成方向是「**存储值优先**」（bh3-F5），对齐 Samba 默认
+// store dos attributes=yes 时 fdos_mode 的行为（source3/smbd/dosmode.c:710–748）：
+// 有存储记录时，客户端显式设置过的位是**权威**，替换掉权限/名字推导出的
+// 可设置部分 —— 否则「清除只读」这类操作会被宿主权限位的重新推导静默冲掉。
+// 没有存储记录（ErrNotFound）时保持 attrFromFileInfo 的推导结果不变，
+// 等价于 Samba 在 store dos attributes=no 下走 dos_mode_from_sbuf 的形态。
 //
-// 没人设置过（ErrNotFound）就跳过；其它错误忽略 —— 读属性失败不该让整次
-// Stat 失败。
-func (l *LocalFS) mergeStoredDOS(host string, f *os.File, a *Attr) {
+// 三类例外永远由宿主实况决定，不受存储值影响：
+//   - 客观事实位 DIRECTORY / SPARSE / REPARSE_POINT：目录就是目录、
+//     稀疏就是稀疏、软链就是软链。旧格式记录里可能存有这些垃圾位
+//     （F8 之前未过滤），读路径一律剥掉；
+//   - 点开头的名字恒追加 HIDDEN（hide_dot_files 对齐，dos_mode_post →
+//     dos_mode_from_name，dosmode.c:594–608）；
+//   - 普通文件的最终位图为 0 时兜底 ARCHIVE（与 dosAttributes 的约定一致，
+//     返回 0 会让部分 Windows 客户端认为属性无效）。
+func (l *LocalFS) mergeStoredDOS(host string, f *os.File, a *Attr, name string) {
 	bits, err := l.caps.DOS().DOSAttributes(oscap.Ref{Path: host, Handle: f})
 	if err != nil {
 		return
 	}
-	a.FileAttributes |= bits
+	// 存储值只采信可设置位：DIRECTORY/SPARSE/REPARSE 与 F8 的入库过滤同款，
+	// 防止历史记录里的假客观位盖过文件系统的真话。
+	stored := bits & settableDOSAttributes
+	objective := a.FileAttributes & (FileAttributeDirectory |
+		FileAttributeSparse | FileAttributeReparse)
+	out := objective | stored
+	if hiddenByName(name) {
+		out |= FileAttributeHidden
+	}
+	if out == 0 && objective&FileAttributeDirectory == 0 {
+		out = FileAttributeArchive
+	}
+	a.FileAttributes = out
 }
 
 // applyMetadata 用旁路存储里的 POSIX 属主/权限覆盖 Attr。
