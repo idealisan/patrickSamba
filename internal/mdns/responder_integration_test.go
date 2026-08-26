@@ -30,7 +30,7 @@ func TestResponderAnswersLegacyQuery(t *testing.T) {
 		Enabled:  true,
 		Instance: instance,
 		Apple: config.AppleMDNS{
-			Enabled:              true,
+			Enabled:              boolPtr(true),
 			Model:                "TimeCapsule8,119",
 			AdvertiseTimeMachine: true,
 		},
@@ -148,7 +148,7 @@ func TestResponderMetaQuery(t *testing.T) {
 	r, err := New(config.MDNS{
 		Enabled:  true,
 		Instance: "SSMETA",
-		Apple:    config.AppleMDNS{Enabled: true, Model: "MacSamba"},
+		Apple:    config.AppleMDNS{Enabled: boolPtr(true), Model: "MacSamba"},
 	}, 4446, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
