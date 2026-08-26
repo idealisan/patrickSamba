@@ -220,6 +220,17 @@ func writePipe(ctx *Context, open *Open, req *wire.WriteRequest) error {
 // full=true：SMB2 FLUSH 的语义是「数据真正落到持久介质」，对应
 // macOS 的 F_FULLFSYNC。Time Machine 依赖这个语义保证备份一致性
 // （AGENTS.md §2 阶段二）。
+//
+// 访问校验（bh4-A#8，对照 Samba smb2_flush.c:171-199）：
+//   - 管道：没有可刷的数据，直接成功。规范允许 NOT_IMPLEMENTED，
+//     我们选更宽松的成功（对客户端无害，findings-bh4 A#8 认可）；
+//   - 普通文件：需要 FILE_WRITE_DATA|FILE_APPEND_DATA，否则 ACCESS_DENIED
+//     （只读句柄刷缓存本就无意义）；
+//   - 目录：需要 FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY（与写权限同值，
+//     wire 包按同值复用常量），否则 ACCESS_DENIED；目录本体不做 fsync，
+//     与既有行为一致；
+//   - 无底层 fd（attr-only 打开等）：STATUS_FILE_CLOSED，对应 Samba 的
+//     fd==-1 ⇒ INVALID_HANDLE —— 不能静默成功假装刷过了。
 func handleFlush(ctx *Context) error {
 	req, err := wire.ParseFlushRequest(ctx.Msg)
 	if err != nil {
@@ -235,7 +246,21 @@ func handleFlush(ctx *Context) error {
 		ctx.Out = (&wire.FlushResponse{}).Append(ctx.Out)
 		return nil
 	}
-	if h := open.Handle; h != nil && !open.IsDir {
+
+	// 访问校验在一切状态判定之前：无权句柄连「能不能刷」都轮不到问，
+	// 与 READ/WRITE 的鉴权顺序一致（bh4-A#3 的教训）。
+	// 文件要 FILE_WRITE_DATA|FILE_APPEND_DATA，目录要
+	// FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY —— MS-FSCT 里两组位同值
+	// （0x2/0x4），wire 包按同值复用常量。
+	if open.GrantedAccess&(wire.FileWriteData|wire.FileAppendData) == 0 {
+		return status.AccessDenied
+	}
+
+	h := open.Handle
+	if h == nil {
+		return status.FileClosed
+	}
+	if !open.IsDir {
 		if serr := h.Sync(true); serr != nil {
 			return status.FromVFSError(serr)
 		}
