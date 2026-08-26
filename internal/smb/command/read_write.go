@@ -1,9 +1,11 @@
 package command
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 
+	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
 )
@@ -12,6 +14,49 @@ func init() {
 	register(wire.CommandRead, true, true, handleRead)
 	register(wire.CommandWrite, true, true, handleWrite)
 	register(wire.CommandFlush, true, true, handleFlush)
+}
+
+// creditChargeQuantum 是单个 credit 覆盖的载荷字节数
+// （MS-SMB2 §3.3.5.2.6，SMB2_PER_CREDIT_PAYLOAD_SIZE = 65536）。
+const creditChargeQuantum uint64 = 64 * 1024
+
+// creditChargeCovers 校验头部声明的 CreditCharge 是否覆盖载荷（bh4-A#12）。
+//
+// 规范要求（MS-SMB2 §3.3.5.2.6）：CreditCharge >= ceil(payload/65536)，
+// 少付即 STATUS_INVALID_PARAMETER —— 否则多信用客户端可以少付 credit
+// 跑大 IO。Samba 在 read/write 各自入口做同一校验
+// （smbd_smb2_request_verify_creditcharge）。
+//
+// 保守策略：payload <= 一个 quantum 时恒放行。Windows 对小 IO 的
+// charge=0 并不拒绝，各实现子 quantum 策略不一；这里只堵「大载荷少付」
+// 这个真实策略洞。TODO: 待验证子 quantum 是否也该强制。
+//
+// 调用方必须先确认连接支持多信用（Conn.SupportsMultiCredit）：
+// 2.0.2 上 CreditCharge 字段保留为 0（MS-SMB2 §3.3.5.4），校验会误伤。
+func creditChargeCovers(declared uint16, payload uint64) bool {
+	if payload <= creditChargeQuantum {
+		return true
+	}
+	need := (payload + creditChargeQuantum - 1) / creditChargeQuantum
+	return uint64(declared) >= need
+}
+
+// writeShouldSync 报告一次 WRITE 完成后是否需要落盘（bh4-A#13）。
+//
+// 触发条件（任一）：
+//   - 请求带 SMB2_WRITEFLAG_WRITE_THROUGH（MS-SMB2 §2.2.21，任意方言）；
+//   - 请求带 SMB2_WRITEFLAG_WRITE_UNBUFFERED 且方言 >= 3.0.2 —— Samba
+//     smb2_write.c:289-293 同判：3.0.2+ 上 UNBUFFERED 置 write_through=true；
+//     2.1/3.0 上该标志未定义，忽略；
+//   - 打开时带了 FILE_WRITE_THROUGH 创建选项（MS-SMB2 §2.2.1.4.1）。
+func writeShouldSync(reqFlags uint32, open *Open, connDialect dialect.Dialect) bool {
+	if reqFlags&wire.WriteFlagWriteThrough != 0 {
+		return true
+	}
+	if reqFlags&wire.WriteFlagWriteUnbuffer != 0 && connDialect >= dialect.SMB302 {
+		return true
+	}
+	return open != nil && open.CreateOptions&wire.FileWriteThrough != 0
 }
 
 // handleRead 处理 SMB2 READ（MS-SMB2 §3.3.5.12）。
@@ -29,6 +74,12 @@ func handleRead(ctx *Context) error {
 	// 长度上限：既不能超过协商出的 MaxReadSize，也不能让恶意的
 	// Length 字段直接把服务端内存撑爆（AGENTS.md §8）。
 	if req.Length > ctx.Conn.MaxReadSize {
+		return status.InvalidParameter
+	}
+	// CreditCharge 必须覆盖载荷（bh4-A#12，MS-SMB2 §3.3.5.2.6）：
+	// 多信用连接上请求 >64K 而少付 credit 的，拒绝。
+	if ctx.Conn.SupportsMultiCredit() &&
+		!creditChargeCovers(ctx.Header.CreditCharge, uint64(req.Length)) {
 		return status.InvalidParameter
 	}
 
@@ -133,6 +184,28 @@ func handleWrite(ctx *Context) error {
 	if uint32(len(req.Data)) > ctx.Conn.MaxWriteSize {
 		return status.InvalidParameter
 	}
+	// CreditCharge 必须覆盖载荷（bh4-A#12，MS-SMB2 §3.3.5.2.6）。
+	if ctx.Conn.SupportsMultiCredit() &&
+		!creditChargeCovers(ctx.Header.CreditCharge, uint64(len(req.Data))) {
+		return status.InvalidParameter
+	}
+	// DataOffset 精确校验（bh4-A#11）：Length>0 时必须等于 SMB2 头 +
+	// 固定体长（64+48=112）。Samba smb2_write.c:74-76 同判；实测抓包
+	// wire/testdata/capture/create-read-write/017-c2s-WRITE.bin 亦为 112。
+	// 指到别处时数据会被从错误位置切片 —— 解析层只做边界校验拦不住它。
+	//
+	// 零长度写豁免：此时字段无意义，部分客户端发 0。先验长度再切片
+	// （AGENTS.md §5）。
+	//
+	// TODO: 待 wire 包（他人所有）在 ParseWriteRequest 里暴露 DataOffset
+	// 字段后把本检查挪进解析层。
+	if len(req.Data) > 0 && len(ctx.Msg) >= 68 {
+		// DataOffset 在 WRITE Request 体内偏移 2（MS-SMB2 §2.2.21），
+		// 即消息绝对偏移 64+2=66，2 字节**小端**。
+		if dataOffset := binary.LittleEndian.Uint16(ctx.Msg[66:68]); dataOffset != wire.HeaderSize+48 {
+			return status.InvalidParameter
+		}
+	}
 
 	if open.IsPipe() {
 		return writePipe(ctx, open, req)
@@ -180,9 +253,10 @@ func handleWrite(ctx *Context) error {
 		}
 	}
 
-	// SMB2_WRITEFLAG_WRITE_THROUGH：本次写必须落盘后再回响应。
-	if req.Flags&wire.WriteFlagWriteThrough != 0 ||
-		open.CreateOptions&wire.FileWriteThrough != 0 {
+	// 落盘判定（bh4-A#13）：WRITE_THROUGH 任意方言生效；
+	// WRITE_UNBUFFERED 在 ≥3.0.2 上等价（Samba smb2_write.c:289-293）；
+	// 打开选项 FILE_WRITE_THROUGH 独立生效。
+	if writeShouldSync(req.Flags, open, ctx.Conn.Dialect) {
 		if serr := h.Sync(false); serr != nil {
 			return status.FromVFSError(serr)
 		}
