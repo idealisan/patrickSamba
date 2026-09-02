@@ -315,3 +315,41 @@ func TestIsUnderNotify(t *testing.T) {
 		t.Fatal("ab/c 不应被判成在 a 之下（前缀比较必须按路径分段）")
 	}
 }
+
+// TestRenameDeliveredAtomically 钉住"一次改名必须整体可见"。
+//
+// 早先 notifyRenamed 是调两次 deliver（逐个追加 + 逐个 signal），
+// 于是等待者可能在**只有 OLD_NAME 落地**时就被唤醒 —— 它拿到的改名是半条，
+// 客户端据此把缓存里的条目改成一个已经不存在的路径。
+// 修复方式：deliver 改成接收一批事件，整批在同一把 w.mu 下追加完再发一次信号。
+//
+// 为什么用循环：这个 bug 只在"等待者恰好在两次投递之间被唤醒"时暴露，
+// 单次跑的时序是随机的。循环 200 次把各种交错都覆盖到 —— 修复前约每几十次
+// 失败一次，修复后稳定通过。
+func TestRenameDeliveredAtomically(t *testing.T) {
+	const rounds = 200
+	for i := 0; i < rounds; i++ {
+		var h notifyHub
+		o := &Open{}
+		w := newNotifyWatch("", true, wire.NotifyChangeFileName, o)
+		h.add(w)
+
+		res := notifyWait(w, nil)
+		h.notifyRenamed("old.txt", "new.txt", false)
+
+		r := <-res
+		entries := r[0].([]wire.NotifyEntry)
+		if len(entries) != 2 {
+			t.Fatalf("第 %d 轮：一次改名必须给出 2 条条目（整体可见），实际 %d 条：%+v",
+				i, len(entries), entries)
+		}
+		if entries[0].Action != wire.FileActionRenamedOldName || entries[0].Name != "old.txt" {
+			t.Fatalf("第 %d 轮：第一条应为 OLD_NAME/old.txt，实际 %v/%q",
+				i, entries[0].Action, entries[0].Name)
+		}
+		if entries[1].Action != wire.FileActionRenamedNewName || entries[1].Name != "new.txt" {
+			t.Fatalf("第 %d 轮：第二条应为 NEW_NAME/new.txt，实际 %v/%q",
+				i, entries[1].Action, entries[1].Name)
+		}
+	}
+}

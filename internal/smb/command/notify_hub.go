@@ -271,12 +271,23 @@ func (h *notifyHub) cleanup(o *Open) {
 	}
 }
 
-// deliver 把一个事件投递给全部关心的订阅。
+// deliver 把**一批**事件投递给全部关心的订阅。
+//
+// 参数是切片而不是单个事件，因为有些变更对应**多条**条目 —— 改名就有
+// RENAMED_OLD_NAME 与 RENAMED_NEW_NAME 两条（MS-FSCC §2.7.1）。
+//
+// ⚠️ 一批事件必须在**同一次持锁**内全部追加完再发一次唤醒信号。
+// 早先这里是逐个投递、逐个 signal，于是等待者可能在改名只落地一半时
+// 就被唤醒：它拿到 OLD_NAME 却没有 NEW_NAME，客户端据此更新会指向一个
+// 已经不存在的路径。一次逻辑变更必须**整体可见**，这是修那个 bug 的关键。
 //
 // 事件到订阅的匹配（含"相对被监视目录的名字"计算）见 notifyWatch.matches。
 // 这里刻意**先摘表快照再逐个投递**，避免在持 h.mu 时去取 w.mu ——
 // 反向路径（w.mu → h.mu）在别处不存在，但少一层嵌套总是对的。
-func (h *notifyHub) deliver(ev notifyEvent) {
+func (h *notifyHub) deliver(evs ...notifyEvent) {
+	if len(evs) == 0 {
+		return
+	}
 	h.mu.Lock()
 	if len(h.watches) == 0 {
 		h.mu.Unlock()
@@ -289,32 +300,55 @@ func (h *notifyHub) deliver(ev notifyEvent) {
 	h.mu.Unlock()
 
 	for _, w := range targets {
-		name, ok := w.matches(ev)
-		if !ok {
-			continue
-		}
+		// 整批在同一把 w.mu 下处理：等待者要么看到全部，要么一条也看不到。
 		w.mu.Lock()
 		if w.closed || w.cleanup {
 			w.mu.Unlock()
 			continue
 		}
-		if len(w.events) >= notifyQueueMax {
-			// 队列已满：不再攒，让等待者以 NOTIFY_ENUM_DIR 收场。
-			// 客户端重新枚举目录即可自愈，比无限攒下去好。
-			w.overflow = true
-		} else {
+		added := 0
+		for _, ev := range evs {
+			name, ok := w.matches(ev)
+			if !ok {
+				continue
+			}
+			if len(w.events) >= notifyQueueMax {
+				// 队列已满：不再攒，让等待者以 NOTIFY_ENUM_DIR 收场。
+				// 客户端重新枚举目录即可自愈，比无限攒下去好。
+				w.overflow = true
+				break
+			}
 			w.events = append(w.events, wire.NotifyEntry{Action: ev.action, Name: name})
+			added++
 		}
 		w.mu.Unlock()
-		w.signal()
+		// 全部追加完才唤醒，且只在真有东西追加时唤醒。
+		if added > 0 {
+			w.signal()
+		}
 	}
 }
 
-// count 返回当前订阅数，用于测试。
+// count 返回当前订阅数，用于测试与日志。
 func (h *notifyHub) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.watches)
+}
+
+// notifyHub 返回本请求所属共享的变更事件中心。
+//
+// 刻意**不**直接吃 internal/config：那样协议实现就被绑在配置文件的结构上
+// （改一个字段名要动协议包）。由 cmd 层做一次映射，本包只认自己需要的字段，
+// 测试也不需要构造一份完整配置。
+//
+// 树不存在（IPC$、共享已删）时返回 nil —— 四个记账方法都是 nil-safe 的，
+// 调用点因此可以无脑写 ctx.notifyHub().notifyAdded(...)，不必各自判空。
+func (c *Context) notifyHub() *notifyHub {
+	if c.Tree == nil || c.Tree.Share == nil {
+		return nil
+	}
+	return &c.Tree.Share.notify
 }
 
 // notifyHub 返回本句柄所属共享的变更事件中心。
@@ -329,17 +363,6 @@ func (o *Open) notifyHub() *notifyHub {
 		return nil
 	}
 	return &o.Tree.Share.notify
-}
-
-// notifyHub 返回本请求所属共享的变更事件中心。
-//
-// 树不存在（IPC$、共享已删）时返回 nil —— 四个记账方法都是 nil-safe 的，
-// 调用点因此可以无脑写 ctx.notifyHub().notifyAdded(...)，不必各自判空。
-func (c *Context) notifyHub() *notifyHub {
-	if c.Tree == nil || c.Tree.Share == nil {
-		return nil
-	}
-	return &c.Tree.Share.notify
 }
 
 // ---- 事件记账入口 ----
@@ -380,9 +403,12 @@ func (h *notifyHub) notifyRenamed(oldPath, newPath string, isDir bool) {
 	if h == nil {
 		return
 	}
+	// 一次投递两条（而不是调两次 deliver）—— 见 deliver 的注释。
 	f := nameFilter(isDir)
-	h.deliver(notifyEvent{path: oldPath, action: wire.FileActionRenamedOldName, filter: f, isDir: isDir})
-	h.deliver(notifyEvent{path: newPath, action: wire.FileActionRenamedNewName, filter: f, isDir: isDir})
+	h.deliver(
+		notifyEvent{path: oldPath, action: wire.FileActionRenamedOldName, filter: f, isDir: isDir},
+		notifyEvent{path: newPath, action: wire.FileActionRenamedNewName, filter: f, isDir: isDir},
+	)
 }
 
 // notifyModified 记录一次「已有对象被改动」。
