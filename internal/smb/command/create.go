@@ -245,6 +245,21 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	}
 	ctx.Out = out
 
+	// 变更记账（CHANGE_NOTIFY，见 notify_hub.go）。
+	//
+	// 放在响应编码**之后**：走到这里说明 CREATE 已经完全成功（句柄已登记、
+	// 共享模式已通过、所有 create context 都已生效），不会记出一个随后又
+	// 被回滚的变更。FILE_OPENED 不记账 —— 只是打开，目录内容没变。
+	switch open.CreateAction {
+	case wire.FileCreated:
+		ctx.notifyHub().notifyAdded(path, isDir)
+	case wire.FileSuperseded, wire.FileOverwritten:
+		// 覆盖/取代：目录项没增没减，变的是内容与长度。
+		// 规范没有 FILE_ACTION_SUPERSEDED，Windows 也是按"被修改"报的。
+		ctx.notifyHub().notifyModified(path,
+			wire.NotifyChangeSize|wire.NotifyChangeLastWrite)
+	}
+
 	ctx.Log.Debug("CREATE",
 		"share", ctx.Tree.Share.Name, "path", path, "dir", isDir,
 		"action", action, "fid", open.Volatile)

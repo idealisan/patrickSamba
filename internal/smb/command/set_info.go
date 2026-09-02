@@ -172,6 +172,12 @@ func setBasicInfo(open *Open, h vfs.Handle, buf []byte) error {
 	if err := h.SetAttr(&attr, mask); err != nil {
 		return status.FromVFSError(err)
 	}
+	// 变更记账（CHANGE_NOTIFY）。这里不细分到底改了哪一项：按"属性/时间戳
+	// 都可能变了"记一个并集最省事也最不容易漏 —— 客户端拿到 MODIFIED 之后
+	// 本来就要重新取一次属性，细分没有额外收益。
+	open.notifyHub().notifyModified(open.Path,
+		wire.NotifyChangeAttributes|wire.NotifyChangeCreation|
+			wire.NotifyChangeLastAccess|wire.NotifyChangeLastWrite)
 	return nil
 }
 
@@ -197,6 +203,9 @@ func setEndOfFile(open *Open, h vfs.Handle, buf []byte) error {
 	if err := h.Truncate(eof); err != nil {
 		return status.FromVFSError(err)
 	}
+	// 变更记账（CHANGE_NOTIFY）：长度与最后写时间都变了。
+	open.notifyHub().notifyModified(open.Path,
+		wire.NotifyChangeSize|wire.NotifyChangeLastWrite)
 	return nil
 }
 
@@ -232,6 +241,8 @@ func setAllocation(open *Open, h vfs.Handle, buf []byte) error {
 		if err := h.Truncate(alloc); err != nil {
 			return status.FromVFSError(err)
 		}
+		open.notifyHub().notifyModified(open.Path,
+			wire.NotifyChangeSize|wire.NotifyChangeLastWrite)
 		return nil
 	}
 	if err := h.SetAttr(&vfs.Attr{Alloc: alloc}, vfs.AttrAlloc); err != nil {
@@ -346,6 +357,12 @@ func setRename(ctx *Context, open *Open, buf []byte) error {
 	if err := fs.Rename(open.Path, dst, info.ReplaceIfExists); err != nil {
 		return status.FromVFSError(err)
 	}
+
+	// 变更记账（CHANGE_NOTIFY）：改名按规范给**两条**条目，
+	// RENAMED_OLD_NAME（旧路径）+ RENAMED_NEW_NAME（新路径）。
+	// 必须赶在 open.Path 改写之前取旧路径。
+	src := open.Path
+	open.notifyHub().notifyRenamed(src, dst, open.IsDir)
 
 	// 句柄在改名后仍然有效，后续 QUERY_INFO 要能回新路径。
 	open.Path = dst

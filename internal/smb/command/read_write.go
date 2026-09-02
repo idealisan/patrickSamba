@@ -283,6 +283,23 @@ func handleWrite(ctx *Context) error {
 		}
 	}
 
+	// 变更记账（CHANGE_NOTIFY）。
+	//
+	// 零长度写是客户端的**可写性探测**，不做任何改动，不记账 —— 否则一次
+	// 探测就会触发一轮毫无意义的目录刷新，而 Finder/Explorer 的探测相当频繁。
+	//
+	// 流与主流分开记：改备用数据流不改变文件长度与最后写时间，
+	// 对应的过滤位是 STREAM_SIZE / STREAM_WRITE（MS-SMB2 §2.2.35）。
+	if n > 0 {
+		if open.Stream != "" {
+			open.notifyHub().notifyModified(open.Path,
+				wire.NotifyChangeStreamSize|wire.NotifyChangeStreamWrite)
+		} else {
+			open.notifyHub().notifyModified(open.Path,
+				wire.NotifyChangeSize|wire.NotifyChangeLastWrite)
+		}
+	}
+
 	ctx.Out = (&wire.WriteResponse{Count: uint32(n)}).Append(ctx.Out)
 	return nil
 }
