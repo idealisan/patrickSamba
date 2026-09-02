@@ -274,10 +274,17 @@ esac
 # 判据取**服务端明说自己没启用**的那一行，而不是「日志里没出现 mDNS 启动字样」。
 # 后者是不可证伪的：内置配置整个被换掉、mdns 模块被删、日志级别调高……
 # 任何一种情况下它都照样"通过"。
-case "$logs" in
-    *"mDNS 未启用"*) pass "mdns-off" "mDNS 默认关闭（服务端明确记录未启用）" ;;
-    *) fail "mdns-off" "日志里没有「mDNS 未启用」这一行，内置配置的 mdns.enabled:false 可能失效" ;;
-esac
+#
+# ⚠️ 判据依赖 cmd/stupidsamba/discovery.go 的日志文案。mDNS 的启停从
+# startMDNS 迁移到统一的 startDiscovery 之后，这条日志由通用分支输出
+# （msg=服务发现组件未启用 component=mdns），按组件字段匹配以免再被
+# 文案调整打断。这里与 configs/docker.yaml 的 mdns.enabled 是**两处**，
+# 改任一一处都要回来确认这条用例。
+if printf '%s\n' "$logs" | grep 'component=mdns' | grep -q '未启用'; then
+    pass "mdns-off" "mDNS 默认关闭（服务端明确记录未启用）"
+else
+    fail "mdns-off" "日志里没有 component=mdns 且含「未启用」的那一行，内置配置的 mdns.enabled:false 可能失效"
+fi
 
 # ------------------------------------------------------------------ 用例 5：manifest 里不得出现 unknown/unknown 平台
 #
