@@ -9,7 +9,10 @@
 // 是三份会各自漂移的平台相关逻辑 —— 那份风险不值得省一个包。
 package sockopt
 
-import "net"
+import (
+	"net"
+	"syscall"
+)
 
 // ListenConfig 返回一个允许地址复用的 ListenConfig。
 //
@@ -21,4 +24,25 @@ import "net"
 // 组播报文的分发还要另外 JoinGroup（见各组件自己的实现）。
 func ListenConfig() net.ListenConfig {
 	return net.ListenConfig{Control: setReuse}
+}
+
+// BroadcastConfig 在地址复用之外再打开「允许发送广播」。
+//
+// 用于 NetBIOS 的主机宣告（往子网广播地址发 138 端口的数据报）。
+// 没有 SO_BROADCAST 的话内核会直接拒绝这种发送（EPERM / EACCES），
+// 而且错误信息完全指不到"缺 SO_BROADCAST"上去。
+func BroadcastConfig() net.ListenConfig {
+	return net.ListenConfig{Control: combine(setReuse, setBroadcast)}
+}
+
+// combine 把多个 Control 回调串成一个，任一失败即中断。
+func combine(fns ...func(string, string, syscall.RawConn) error) func(string, string, syscall.RawConn) error {
+	return func(network, address string, c syscall.RawConn) error {
+		for _, fn := range fns {
+			if err := fn(network, address, c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
