@@ -68,6 +68,19 @@ done
 command -v docker >/dev/null 2>&1 || die "找不到 docker"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || die "本地没有镜像 $IMAGE（先跑 scripts/docker-build.sh）"
 
+# ---------------------------------------------------------------------------
+# 连接凭据必须与**镜像内置的那份配置**同源
+# ---------------------------------------------------------------------------
+# configs/docker.yaml 在 9a07fef 里把「开箱即用」的载体从 guest 换成了内置
+# 演示账号（原因见该文件头注释：Windows 10/11 默认拒绝不安全的 guest 登录，
+# guest 配置对 Windows 用户等于连不上）。
+#
+# 本脚本当时仍用 smbclient -N 匿名连接，于是镜像明明是好的、用例却报
+# NT_STATUS_LOGON_FAILURE —— 一个**假失败**。脚本与配置是两处，改一处必须
+# 同步另一处，这正是 configs/docker.yaml 头部那段警告说的同一件事。
+SMB_USER=${SMB_USER:-stupidsamba}
+SMB_PASS=${SMB_PASS:-stupidsamba}
+
 WORK=$(mktemp -d /tmp/stupidsamba-img.XXXXXX)
 VOLUME=$NAME-data
 
@@ -164,7 +177,9 @@ if command -v smbclient >/dev/null 2>&1; then
 
     # ⚠️ smbclient 4.22 的 -c 不按换行分割命令，多条命令必须用**分号**分隔，
     #    写成多行会得到 "NT_STATUS_NO_SUCH_FILE listing \get" 这类假故障。
-    out=$(smbclient "//127.0.0.1/public" -p "$PORT" -N -m SMB3 \
+    # -U 用内置演示账号（见脚本上文的凭据说明）；-N 匿名会被拒绝。
+    out=$(smbclient "//127.0.0.1/public" -p "$PORT" \
+              -U "$SMB_USER%$SMB_PASS" -m SMB3 \
               -c "put $WORK/up.txt up.txt; mkdir subdir; ls; get up.txt $WORK/down.txt" 2>&1) || true
 
     if [ ! -f "$WORK/down.txt" ]; then
@@ -176,7 +191,8 @@ if command -v smbclient >/dev/null 2>&1; then
     fi
 
     # 反向对照：不存在的共享必须被拒。若它也"成功"，说明上面的 PASS 不可信。
-    if smbclient "//127.0.0.1/nosuchshare" -p "$PORT" -N -m SMB3 -c "ls" >/dev/null 2>&1; then
+    if smbclient "//127.0.0.1/nosuchshare" -p "$PORT" \
+            -U "$SMB_USER%$SMB_PASS" -m SMB3 -c "ls" >/dev/null 2>&1; then
         fail "smbclient-neg" "连接不存在的共享 nosuchshare 竟然成功了，说明测试没有鉴别力"
     else
         pass "smbclient-neg" "反向对照：不存在的共享被拒"
@@ -209,13 +225,18 @@ fi
 # ------------------------------------------------------------------ 用例 3：impacket（第二种独立客户端栈）
 
 if python3 -c "import impacket" 2>/dev/null; then
-    out=$(SMB_HOST=127.0.0.1 SMB_PORT="$PORT" python3 - "$PORT" <<'PYEOF' 2>&1
+    out=$(SMB_HOST=127.0.0.1 SMB_PORT="$PORT" SMB_USER="$SMB_USER" SMB_PASS="$SMB_PASS" \
+         python3 - "$PORT" <<'PYEOF' 2>&1
+import os
 import sys
 from impacket.smbconnection import SMBConnection
 
 port = int(sys.argv[1])
+# 用内置演示账号登录（见脚本上文的凭据说明）；匿名会被拒。
+user = os.environ["SMB_USER"]
+password = os.environ["SMB_PASS"]
 c = SMBConnection("127.0.0.1", "127.0.0.1", sess_port=port)
-c.login("", "")                       # guest / 匿名，与镜像内置配置一致
+c.login(user, password)
 shares = [s["shi1_netname"][:-1] for s in c.listShares()]
 assert "public" in shares, "共享列表里没有 public: %r" % (shares,)
 
