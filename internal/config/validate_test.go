@@ -391,21 +391,21 @@ func TestValidateValidUsersUnknown(t *testing.T) {
 
 func TestValidateMDNSInstanceTooLong(t *testing.T) {
 	c := baseConfig(t)
-	c.MDNS.Enabled = true
+	c.MDNS.Enabled = BoolPtr(true)
 	c.MDNS.Instance = strings.Repeat("x", 64)
 	assertInvalid(t, c, "mdns.instance", "63")
 }
 
 func TestValidateMDNSInterfaceUnknown(t *testing.T) {
 	c := baseConfig(t)
-	c.MDNS.Enabled = true
+	c.MDNS.Enabled = BoolPtr(true)
 	c.MDNS.Interfaces = []string{"no-such-iface0"}
 	assertInvalid(t, c, "mdns.interfaces[0]", "找不到网卡")
 }
 
 func TestValidateMDNSDisabledSkipsChecks(t *testing.T) {
 	c := baseConfig(t)
-	c.MDNS.Enabled = false
+	c.MDNS.Enabled = BoolPtr(false)
 	c.MDNS.Interfaces = []string{"no-such-iface0"}
 	if err := Validate(c); err != nil {
 		t.Fatalf("mdns 关闭时不应校验其子项，实际: %v", err)
@@ -414,7 +414,7 @@ func TestValidateMDNSDisabledSkipsChecks(t *testing.T) {
 
 func TestValidateTimeMachineAdvertiseNeedsShare(t *testing.T) {
 	c := baseConfig(t)
-	c.MDNS.Enabled = true
+	c.MDNS.Enabled = BoolPtr(true)
 	c.MDNS.Apple.Enabled = boolPtr(true)
 	c.MDNS.Apple.AdvertiseTimeMachine = true
 	assertInvalid(t, c, "mdns.apple.advertise_time_machine", "time_machine: true")
@@ -427,7 +427,7 @@ func TestValidateTimeMachineAdvertiseNeedsShare(t *testing.T) {
 
 func TestValidateTimeMachineAdvertiseNeedsApple(t *testing.T) {
 	c := baseConfig(t)
-	c.MDNS.Enabled = true
+	c.MDNS.Enabled = BoolPtr(true)
 	c.MDNS.Apple.Enabled = boolPtr(false)
 	c.MDNS.Apple.AdvertiseTimeMachine = true
 	c.Shares[0].TimeMachine = true

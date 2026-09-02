@@ -173,7 +173,7 @@ func TestNewServiceComposition(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r, err := New(config.MDNS{
-				Enabled:  true,
+				Enabled:  config.BoolPtr(true),
 				Instance: "TESTBOX",
 				Apple:    tc.apple,
 			}, 445, tc.shares)
@@ -194,7 +194,7 @@ func TestNewServiceComposition(t *testing.T) {
 // TestNewAppleModelDefault 验证 model= 留空时回落到 config 的默认值。
 func TestNewAppleModelDefault(t *testing.T) {
 	r, err := New(config.MDNS{
-		Enabled:  true,
+		Enabled:  config.BoolPtr(true),
 		Instance: "TESTBOX",
 		Apple:    config.AppleMDNS{Enabled: boolPtr(true)},
 	}, 445, nil)
@@ -221,7 +221,7 @@ func TestAppleRecords(t *testing.T) {
 	const instance = "TESTBOX"
 
 	r, err := New(config.MDNS{
-		Enabled:  true,
+		Enabled:  config.BoolPtr(true),
 		Instance: instance,
 		Apple: config.AppleMDNS{
 			Enabled:              boolPtr(true),

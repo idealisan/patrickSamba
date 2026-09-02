@@ -257,9 +257,9 @@ func buildSettings(cfg *config.Config, provider auth.Provider, shares []*command
 		// 绕过 ApplyDefaults 直接构造 Config 的场景，此时按默认值处理。
 		AllowSMB1Negotiate: cfg.Server.SMB1 == nil || *cfg.Server.SMB1,
 		AllowGuest:         cfg.Auth.AllowGuest,
-		// 默认关闭：授予 oplock/lease 出错的后果是静默的脏数据，
-		// 本特性尚未在 Windows / macOS 真机上验收（见 config.Server.Oplocks）。
-		Oplocks: cfg.Server.Oplocks,
+		// 默认开启（config.Server.OplocksOn）：能开就尽量开。
+		// 授予规则本身已经是"安全时才授予"，开不起来也不会有副作用。
+		Oplocks: cfg.Server.OplocksOn(),
 
 		Auth:   provider,
 		Shares: shares,

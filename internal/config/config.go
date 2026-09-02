@@ -97,8 +97,15 @@ type Server struct {
 	// 而没有任何一方会报错。本特性尚未在 Windows / macOS 真机上验收，
 	// 在拿到真机验证之前，保守一侧是正确的默认。
 	//
-	// 打开前请读 README「已知限制与说明」里关于 oplock/lease 的那一条。
-	Oplocks bool `yaml:"oplocks"`
+	// 打开前请读 README「已知限制与说明」里关于 oplock/lease 的那一条 ——
+	// 那里列了三条已知边界（含"某些情形会回 STATUS_SHARING_VIOLATION"）。
+	// 遇到客户端行为异常时，把它显式设成 false 是首选排查手段。
+	//
+	// **默认开启**（未设置时按开启处理）：授予规则本身已经是"安全时才授予"
+	// （见 internal/smb/command/oplock_grant.go 的三条收紧），
+	// 默认关等于让所有用户都用不上这份收益。
+	// 用 *bool 是为了能区分「未设置（→true）」与「显式 false」。
+	Oplocks *bool `yaml:"oplocks"`
 }
 
 // Listen 是监听设置。
@@ -181,8 +188,16 @@ type Share struct {
 
 // MDNS 是 mDNS/DNS-SD 广播设置。
 type MDNS struct {
-	// Enabled 开关。
-	Enabled bool `yaml:"enabled"`
+	// Enabled 开关，**默认 true**（未设置时按开启处理）。
+	//
+	// 用 *bool 而不是 bool：YAML 里 bool 的零值是 false，无法区分
+	// 「未设置」与「显式关闭」，而本项默认值是 true。
+	// 同 Server.SMB1 与 Share.Browseable 的做法（见 ApplyDefaults 开头注释）。
+	//
+	// 三套发现协议（mDNS / WS-Discovery / NetBIOS）**不是互斥的**：
+	// 它们覆盖不同的客户端，有条件的话能开就尽量都开。
+	// 开不起来只会少一条被发现的路径，其他功能照常。
+	Enabled *bool `yaml:"enabled"`
 	// Instance 是服务实例名，留空则用 Server.Name。
 	Instance string `yaml:"instance"`
 	// Interfaces 限定广播网卡名，留空表示所有可用网卡。
@@ -229,8 +244,8 @@ func (a AppleMDNS) EnabledOn() bool {
 // 默认**关闭**：本特性没有 Windows 真机验收（开发容器里没有 Windows），
 // 而 3702/5357 是要占住的真实端口。想试就显式打开。
 type WSDiscovery struct {
-	// Enabled 开关，默认 false。
-	Enabled bool `yaml:"enabled"`
+	// Enabled 开关，默认 true（未设置时按开启处理）。
+	Enabled *bool `yaml:"enabled"`
 	// Interfaces 限定网卡名，留空表示所有支持组播的网卡。
 	Interfaces []string `yaml:"interfaces"`
 	// UUID 是设备标识。留空则按「服务器名 + 工作组」派生一个**稳定**的
@@ -253,8 +268,8 @@ type WSDiscovery struct {
 // 默认**关闭**，且有一个额外门槛：137/138 是**特权端口**，非 root 时
 // 绑不上（处理办法与 SMB 445 完全一样，见 README「已知限制与说明」）。
 type NetBIOS struct {
-	// Enabled 开关，默认 false。
-	Enabled bool `yaml:"enabled"`
+	// Enabled 开关，默认 true（未设置时按开启处理）。
+	Enabled *bool `yaml:"enabled"`
 	// Interfaces 限定网卡名，留空表示所有支持广播的网卡。
 	Interfaces []string `yaml:"interfaces"`
 	// Name 是本机 NetBIOS 名，留空则用 Server.Name（自动截断到 15 字节）。
@@ -269,6 +284,65 @@ type NetBIOS struct {
 	// 太密则白白刷局域网。
 	AnnounceIntervalSeconds int `yaml:"announce_interval_seconds"`
 }
+
+// BoolPtr 返回一个指向 b 的指针。
+//
+// 给 `*bool` 字段赋值用：本包有四处默认值非 false 的开关
+// （Server.SMB1、Server.Oplocks、Share.Browseable、MDNS.Enabled 及其同类），
+// 一律用 *bool 以区分「未设置」与「显式 false」，
+// 于是 `Enabled: config.BoolPtr(true)` 这种写法到处都要用。
+func BoolPtr(b bool) *bool { return &b }
+
+// EnabledOn 返回 mDNS 的生效取值：未设置时为 DefaultMDNSEnabled（true）。
+// 供 ApplyDefaults 之外的读取方使用，避免各自解引用 nil 指针。
+func (m MDNS) EnabledOn() bool {
+	if m.Enabled == nil {
+		return DefaultMDNSEnabled
+	}
+	return *m.Enabled
+}
+
+// EnabledOn 返回 WS-Discovery 的生效取值：未设置时为 DefaultWSDiscovery（true）。
+func (w WSDiscovery) EnabledOn() bool {
+	if w.Enabled == nil {
+		return DefaultWSDiscovery
+	}
+	return *w.Enabled
+}
+
+// EnabledOn 返回 NetBIOS 的生效取值：未设置时为 DefaultNetBIOS（true）。
+func (n NetBIOS) EnabledOn() bool {
+	if n.Enabled == nil {
+		return DefaultNetBIOS
+	}
+	return *n.Enabled
+}
+
+// OplocksOn 返回 oplock/lease 的生效取值：未设置时为 DefaultOplocks（true）。
+func (s Server) OplocksOn() bool {
+	if s.Oplocks == nil {
+		return DefaultOplocks
+	}
+	return *s.Oplocks
+}
+
+// ---- 默认开关取值 ----
+//
+// 这一组默认值的原则：**能开就尽量开，开不了就降级继续**。
+// 三套发现协议不是互斥的（各覆盖各的客户端），oplock/lease 的授予规则
+// 本身已经是"安全时才授予"，所以它们的默认值一律是 true。
+// 任何一项开不起来都只影响"多一条还是少一条被发现/加速的路径"，
+// 不影响文件共享本身 —— 降级由 cmd/discovery.go 与各组件自己完成。
+const (
+	// DefaultMDNSEnabled 是 mdns.enabled 的默认值。
+	DefaultMDNSEnabled = true
+	// DefaultWSDiscovery 是 ws_discovery.enabled 的默认值。
+	DefaultWSDiscovery = true
+	// DefaultNetBIOS 是 netbios.enabled 的默认值。
+	DefaultNetBIOS = true
+	// DefaultOplocks 是 server.oplocks 的默认值。
+	DefaultOplocks = true
+)
 
 // Log 是日志设置。
 type Log struct {

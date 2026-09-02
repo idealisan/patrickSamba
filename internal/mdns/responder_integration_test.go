@@ -27,7 +27,7 @@ func TestResponderAnswersLegacyQuery(t *testing.T) {
 	const instance = "SSITEST"
 
 	r, err := New(config.MDNS{
-		Enabled:  true,
+		Enabled:  config.BoolPtr(true),
 		Instance: instance,
 		Apple: config.AppleMDNS{
 			Enabled:              boolPtr(true),
@@ -146,7 +146,7 @@ func TestResponderAnswersLegacyQuery(t *testing.T) {
 // 查询 _services._dns-sd._udp.local. 应当列出我们提供的所有服务类型。
 func TestResponderMetaQuery(t *testing.T) {
 	r, err := New(config.MDNS{
-		Enabled:  true,
+		Enabled:  config.BoolPtr(true),
 		Instance: "SSMETA",
 		Apple:    config.AppleMDNS{Enabled: boolPtr(true), Model: "MacSamba"},
 	}, 4446, nil)

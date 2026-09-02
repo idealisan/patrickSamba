@@ -52,7 +52,7 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if len(cfg.Auth.Users) < 2 {
 		t.Errorf("示例只有 %d 个用户，应当同时展示 password 与 nt_hash 两种写法", len(cfg.Auth.Users))
 	}
-	if !cfg.MDNS.Enabled || !cfg.MDNS.Apple.EnabledOn() {
+	if !cfg.MDNS.EnabledOn() || !cfg.MDNS.Apple.EnabledOn() {
 		t.Error("示例应当展示 mDNS 与 Apple 扩展的开启写法")
 	}
 }

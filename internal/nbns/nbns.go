@@ -48,7 +48,8 @@ const (
 	maxDatagramSize = 2048
 )
 
-// ErrDisabled 表示 NetBIOS 未启用，供调用方区分「没开」与「起不来」。
+// ErrDisabled 表示 NetBIOS 没有启用。语义同 wsd.ErrDisabled：
+// 直接返回 = 配置关闭（预期，INFO）；包装后返回 = 开不起来（降级，WARN）。
 var ErrDisabled = errors.New("nbns: 未启用")
 
 // Options 是 NetBIOS 服务的自包含配置（不 import config，理由同 wsd.Options）。
@@ -91,6 +92,9 @@ type Responder struct {
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
 	closeOnce sync.Once
+
+	// announceWarnOnce 让"宣告发不出去"只告警一次。
+	announceWarnOnce sync.Once
 }
 
 // New 构造响应器。未启用时返回 ErrDisabled。
@@ -101,6 +105,10 @@ func New(o Options) (*Responder, error) {
 	ifaces, err := netiface.Select(o.Interfaces, netiface.NeedBroadcast)
 	if err != nil {
 		return nil, fmt.Errorf("nbns: %w", err)
+	}
+	// 同 wsd：没有可用网卡就不启动，别白占 137/138（还都是特权端口）。
+	if len(ifaces) == 0 {
+		return nil, fmt.Errorf("%w: 没有可用的广播网卡", ErrDisabled)
 	}
 	if o.Workgroup == "" {
 		o.Workgroup = DefaultWorkgroup
@@ -377,7 +385,13 @@ func (r *Responder) sendAnnouncements() {
 		}
 	}
 	if sent == 0 {
-		r.log.Warn("本轮主机宣告一条都没发出去（网卡上没有可用于广播的 IPv4？）")
+		// 只在第一次告警：宣告是周期性动作，没有可用广播地址时
+		// 每 4 分钟刷一条同样的 WARN 只会淹没真正有用的日志。
+		r.announceWarnOnce.Do(func() {
+			r.log.Warn("主机宣告一条都没发出去（网卡上没有可用于广播的 IPv4？）" +
+				"后续同类失败只记 debug")
+		})
+		r.log.Debug("本轮主机宣告未发出")
 		return
 	}
 	r.log.Debug("已发送主机宣告", "count", sent)
