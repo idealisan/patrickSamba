@@ -330,6 +330,24 @@ func TestMidChainCreateStillBreaksExistingOplock(t *testing.T) {
 	if got := e.breakA.oplocks; got != 1 {
 		t.Fatalf("即便要回绝也应先发出 break，实际发了 %d 条", got)
 	}
+
+	// 回绝路径必须把这次 break **就地收尾**，否则进行中的 break 计数会
+	// 永久占着（攒够上限后该共享上所有冲突打开都变成 SHARING_VIOLATION，
+	// 且重开服务才能恢复）。
+	//
+	// 可观测后果：B 换成可挂起的普通打开后应当**直接成功**，
+	// 既不需要再发一次 break，也不会被推迟。
+	e.b.Header = wire.Header{}
+	if _, resp := openWith(t, e.b, "f.txt", accessRW, shareAll,
+		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelBatch}); resp == nil {
+		t.Fatal("重试打开应当成功")
+	}
+	if e.b.Async() != nil {
+		t.Fatal("重试不应再被推迟（说明上一次 break 没被收尾）")
+	}
+	if got := e.breakA.oplocks; got != 1 {
+		t.Fatalf("重试不应再发 break，累计 %d 条（应为 1）", got)
+	}
 }
 
 // TestOplockAckWithoutPendingBreakIsProtocolError：没有正在等待的 break
