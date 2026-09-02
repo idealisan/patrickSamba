@@ -378,6 +378,36 @@ done
 | `apple.model` | `_device-info._tcp` 的 `model=` 值，决定 Finder 图标，如 `MacSamba` / `TimeCapsule8,119` | `MacSamba` |
 | `apple.advertise_time_machine` | 广播 `_adisk._tcp`（Time Machine 磁盘宣告） | `false` |
 
+### `ws_discovery`（v0.7.0 新增）
+
+让 **Windows** 的「网络」自动发现本机。与 mDNS 是并列的两套协议，
+各覆盖各的客户端（Windows 10 之后也能听 mDNS，但「网络」列表主要靠这个）。
+
+| 字段 | 含义 | 默认值 |
+|---|---|---|
+| `enabled` | WS-Discovery 开关 | `false` |
+| `interfaces` | 限定网卡名，留空表示所有支持组播的网卡 | 所有网卡 |
+| `uuid` | 设备标识。**留空则按名字派生一个稳定的 UUIDv5**（跨重启不变，Windows 网络列表才不会攒同名僵尸条目）。同一台机器跑多个实例时需要各自钉一个 | 按名字派生 |
+| `metadata_port` | WS-Transfer `Get` 的 HTTP 端口；Windows 列出主机后会来这里取详情。填 `-1` 表示不启用（主机仍能列出，但点开无信息） | `5357` |
+
+### `netbios`（v0.7.0 新增）
+
+让 `\\NAME` 能被解析，并让本机出现在网上邻居的浏览列表里。与 WS-Discovery
+互补，缺一个都会让 Windows 用户别扭（一个管"看得见"，一个管"叫得出名"）。
+
+| 字段 | 含义 | 默认值 |
+|---|---|---|
+| `enabled` | NetBIOS 名称服务开关 | `false` |
+| `interfaces` | 限定网卡名，留空表示所有支持广播的网卡 | 所有网卡 |
+| `name` | 本机 NetBIOS 名，留空用 `server.name`（自动大写、超 15 字节截断） | `server.name` |
+| `workgroup` | 工作组名，留空用 `server.domain` | `server.domain` |
+| `comment` | 网上邻居里显示的说明文字 | `stupidSamba file server` |
+| `announce_interval_seconds` | 主机宣告间隔（保活：太稀疏客户端要等很久才看见我们，太密则刷局域网） | `240` |
+
+> ⚠️ 137 / 138 是**特权端口（<1024）**，非 root 时绑不上。三种解决办法与
+> SMB 的 445 完全一样：以 root 运行 / `sudo setcap 'cap_net_bind_service=+ep'`
+> / 关掉本段。绑 138 失败只告警并退化到临时端口；绑 137 失败则本组件起不来。
+
 ### `log`
 
 | 字段 | 含义 | 默认值 |
@@ -475,15 +505,48 @@ done
   因此 `CANCEL` 能真正取消一个正在等待的请求（此前 `CANCEL` 只能静默丢弃 ——
   不存在可被取消的未决请求）。
 
-### 服务发现（mDNS / DNS-SD）
+### 服务发现
 
-进程内实现，在 `224.0.0.251:5353` / `[ff02::fb]:5353` 上收发报文，**不依赖**
-`avahi` / Bonjour / `systemd-resolved`。广播：
+三套协议**全部进程内实现**，不 fork/exec 任何外部守护进程，也不依赖
+`avahi` / Bonjour / `systemd-resolved` / `nmbd` / `wsdd`（AGENTS.md C3 / C4）。
+它们覆盖不同的客户端，各开各的：
+
+| 协议 | 端口 | 让谁能发现 | 配置段 | 默认 |
+|---|---|---|---|---|
+| mDNS / DNS-SD | UDP 5353 | macOS / Linux（Finder、文件管理器） | `mdns.enabled` | `true` |
+| **WS-Discovery**（v0.7.0 新增） | UDP 3702 + TCP 5357 | **Windows「网络」** | `ws_discovery.enabled` | `false` |
+| **NetBIOS**（v0.7.0 新增） | UDP 137 / 138 | **`\\NAME` 解析、网上邻居浏览列表** | `netbios.enabled` | `false` |
+
+后两者默认关闭，理由见「[已知限制与说明](#notes)」。
+
+#### mDNS / DNS-SD
+
+在 `224.0.0.251:5353` / `[ff02::fb]:5353` 上收发报文，广播：
 
 - `_smb._tcp` —— 基础 SMB 服务发现；
 - `_device-info._tcp` —— Apple 扩展（Finder 图标由 `apple.model` 决定）；
 - `_adisk._tcp` —— Time Machine 磁盘宣告（需 `apple.advertise_time_machine: true`
   且至少有一个共享设了 `time_machine: true`）。
+
+#### WS-Discovery（Windows）
+
+在 `239.255.255.250:3702` / `[ff02::c]:3702` 上收发组播，应答 `Probe` →
+`ProbeMatch`、`Resolve` → `ResolveMatch`，把自己声明为 `wsdp:Device` +
+`pub:Computer`（后者才是 Windows 显示成"一台电脑"的依据）。
+另在 TCP 5357 提供 WS-Transfer `Get` 端点，供 Windows 拉取设备详情。
+
+设备 UUID 按名字派生（UUIDv5），**跨重启稳定** —— 否则每次重启都会在
+Windows 网络列表里留下一个新的同名条目。
+
+#### NetBIOS（nmbd 的核心子集）
+
+在 UDP 137 应答名字查询（`\\NAME` 解析）与节点状态（相当于 `nbtstat -A`），
+在 UDP 138 周期性发主机宣告，把自己加进浏览列表。
+
+**刻意不做** Samba nmbd 的全量功能：WINS 服务器、浏览主控选举、域主控浏览、
+名字注册冲突仲裁。那些属于"参与一个 NetBIOS 工作组的治理"，范围远超
+"让别人能看见我"。也因此**不声明自己是主控浏览器** —— 谎报会让别的机器
+真的来问我们要浏览列表。
 
 ### Apple 扩展（AAPL）
 
@@ -617,11 +680,26 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
    - **边界三**：等确认的上限是 30 秒（与 Samba 的超时后强行推进同款），超时按
      「已打破」处理并放行被推迟的打开。
 
+7. **WS-Discovery 与 NetBIOS 都默认关闭，且没有 Windows 真机验收**（v0.7.0 新增）。
+
+   - **为什么默认关**：这两套协议都是"在局域网里大声报出自己"的行为，
+     默认打开等于替所有用户决定了要占 3702 / 5357 / 137 / 138 这些端口、
+     并向网段内广播主机信息。开发容器里没有 Windows，这两项**没有真机验收**，
+     所以保守一侧是正确的默认。
+   - **验证强度**：只到**协议级**（`nmblookup` 4.22 实测名字查询/组名/节点状态
+     全部正确；手写 WS-Discovery 客户端实测 `Probe`→`ProbeMatch`、`Resolve`→
+     `ResolveMatch`、WS-Transfer `Get` 全部正确）。**没有**在任何真实 Windows
+     或 macOS 上确认过"网络里确实能看见"。
+   - **137 / 138 是特权端口**，非 root 时绑不上（处置见上面「服务发现」小节的提示）。
+   - **NetBIOS 只实现了 nmbd 的子集**：不做 WINS 服务器、浏览主控选举、
+     域主控浏览、名字注册冲突仲裁。若你的网络依赖 NetBIOS 浏览主控选举来
+     汇总列表，本服务**不参与**选举 —— 它只会宣告自己，不会替别人维护列表。
+
 <!-- BEGIN-OSCAP-WIRING-STATUS-README：本条与 CHANGELOG 的同名块、configs/example.yaml 的
      同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
      别只改 CHANGELOG 那一处。
      全部落点一次找齐：grep -rn OSCAP-WIRING-STATUS . | grep -v '^./history/' -->
-7. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6），
+8. **`filesystem_mode` 对 6 项 OS 能力全部生效（v0.3.0 起 6/6；v0.2.0 时仅 2/6），
    取值为 `auto` / `portable` 两态**：
    **六项能力（扩展属性 xattr / 命名流 / 稀疏文件 / 稳定 FileID / 创建时间 / DOS 属性）
    都已接进 VFS 数据路径**，两态行为对全部六项**确实不同**：
