@@ -32,3 +32,18 @@ func setReuse(network, address string, c syscall.RawConn) error {
 	}
 	return sockErr
 }
+
+// setBroadcast 允许这个套接字发送广播报文（SO_BROADCAST）。
+//
+// 不作为独立导出的 Control 使用（调用方一律用 BroadcastConfig），
+// 但单独成函数便于 combine 组合，也让平台差异只留在这一个文件里。
+func setBroadcast(network, address string, c syscall.RawConn) error {
+	var sockErr error
+	err := c.Control(func(fd uintptr) {
+		sockErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_BROADCAST, 1)
+	})
+	if err != nil {
+		return err
+	}
+	return sockErr
+}

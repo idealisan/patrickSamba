@@ -17,6 +17,24 @@ func setReuse(network, address string, c syscall.RawConn) error {
 	var sockErr error
 	err := c.Control(func(fd uintptr) {
 		sockErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_REUSEADDR, 1)
+		if sockErr == nil {
+			sockErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_BROADCAST, 1)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	return sockErr
+}
+
+// setBroadcast 允许这个套接字发送广播报文（SO_BROADCAST）。
+//
+// Windows 有独立的 SO_BROADCAST 常量（BSD 里它与 SO_REUSEADDR 值相同，
+// Windows 不是），必须显式设置。
+func setBroadcast(network, address string, c syscall.RawConn) error {
+	var sockErr error
+	err := c.Control(func(fd uintptr) {
+		sockErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, windows.SO_BROADCAST, 1)
 	})
 	if err != nil {
 		return err
