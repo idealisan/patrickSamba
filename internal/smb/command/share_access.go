@@ -77,6 +77,20 @@ type shareModeTable struct {
 	m  map[shareModeKey][]shareModeEntry
 }
 
+// otherOpeners 报告该对象上是否**已经有**别的句柄打开着。
+//
+// 供 oplock/lease 授予判定使用：写缓存类许可（EXCLUSIVE / BATCH / W 位）
+// 只有在"当前没有别人打开这个文件"时才允许授予 —— 否则第二个打开者读到
+// 的可能是第一个客户端还攥在本地缓存里的内容。
+//
+// 判定对象是登记条目而不是 *Open：表里的快照在句柄建立后就不再变化，
+// 读它不需要碰 Open 的锁，从根上避免加锁顺序问题。
+func (t *shareModeTable) otherOpeners(key shareModeKey) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.m[key]) > 0
+}
+
 // maskConflict 判定一个维度上的双向冲突（MS-FSA §2.1.5.1.2）。
 //
 // accessBits 是该维度的访问位集合，shareBit 是与之配对的共享位：

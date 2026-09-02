@@ -87,13 +87,19 @@ func (c *Conn) BreakSender() BreakSender {
 
 // handleOplockBreak 处理 SMB2 OPLOCK_BREAK（MS-SMB2 §3.3.5.22）。
 //
-// 本服务在 CREATE 里一律授予 SMB2_OPLOCK_LEVEL_NONE（见 create.go），
-// 也没有在 NEGOTIATE 里声明 SMB2_GLOBAL_CAP_LEASING，因此客户端**不应该**
-// 发来任何 oplock/lease break acknowledgment —— 它手上没有可以被打破的
-// oplock。收到就说明对端状态与我们不一致。
+// 命令码 0x0012 承载三族报文，靠 StructureSize 区分：
 //
-// 规范对"找不到匹配 oplock 的确认"要求回 STATUS_INVALID_OPLOCK_PROTOCOL
-// （§3.3.5.22.1）。
+//	24 字节  oplock 族   客户端发的就是 **Acknowledgment**（对我们 break 通知的回应）
+//	36 字节  lease 族    客户端发的就是 **Acknowledgment**（同上）
+//	44 字节  lease 族    只有服务端发的 Notification 是这个长度，
+//	                     客户端不会发（PeekOplockBreakKind 会判成 Unknown）
+//
+// 客户端只有在**我们主动 break 过**它持有的 oplock/lease 之后才会发来确认，
+// 所以这里做的是：把确认对上号、落地新状态、唤醒被推迟的那次打开，
+// 然后回一条 Oplock/Lease Break **Response**（§2.2.25.1 / §2.2.25.2）。
+//
+// 对不上号（我们没在等确认、或句柄/租约不存在）说明对端状态与我们不一致，
+// 按规范回 STATUS_INVALID_OPLOCK_PROTOCOL（§3.3.5.22.1）。
 func handleOplockBreak(ctx *Context) error {
 	switch wire.PeekOplockBreakKind(ctx.Msg) {
 	case wire.OplockBreakKindOplock:
@@ -102,15 +108,50 @@ func handleOplockBreak(ctx *Context) error {
 			// 报文本身就解不开，属于格式错误而非 oplock 协议错误。
 			return status.InvalidParameter
 		}
-		ctx.Log.Warn("收到 oplock break 确认，但本服务从不授予 oplock",
-			"level", req.OplockLevel, "session", ctx.Header.SessionID)
-		return status.InvalidOplockProtocol
+		// 共享拿不到、句柄解析不出来 —— 都只是"对不上号"的不同表现。
+		// 刻意**不**把句柄错误（FILE_CLOSED 等）透出去：确认报文是
+		// 服务端主动 break 的回应，客户端无从区分"句柄没了"和"你没在等"，
+		// 而规范给这两种情形的处置是同一个（§3.3.5.22.1）。
+		if ctx.Tree == nil || ctx.Tree.Share == nil {
+			return status.InvalidOplockProtocol
+		}
+		open, err := ctx.resolveOpen(req.FileID)
+		if err != nil {
+			return status.InvalidOplockProtocol
+		}
+		if !ctx.Tree.Share.oplocks.ackOplock(open, req.OplockLevel) {
+			ctx.Log.Warn("收到 oplock break 确认，但该句柄上没有正在等待的 break",
+				"level", req.OplockLevel, "fid", open.Volatile,
+				"session", ctx.Header.SessionID)
+			return status.InvalidOplockProtocol
+		}
+		// §2.2.25.1 Oplock Break Response：回**最终生效**的级别。
+		// 客户端说它降到什么就是什么 —— 它可能比我们要求的更低
+		// （例如直接放弃全部缓存），那是它的自由。
+		ctx.Out = (&wire.OplockBreak{
+			OplockLevel: req.OplockLevel,
+			FileID:      req.FileID,
+		}).Append(ctx.Out)
+		ctx.Log.Debug("oplock break 已确认", "level", req.OplockLevel, "fid", open.Volatile)
+		return nil
 
 	case wire.OplockBreakKindLease:
-		// 没声明 SMB2_GLOBAL_CAP_LEASING 却收到 lease 族属于协议违规。
-		ctx.Log.Warn("收到 lease break 确认，但本服务未声明 LEASING 能力",
-			"session", ctx.Header.SessionID)
-		return status.InvalidOplockProtocol
+		req, err := wire.ParseLeaseBreakAck(ctx.Msg)
+		if err != nil {
+			return status.InvalidParameter
+		}
+		if !table.ackLease(req.LeaseKey, req.LeaseState) {
+			ctx.Log.Warn("收到 lease break 确认，但没有匹配的等待中租约",
+				"lease_key", req.LeaseKey, "session", ctx.Header.SessionID)
+			return status.InvalidOplockProtocol
+		}
+		// §2.2.25.2 Lease Break Response：回客户端确认的那个状态。
+		ctx.Out = (&wire.LeaseBreakAck{
+			LeaseKey:   req.LeaseKey,
+			LeaseState: req.LeaseState,
+		}).Append(ctx.Out)
+		ctx.Log.Debug("lease break 已确认", "lease_key", req.LeaseKey, "state", req.LeaseState)
+		return nil
 
 	default:
 		// StructureSize 既不是 24 也不是 36，连是哪一族都判不出来。

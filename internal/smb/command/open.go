@@ -50,6 +50,14 @@ type Open struct {
 	// FileAttributes 是打开时的文件属性快照。
 	FileAttributes wire.FileAttributes
 
+	// oplockFileID 是本句柄被授予 oplock/lease 时用来定位对象的**文件身份**
+	// （见 oplock_state.go 的 oplockKey）。
+	//
+	// 单独存一份而不是用 Path：句柄改名后 Path 会变，而"谁持有这个文件的
+	// 缓存许可"不该随之改变（否则改名一次就会让 oplock 找不回来，
+	// 那个文件的缓存许可永久泄漏）。只在授予时写一次，之后只读。
+	oplockFileID uint64
+
 	// shareModeKey / shareModeOn 记录本句柄在共享模式表里的登记位置
 	// （见 share_access.go）。只在 shareModeTable.add 里写一次，
 	// 此时句柄尚未进会话表、对其它 goroutine 不可见，之后只读。
@@ -266,6 +274,10 @@ func (o *Open) close() {
 	o.mu.Unlock()
 	if tree != nil && tree.Share != nil {
 		tree.Share.locks.releaseAll(o.Path, o)
+		// 句柄关闭即收回它的 oplock/lease 缓存许可（MS-SMB2 §3.3.5.10）。
+		// 不收回的话，别的对象复用同一 fileID 时会继承一份"有人在缓存"
+		// 的假象，后续打开会去做一次永远等不到确认的 break。
+		tree.Share.oplocks.release(o)
 		// 目录句柄关闭：其上的未决 CHANGE_NOTIFY 回 STATUS_NOTIFY_CLEANUP
 		// （MS-SMB2 §3.3.5.19）。不处理的话那些请求会一直挂到客户端超时。
 		// 与 shareModes 同理放在这里 —— 这是全部句柄消失路径的唯一汇合处。
