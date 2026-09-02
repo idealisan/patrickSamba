@@ -327,6 +327,7 @@ done
 | `signing_required` | 强制 SMB 签名（防中间人篡改） | `false` |
 | `encryption_required` | 强制 SMB3 加密：3.0/3.0.2 用 AES-128-CCM，3.1.1 用协商出的算法。开启时 `min_dialect` 与 `max_dialect` **都必须 ≥ 3.0，否则启动直接报错**（SMB 2.x 没有加密能力，这类客户端会被拒绝连接，是预期行为而非 bug）；开启后协商到 2.0.2/2.1 的客户端会在协商阶段被拒绝，而非降级为明文 | `false` |
 | `max_connections` | 并发连接数上限。**`0` 或不填 = 默认上限 256，本项不支持「不限」**；超过上限的新连接会被直接关闭 | `256` |
+| `oplocks` | 允许授予 oplock / lease（客户端本地缓存，能显著提高小文件密集读写吞吐）。打开后宣告 `SMB2_GLOBAL_CAP_LEASING`。**默认关闭** —— 未做 Windows/macOS 真机验收，而这类实现错误的代价是**静默的脏数据**。已知边界见[已知限制](#notes) | `false` |
 
 ### `listen`
 
@@ -408,15 +409,15 @@ done
 `CREATE` · `CLOSE` · `READ` · `WRITE` · `FLUSH` · `LOCK` · `QUERY_INFO` · `SET_INFO` ·
 `QUERY_DIRECTORY` · `IOCTL` · `CANCEL` · `CHANGE_NOTIFY` · `OPLOCK_BREAK`
 
-其中两点需要如实说明（客户端的真实行为你应当知晓）：
-
-- **`CHANGE_NOTIFY`**：当前返回 `STATUS_NOT_SUPPORTED`，客户端会**降级为定时轮询**
-  目录变化。后果是：**macOS Finder 与 Windows 资源管理器在别人改了文件后，不会
-  自动刷新目录列表**，需要手动刷新（Finder 按 ⌘R，资源管理器按 F5）。异步变更通知
-  是已知未实现项。
-- **`OPLOCK_BREAK`**：本服务在 `CREATE` 时一律授予 `NONE` oplock、也不宣告 leasing
-  能力，因此正常情况下客户端不会发来 oplock/lease break；万一收到则按协议返回
-  `STATUS_INVALID_PARAMETER`。即「真实 oplock/lease 能力」尚未实现。
+- **`CHANGE_NOTIFY`（v0.6.0 起真正实现）**：请求挂起，被监视目录发生变化时补发
+  带 `FILE_NOTIFY_INFORMATION` 的响应，Finder / 资源管理器会**自动刷新**目录列表。
+  变更来自本服务自己的写路径（CREATE / WRITE / SET_INFO / CLOSE 删除），
+  **宿主上其它进程直接改动共享目录不会触发通知** —— 客户端会因此少一次自动刷新，
+  但不会出错（它本来就有轮询兜底）。详见「[已知限制与说明](#notes)」。
+- **`OPLOCK_BREAK`（v0.6.0 起真正实现）**：`server.oplocks: true` 时 `CREATE` 会按
+  请求授予 oplock / lease，`NEGOTIATE` 宣告 `SMB2_GLOBAL_CAP_LEASING`；别的客户端要
+  动这个文件时先发 break 通知**并等确认**，确认到达后才放行被推迟的打开。
+  默认关闭，理由与已知边界见「[已知限制与说明](#notes)」。
 
 ### 文件行为语义（v0.4.x 对照 Samba 的修正）
 
@@ -460,6 +461,19 @@ done
   `SET_ZERO_DATA`、`QUERY_ALLOCATED_RANGES`（稀疏文件三件套，Time Machine 关键路径）、
   `ENUMERATE_SNAPSHOTS`（回 0 个快照）、`QUERY_NETWORK_INTERFACE` 等。
 - **DCERPC/srvsvc**：IPC$ 命名管道可用（用于 `srvsvc` 共享枚举等）。
+
+### 缓存与变更通知（v0.6.0 新增）
+
+- **异步变更通知（`CHANGE_NOTIFY`）**：请求挂起、目录变更时补发
+  `FILE_NOTIFY_INFORMATION`，支持 `SMB2_WATCH_TREE` 递归与 `CompletionFilter` 过滤。
+  变更由**命令层记账**（自己的写路径），不用 inotify —— 理由见
+  [已知限制](#notes) 第 4 条。
+- **oplock / lease**：`server.oplocks: true` 时授予 oplock（II / EXCLUSIVE / BATCH）
+  与租约（RqLs v1 / v2），并在冲突时发 break 通知**等确认**后才放行新的打开。
+  **默认关闭**，理由与边界见[已知限制](#notes) 第 6 条。
+- **异步未决请求表**：`CHANGE_NOTIFY` 与阻塞锁共用。请求挂起后读循环照常收帧，
+  因此 `CANCEL` 能真正取消一个正在等待的请求（此前 `CANCEL` 只能静默丢弃 ——
+  不存在可被取消的未决请求）。
 
 ### 服务发现（mDNS / DNS-SD）
 
@@ -525,11 +539,14 @@ done
 授予 / 重连 / 超时三条路径；**没有** macOS 真机长跑断线恢复的证据。
 也就是说已验证的是「握手与重连协议正确」，**不是**「真实备份过程不会中断」。
 
-但以下能力**未实现**，可能导致备份不稳定甚至失败（按对 Time Machine 的实际影响排序）：
+但以下能力仍缺，可能导致备份不稳定甚至失败（按对 Time Machine 的实际影响排序）：
 
-- **oplock / lease** —— 服务端不声明 `SMB2_GLOBAL_CAP_LEASING`、不授予任何 oplock
-  （`create.go` 恒回 `OplockLevelNone`），客户端退化为不缓存，`.sparsebundle` 的 band
-  目录那种小文件密集写吞吐明显低于 Samba；不影响正确性。
+- **oplock / lease** —— v0.6.0 已实现，但**默认关闭**（`server.oplocks: false`）。
+  保持默认时客户端仍退化为不缓存，`.sparsebundle` 的 band 目录那种小文件密集写
+  吞吐明显低于 Samba；不影响正确性。打开能改善吞吐，代价与三条边界见
+  「[已知限制与说明](#notes)」第 6 条。
+  **注意：这是这一节的结论里唯一在近期发生过实质变化的项，但变化的是"有了开关"，
+  不是"验证过了" —— 本项目至今没有 macOS 真机数据，打开后的真实表现未知。**
 - **AAPL resolveID** —— 对 TM 本身**无实际影响**（我们不宣告 `kAAPL_SUPPORT_RESOLVE_ID`，
   客户端就不会使用），仅 Finder 的别名 / 最近项目按 64 位 file id 反查路径会退化为按路径查找。
 
@@ -537,8 +554,9 @@ done
 
 - **不要拿真实备份数据试。** 请仅用测试数据（或一台可随时清空的机器）试用，确认能完成
   一轮完整备份并成功浏览快照后，再考虑放真实数据。**请勿把它作为唯一一份备份的目的地。**
-- **最可能的失败模式是稳定性，不是连不上。** 服务端不授予任何 oplock / lease，长时间大体量
-  备份（`.sparsebundle` band 目录海量小文件）下的表现未知——可能慢，也可能中途报错。
+- **最可能的失败模式是稳定性，不是连不上。** oplock / lease 默认关闭，客户端退化为不缓存，
+  长时间大体量备份（`.sparsebundle` band 目录海量小文件）下的表现未知——可能慢，
+  也可能中途报错。
   **所有 macOS 版本均未经实测**，不要写成「某版本有点抖」这类暗示我们试过的口吻。
 - **备份共享务必显式设 `quota_bytes`。** 不设时上报宿主真实剩余空间，Time Machine 会一路
   写满磁盘。注意：`quota_bytes` 上报的**可用空间 = 配额 − 宿主卷已用空间**（出于性能不
@@ -573,15 +591,31 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
    `nt_hash`（口令的 MD4 哈希，仍可被离线爆破但至少不在磁盘上暴露原口令）。用明文会有
    启动 `WARN`。
 
-4. **目录变更不会自动刷新**：因 `CHANGE_NOTIFY` 未实现（见[支持能力](#capabilities)），
-   Finder / 资源管理器的目录列表不会自动更新，需手动刷新。
+4. **目录变更的自动刷新只覆盖本服务自己的写（v0.6.0 起）**：`CHANGE_NOTIFY` 已实现，
+   但变更是**在命令层记账**的 —— 只有经本服务写路径（CREATE / WRITE / SET_INFO /
+   CLOSE 删除）产生的变化会通知客户端。**宿主上其它进程直接改动共享目录**（`touch`、
+   `rm`、另一个服务实例）不会触发通知，客户端会因此少一次自动刷新，但不会出错
+   （它本来就有轮询兜底）。
+   不用 inotify / kqueue / ReadDirectoryChangesW 的理由见[支持能力](#capabilities)
+   与 `internal/smb/command/notify_hub.go` 的文件头注释。
 
 5. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
 
-6. **不授予任何 oplock / lease**：`CREATE` 恒回 `OplockLevelNone`，且 `tree_connect` 虽宣告了
-   `SMB2_GLOBAL_CAP_LEASING` 之外的 `FORCE_LEVELII_OPLOCK` 能力位，但这是**有意为之**
-   （约束客户端别申请独占 oplock，语义上不是虚假宣告）。对普通文件共享几乎无影响；
-   对 Time Machine 的影响是客户端退化为不缓存，见[上](#timemachine)。
+6. **oplock / lease 默认关闭，且有三条已知边界**：`server.oplocks`（默认 `false`）。
+   打开后 `CREATE` 会授予 oplock / lease，`NEGOTIATE` 宣告 `SMB2_GLOBAL_CAP_LEASING`。
+
+   - **为什么默认关**：授予缓存许可等于许可客户端把读写缓存在本地，服务端必须在
+     别的客户端动这个文件时先打破它**并等确认**。这类实现错误的表现是另一个客户端
+     读到旧内容 —— **静默的脏数据**，没有任何一方会报错。本特性尚未在 Windows /
+     macOS 真机上验收，在此之前保守一侧是正确的默认。
+   - **边界一**：复合链中间的 `CREATE` 不授予（它需要挂起通路才能在冲突时等确认，
+     而异步响应是单发的）。现实里 Windows 资源管理器的 `[CREATE, QUERY_INFO, CLOSE]`
+     这类短链拿不到缓存许可，不影响正确性。
+   - **边界二**：极少数「第二个客户端用**复合链**打开一个已被缓存许可的文件」的情形
+     会收到 `STATUS_SHARING_VIOLATION`。这是刻意的选择：不能等确认却放行，就是放行
+     一次会读到脏数据的访问，那比一次可重试的失败糟得多；重试即可成功。
+   - **边界三**：等确认的上限是 30 秒（与 Samba 的超时后强行推进同款），超时按
+     「已打破」处理并放行被推迟的打开。
 
 <!-- BEGIN-OSCAP-WIRING-STATUS-README：本条与 CHANGELOG 的同名块、configs/example.yaml 的
      同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
