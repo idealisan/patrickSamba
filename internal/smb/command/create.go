@@ -161,6 +161,16 @@ func deferCreateForOplockBreak(ctx *Context, req *wire.CreateRequest, fs vfs.Fil
 	if !ok {
 		ctx.Log.Warn("需要打破 oplock 但本次 CREATE 无法挂起，按共享冲突回绝",
 			"path", path, "share", ctx.Tree.Share.Name)
+		// break 通知已经发出去了，但没人会去等它的确认 —— 必须在这里把
+		// 这次 break **就地收尾**，否则：
+		//   1. 进行中的 break 计数一直占着（上限 maxOplockBreaksPerShare），
+		//      攒够 64 次之后这个共享上的所有冲突打开都会变成 SHARING_VIOLATION，
+		//      而且是**永久**的，重开服务才恢复；
+		//   2. 条目仍停在原级别，后续打开每次都要重走一遍"发 break → 回绝"。
+		//
+		// cancelBreak 会按"已打破"把条目降到要求的状态，于是下一次打开不再
+		// 冲突，客户端重试即可成功。
+		pending.share.oplocks.cancelBreak(pending.entry)
 		return status.SharingViolation
 	}
 	go func() {
