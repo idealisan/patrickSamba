@@ -111,7 +111,7 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 	if serr != nil {
 		// 目标不存在：不可能有人持有它的缓存许可，也不可能有别的打开者。
 		// 新建文件是 oplock 收益最大的场景之一（刚创建、马上写）。
-		return grantIfDeferrable(ctx, req, wantLease), nil, status.Success
+		return grantOplock(req, wantLease), nil, status.Success
 	}
 
 	key := oplockKey{fileID: attr.FileID, stream: stream}
@@ -132,7 +132,7 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 	var grant oplockPlan
 	switch {
 	case len(entries) == 0 && !otherOpeners:
-		grant = grantIfDeferrable(ctx, req, wantLease)
+		grant = grantOplock(req, wantLease)
 	case newWrite:
 		grant = oplockPlan{}
 	default:

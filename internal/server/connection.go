@@ -9,6 +9,7 @@ import (
 	"net"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/smb/command"
@@ -57,11 +58,15 @@ type Connection struct {
 	// 只由读 goroutine 读写。
 	handshakeDone bool
 
-	// vniDropPending 表示本帧处理中出现了 FSCTL_VALIDATE_NEGOTIATE_INFO
+	// vniDropPending 表示处理中出现了 FSCTL_VALIDATE_NEGOTIATE_INFO
 	// 复核失败（bh5-F6）：按 MS-SMB2 §3.3.5.15.12，服务端在回完
 	// STATUS_ACCESS_DENIED 响应后 MUST terminate the transport connection。
-	// serve() 在响应帧写出成功后据此断开。只由读 goroutine 读写，无需加锁。
-	vniDropPending bool
+	// serve() 在响应帧写出成功后据此断开。
+	//
+	// 用 atomic：**复合链续跑**（见 resumeChain）会在另一个 goroutine 里
+	// 调 processMessage，那里也会写这个标志，于是它不再是"只由读 goroutine
+	// 读写"。读取一律用 Swap(false)（读后清零），保证只断连一次。
+	vniDropPending atomic.Bool
 
 	closeOnce sync.Once
 }
@@ -170,11 +175,14 @@ func (c *Connection) serve(ctx context.Context) {
 			return
 		}
 
-		if c.vniDropPending {
+		if c.vniDropPending.Swap(false) {
 			// bh5-F6：VALIDATE_NEGOTIATE_INFO 复核失败。错误响应已经送达，
 			// 现在按 MS-SMB2 §3.3.5.15.12 终止传输连接（defer c.Close()
 			// 会拆掉会话/树/句柄）。不断连的话，被篡改的客户端收到
 			// ACCESS_DENIED 后仍可继续用这条连接发命令。
+			//
+			// Swap 而不是 Load：续跑路径也会置这个标志，读后清零保证
+			// 读循环与续跑两边只断一次。
 			c.log.Warn("VALIDATE_NEGOTIATE_INFO 复核失败，按规范断开连接")
 			return
 		}
@@ -335,6 +343,31 @@ func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
 	return c.handleSMB2Frame(frame, false)
 }
 
+// chainPause 记录一条因**中途挂起**而中断的复合链的续跑状态。
+//
+// 背景：某条消息（例如需要等 oplock break 确认的 CREATE）可以被挂起，
+// 让读循环继续收帧。若它是复合链的**末条**，异步响应单独补发即可；
+// 若它在链的中间，后面还有消息没处理，就必须把"剩下的字节 + 链状态"存下来，
+// 等那条异步请求完成后再接着跑 —— 这就是本结构。
+//
+// 为什么必须保留 chain：后面的消息可能用 FileId 全 0xFF 引用链中最近一次
+// CREATE 建立的句柄（MS-SMB2 §3.3.5.2.7）。链状态丢了，续跑时那些消息
+// 就找不到句柄。
+type chainPause struct {
+	// rest 是**被挂起那条之后**尚未处理的字节。
+	//
+	// 刻意不含被挂起的那条本身：它的响应走异步路径单独补发
+	// （AsyncRequest.Complete → sendUnsolicited），不属于续跑的这一段。
+	rest []byte
+	// chain 是链级共享状态（Session / Tree / LastOpen / Failed）。
+	chain *command.Chain
+
+	encrypted bool
+
+	// async 是被挂起的那个请求；它完成后触发续跑。
+	async *command.AsyncRequest
+}
+
 // handleSMB2Frame 处理一个 SMB2 帧（可能是复合请求链）。
 //
 // encrypted 表示本帧来自 SMB3 TRANSFORM_HEADER 解密结果，
@@ -344,17 +377,40 @@ func (c *Connection) handleSMB2Chain(frame []byte) ([]byte, error) {
 //   - NextCommand != 0 时本条消息长度即 NextCommand，== 0 时延伸到帧尾；
 //   - 每段起点 8 字节对齐；
 //   - 响应也必须拼成复合链一次性提交给传输层。
+//
+// 中途挂起时的处置：本帧先回**已处理完的那些**消息，剩下的交给续跑
+// （见 chainPause 与 resumeChain）。
 func (c *Connection) handleSMB2Frame(frame []byte, encrypted bool) ([]byte, error) {
-	chain := &command.Chain{}
-	var out []byte
-	var msgs []respMsg
+	out, msgs, pause, err := c.runChain(frame, &command.Chain{}, encrypted)
+	if err != nil {
+		return nil, err
+	}
+	if pause != nil {
+		// 登记续跑。**必须**在 finishChain 之前？不必，但必须在返回之前：
+		// 一旦本帧被写出，客户端就可能发来 break 确认，异步请求随之完成；
+		// 晚于这个时刻登记会漏掉续跑（SetResume 内部处理了"已完成"的竞态，
+		// 所以顺序上先登记更稳妥）。
+		pause.async.SetResume(func() { c.resumeChain(pause) })
+	}
+	c.finishChain(out, msgs)
+	return out, nil
+}
+
+// runChain 处理一段字节里的复合链，返回响应缓冲、各消息的后处理需求，
+// 以及（若中途挂起）续跑所需的状态。
+//
+// 拆成独立方法是为了让**读循环**与**续跑**共用同一套链路处理逻辑 ——
+// 两条路径若各写一份，复合链的边界处理迟早会分叉（那类分叉的表现是
+// "末条挂起正常、中间挂起就把响应拼错"）。
+func (c *Connection) runChain(frame []byte, chain *command.Chain, encrypted bool) (
+	out []byte, msgs []respMsg, pause *chainPause, err error) {
 
 	pos := 0
 	for {
 		seg := frame[pos:]
-		hdr, err := wire.ParseHeader(seg)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", errBadCompound, err)
+		hdr, herr := wire.ParseHeader(seg)
+		if herr != nil {
+			return nil, nil, nil, fmt.Errorf("%w: %v", errBadCompound, herr)
 		}
 
 		segLen := len(seg)
@@ -362,7 +418,7 @@ func (c *Connection) handleSMB2Frame(frame []byte, encrypted bool) ([]byte, erro
 			segLen = int(hdr.NextCommand)
 			// NextCommand 必须至少覆盖一个头，且不能越出本帧。
 			if segLen < wire.HeaderSize || segLen > len(seg) {
-				return nil, fmt.Errorf("%w: NextCommand=%d 超界（剩余 %d）",
+				return nil, nil, nil, fmt.Errorf("%w: NextCommand=%d 超界（剩余 %d）",
 					errBadCompound, hdr.NextCommand, len(seg))
 			}
 		}
@@ -399,18 +455,68 @@ func (c *Connection) handleSMB2Frame(frame []byte, encrypted bool) ([]byte, erro
 			})
 		}
 
+		// 中途挂起：把剩下的字节交出去，等那条异步请求完成后再续跑。
+		//
+		// 末条消息挂起时不用这么做 —— 它后面没有消息，异步响应单独补发
+		// 就够了（这也正是 Context.Defer 只允许末条时才有意义的由来；
+		// 中间挂起由这里兜住）。
+		if ctx.Async() != nil && hdr.NextCommand != 0 {
+			return out, msgs, &chainPause{
+				rest:      frame[pos+segLen:],
+				chain:     chain,
+				encrypted: encrypted,
+				async:     ctx.Async(),
+			}, nil
+		}
+
 		if hdr.NextCommand == 0 {
 			break
 		}
 		pos += segLen
 		if pos >= len(frame) {
 			// NextCommand 指到了帧尾之外。
-			return nil, fmt.Errorf("%w: 链在偏移 %d 处越界", errBadCompound, pos)
+			return nil, nil, nil, fmt.Errorf("%w: 链在偏移 %d 处越界", errBadCompound, pos)
 		}
 	}
+	return out, msgs, nil, nil
+}
 
+// resumeChain 续跑一条被挂起打断的复合链，并把响应写成新的一帧。
+//
+// 它在**异步请求的 goroutine** 上运行，与读循环并发 —— 因此这里碰到的
+// 每一点连接状态都必须能承受并发（vniDropPending 已改成 atomic 就是为了它）。
+//
+// ⚠️ 调用方保证：本函数在 AsyncRequest 补发完响应之后才被调用
+// （见 AsyncRequest.Complete），否则会与补发抢同一把写锁。
+func (c *Connection) resumeChain(p *chainPause) {
+	out, msgs, next, err := c.runChain(p.rest, p.chain, p.encrypted)
+	if err != nil {
+		// 续跑阶段遇到致命协议错误（复合链格式坏了）。这里**不在**读循环里，
+		// 没有"返回 error 让 serve() 断连"这条路，只能记日志后主动关连接。
+		c.log.Warn("复合链续跑失败，断开连接", "err", err)
+		c.Close()
+		return
+	}
+	if next != nil {
+		// 剩下的消息里又出现一次挂起：递归登记，别把后面那段丢了。
+		next.async.SetResume(func() { c.resumeChain(next) })
+	}
+	if len(out) == 0 {
+		return
+	}
 	c.finishChain(out, msgs)
-	return out, nil
+
+	c.writeMu.Lock()
+	werr := c.tr.WriteFrame(out)
+	c.writeMu.Unlock()
+	if werr != nil {
+		c.log.Debug("写出续跑响应失败", "err", werr)
+		return
+	}
+	if c.vniDropPending.Swap(false) {
+		c.log.Warn("VALIDATE_NEGOTIATE_INFO 复核失败，按规范断开连接")
+		c.Close()
+	}
 }
 
 // finishChain 在复合链拼装完成后执行 preauth hash 更新与签名。
@@ -473,7 +579,7 @@ func (c *Connection) processMessage(hdr wire.Header, msg []byte,
 	// 校验失败分支（GUID/SecurityMode/Capabilities/方言/输入畸形）的统一出口；
 	// 校验通过（SUCCESS）与 3.1.1 的 FILE_CLOSED 分支都不命中。
 	if ctx.Status == status.AccessDenied && isValidateNegotiate(hdr, msg) {
-		c.vniDropPending = true
+		c.vniDropPending.Store(true)
 	}
 	return ctx
 }

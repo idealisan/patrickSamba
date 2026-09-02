@@ -104,17 +104,28 @@ func TestDeferRejectsWithoutSink(t *testing.T) {
 	}
 }
 
-func TestDeferRejectsMidChain(t *testing.T) {
+// TestDeferAllowsMidChain：v0.7.2 起复合链**中间**的消息也能挂起。
+//
+// internal/server 会检测到"本条挂起且后面还有消息"，把已处理部分的响应
+// 先发出，存下剩余字节与链状态，等异步完成后续跑（chainPause / resumeChain）。
+// 此前 Defer 对非末条直接返回失败，导致链中间的 CREATE 只能退回同步语义。
+func TestDeferAllowsMidChain(t *testing.T) {
 	sink := &fakeAsyncSink{}
 	c := newAsyncTestConn(sink)
 	// NextCommand != 0 = 复合链中间的消息。
 	ctx := deferCtx(c, 1, 1, func(h *wire.Header) { h.NextCommand = 128 })
-	if _, ok := ctx.Defer(); ok {
-		t.Fatal("复合链非末条消息不得挂起（异步响应是单发的，拆链语义不可控）")
+	ar, ok := ctx.Defer()
+	if !ok {
+		t.Fatal("复合链中间的消息应当允许挂起（由 server 层续跑剩下的部分）")
 	}
-	if got := c.async.pendingCount(); got != 0 {
-		t.Fatalf("被拒的挂起不应进表，实际 %d", got)
+	if got := c.async.pendingCount(); got != 1 {
+		t.Fatalf("挂起后应进表，实际 %d", got)
 	}
+	// 挂起后本帧不为它产生响应 —— 响应走异步补发，剩余部分走续跑。
+	if ctx.Suppressed() {
+		t.Fatal("未置 ASYNC_COMMAND 时仍应有 interim 处理路径")
+	}
+	_ = ar
 }
 
 func TestDeferRejectsDuplicateMessageID(t *testing.T) {
