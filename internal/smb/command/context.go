@@ -112,6 +112,10 @@ type Context struct {
 
 	// suppress 表示本条消息**不产生任何响应字节**（SMB2 CANCEL）。
 	suppress bool
+
+	// async 非 nil 表示本条请求已被 handler 挂起，最终响应稍后异步补发
+	// （见 async.go）。由 Context.Defer 设置，Dispatch 读取。
+	async *AsyncRequest
 }
 
 // Suppressed 报告本条消息是否不产生响应。internal/server 据此回滚响应缓冲。

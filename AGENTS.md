@@ -179,13 +179,15 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | 部件 | 位置 | 状态 |
 |---|---|---|
 | port 层（6 接口 + 逐能力矩阵 + 三态 Mode + 平台探测） | `internal/oscap/*.go` | 已在 main（PR #123，`6413e1d`），31 PASS / 0 SKIP |
-| `filesystem_mode` 三态配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126，`212d6f9`），取值判定委托 `oscap.ParseMode` 保持单一真源 |
+| `filesystem_mode` 配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126，`212d6f9`），取值判定委托 `oscap.ParseMode` 保持单一真源。落地时是三态，**`native` 档已于 v0.5 开发版移除**，现为 `auto` / `portable` 两态 |
 | native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
 | builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
 | portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
 | **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **全部已接进数据路径（v0.3.0）**。PR #159 把 `CapXattr`/`CapNamedStream` 接进 `internal/vfs` 真实路径；v0.3.0 的 `CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 由 `vfs-sparse`/`vfs-attr` 经 `caps.*()` 接进同一路径，`cmd/stupidsamba` 装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**。见下方「OSCAP 接线状态」 |
 
-上面那张三态表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
+上面那张能力表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
+（表里的「三态」是 v0.2.0 落地当时的口径；`native` 档已在 v0.5 开发版移除，
+**现行为见下方 OSCAP 接线状态块的两态表述**。）
 
 <!-- BEGIN-OSCAP-WIRING-STATUS-AGENTS：本段与 CHANGELOG.md、README.md、configs/example.yaml
      的同名块是**一套四处**，接线 PR 合入后四处都要改。一次找齐：
@@ -195,7 +197,16 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 `CapCreationTime`、`CapDOSAttributes` 在 v0.3.0 由 `vfs-sparse` / `vfs-attr` 接进
 （`internal/vfs/optional.go` 经 `caps.Sparse()`；`local_handle.go` / `attr_*.go` /
 `query_info.go` 经 `caps.Times()` / `caps.IDs()` / `caps.DOS()`）。至此 `filesystem_mode`
-三态（auto / native / portable）对全部六项能力都有真实运行期效果。
+**两态（`auto` / `portable`）**对全部六项能力都有真实运行期效果。
+
+> **v0.5 开发版变更**：第三态 `native` 已整体移除（项目所有者 2026-08-25 拍板）。
+> 移除原因是它的契约「全部能力强制走原生、缺一项启动即报错」在任何平台都无法满足——
+> 每个平台都至少有一项能力被源码硬编码为不支持（linux/darwin 的 DOS 属性位、darwin
+> 另缺稀疏文件、windows 缺 xattr、其余平台六项全无），三平台恒定启动失败，`native`
+> 从未有过可用场景。现在写 `filesystem_mode: native` 会在配置校验/启动时报错并指名
+> 建议改用 `auto` / `portable`；需要「尽量走原生」的语义用 `auto` 即可，它本来就会
+> 逐项优先选原生。默认值一直是 `auto`，未显式写过 `native` 的用户不受影响。
+> 反向对照用例：`TestNoModeForcesAllNative`（防止「全原生强制」语义以任何形式回归）。
 
 **验证判据（可自行复算）**：
 1. `go list -deps ./cmd/stupidsamba | grep -c oscap` ≥ 3（oscap / native / builtin 已链进二进制）。

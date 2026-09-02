@@ -19,6 +19,16 @@ const (
 	// 这是刻意的降级，理由见 handleLock 注释。
 	blockingLockMaxWait = 10 * time.Second
 
+	// blockingLockAsyncTimeout 是**异步**阻塞锁的等待上限。
+	//
+	// 异步路径有了 CANCEL 之后，规范语义是「一直等到授予或被取消」，
+	// Samba 也是这么做的（smb2_lock.c 无超时）。这里仍然留一个很长的上界，
+	// 作为 goroutine 与未决表条目的兜底回收 —— 客户端一去不回时，
+	// 至多这么多时间之后等待者会自己退出，不必等连接空闲超时。
+	// 与规范的残余差距：真的有锁被持有超过这个时长的合法场景会得到
+	// STATUS_LOCK_NOT_GRANTED，而不是继续等。
+	blockingLockAsyncTimeout = 5 * time.Minute
+
 	// maxBlockingLockWaiters 是锁表上同时挂起等待的阻塞锁请求上限
 	// （AGENTS.md §8 资源上限）。达到上限后新来的阻塞请求立即按非阻塞
 	// 处理 —— 宁可退化成立即拒绝，也不能让畸形客户端用海量挂起等待
@@ -304,15 +314,42 @@ func (t *lockTable) releaseAll(_ string, o *Open) {
 	}
 }
 
+// stopped 报告 stop 通道是否已经关闭。stop 为 nil 时恒为 false。
+func stopped(stop <-chan struct{}) bool {
+	if stop == nil {
+		return false
+	}
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // waitLock 是阻塞锁的**同步有界**等待（bh4-A#4）：区间空闲则立即授予；
 // 冲突则挂起等待锁释放后重试，直到授予 / 超时回 STATUS_LOCK_NOT_GRANTED /
 // 并发等待者超过 maxWaiters 立即拒绝 / 句柄在等待期间被关闭。
 //
-// ⚠️ 该方法会**阻塞调用方**。当前所有 handler 都在连接的读循环里同步执行，
-// 所以等待期间这条连接收不到任何新请求 —— 包括 CANCEL。这是与规范
-// （interim STATUS_PENDING + 异步补发）的已知差距，见 handleLock 注释。
+// ⚠️ 该方法会**阻塞调用方**，等待期间这条连接收不到任何新请求 —— 包括
+// CANCEL。所以它现在只是"挂不起来"时的退路（见 handleLock），
+// 规范语义走下面的 waitLockStop + AsyncRequest。
+//
 // timeout 建议用 blockingLockMaxWait；测试传小值。
-func (t *lockTable) waitLock(path string, o *Open, e wire.LockElement, timeout time.Duration, maxWaiters int) status.Status {
+func (t *lockTable) waitLock(path string, o *Open, e wire.LockElement,
+	timeout time.Duration, maxWaiters int) status.Status {
+	return t.waitLockStop(path, o, e, timeout, maxWaiters, nil)
+}
+
+// waitLockStop 是 waitLock 的可中止版本，供**异步等待 goroutine**使用。
+//
+// 与 waitLock 的差别只有一点：stop 关闭时（被 CANCEL 取消，或连接拆除）
+// 立即回 STATUS_CANCELLED 而不是继续等。这正是 MS-SMB2 §3.3.5.14 要求、
+// 而同步等待给不出来的那条语义 —— 等待期间读循环照常收帧，CANCEL 能命中。
+//
+// timeout 建议用 blockingLockAsyncTimeout；测试传小值。
+func (t *lockTable) waitLockStop(path string, o *Open, e wire.LockElement,
+	timeout time.Duration, maxWaiters int, stop <-chan struct{}) status.Status {
 	elems := []wire.LockElement{e}
 
 	t.mu.Lock()
@@ -339,12 +376,20 @@ func (t *lockTable) waitLock(path string, o *Open, e wire.LockElement, timeout t
 
 	deadline := time.Now().Add(timeout)
 	for {
+		if stopped(stop) {
+			return status.Cancelled
+		}
 		if o.Closed() {
 			// 等待期间句柄被别的路径关闭（durable 回收等），别再给它授锁。
 			return status.LockNotGranted
 		}
 		if st := t.lock(path, o, elems); st != status.LockNotGranted {
-			return st // 授予或回绕拒绝，直接透传
+			// 授予或回绕拒绝，直接透传。
+			//
+			// 注意授予与"取消"之间的窗口：CANCEL 可能就在此刻胜出并已经
+			// 回过 STATUS_CANCELLED。此时不能把锁留在手里，由调用方用
+			// AsyncRequest.Complete 的返回值做判定并回滚（见 handleLock）。
+			return st
 		}
 		remain := time.Until(deadline)
 		if remain <= 0 {
@@ -362,6 +407,9 @@ func (t *lockTable) waitLock(path string, o *Open, e wire.LockElement, timeout t
 		case <-wake:
 			timer.Stop()
 		case <-timer.C:
+		case <-stop:
+			timer.Stop()
+			return status.Cancelled
 		}
 	}
 }
@@ -383,17 +431,46 @@ func (t *lockTable) setLocked(path string, locks []byteRangeLock) {
 // 持锁方释放后被授予；至多等 blockingLockMaxWait，超时回
 // STATUS_LOCK_NOT_GRANTED。锁表挂在 Share 上，因此跨会话可见。
 //
-// 与规范的已知差距（需要异步未决请求表才能补齐，涉及 server 层装配，
-// 本包无法独立完成）：Samba 对阻塞锁回 interim STATUS_PENDING（500ms，
-// smb2_lock.c:157）后**异步**等待、期间可被 CANCEL 取消
-// （smb2_lock.c:528-566）。我们的 handler 在连接读循环里同步执行：
-//   - 回 PENDING 再异步补发需要 Connection 的异步写通路与 pending 表
-//     （internal/server 的 connection.go / command 层 conn.go）；
-//   - 同步等待期间本连接读不了 CANCEL，取消语义无从谈起。
+// 异步未决请求表（async.go）建起来之后，阻塞锁走**规范语义**：
+// 冲突时把请求挂起（客户端置了 SMB2_FLAGS_ASYNC_COMMAND 则先回一条
+// interim STATUS_PENDING），由独立 goroutine 等待锁释放，拿到后异步补发
+// 最终响应；期间客户端可发 CANCEL 中断等待。Samba 对照：smb2_lock.c:157
+// 发 interim、:528-566 处理 CANCEL。
 //
-// 因此选择「同步有界等待」：多数争用在窗口内自然消解，超时按非阻塞
-// 语义拒绝。等待者数量受 maxBlockingLockWaiters 上限保护。
+// 挂不起来时（没有注入 AsyncSink、请求不是复合链末条、未决数达上限）
+// 退回「同步有界等待」：至多等 blockingLockMaxWait，超时按非阻塞语义拒绝。
+// 这条退路保证旧行为在任何环境下都不会突然变坏。
 //
+// 与规范的残余差距：异步等待仍有 blockingLockAsyncTimeout（5 分钟）上界，
+// 而规范是「一直等到授予或被取消」。留这个上界是为了兜底回收 goroutine
+// 与未决表条目 —— 客户端一去不回时不必等连接空闲超时。
+//
+// waitLockAsync 在独立 goroutine 里等待一把阻塞锁，并在有结果时补发响应。
+//
+// 这是阻塞锁的**规范路径**（MS-SMB2 §3.3.5.14 + §3.3.4.4）：
+// 等待不占读循环，期间 CANCEL 能命中未决表（async.go）把等待打断。
+//
+// 收尾有一条不能省的分支：waitLockStop 可能刚刚把锁授予出去，
+// CANCEL 就抢先应答了 STATUS_CANCELLED —— 此时 Complete 返回 false，
+// 那把锁必须回滚，否则它会一直挡着那段字节直到进程退出。
+func waitLockAsync(ar *AsyncRequest, t *lockTable, o *Open, path string, e wire.LockElement) {
+	st := t.waitLockStop(path, o, e, blockingLockAsyncTimeout,
+		maxBlockingLockWaiters, ar.Aborted())
+
+	if st == status.Success {
+		ok := ar.Complete(status.Success, func(dst []byte) ([]byte, error) {
+			return (&wire.LockResponse{}).Append(dst), nil
+		})
+		if !ok {
+			// 取消已抢先应答：回滚刚授予的锁。unlock 用同一份 path 拷贝，
+			// 区间与加锁时完全一致，因此一定能匹配上。
+			_ = t.unlock(path, o, []wire.LockElement{e})
+		}
+		return
+	}
+	ar.Complete(st, nil)
+}
+
 // 未实现：lock sequence 的重放抑制（MS-SMB2 §3.3.5.14 里用于多通道重传
 // 去重，单通道下不会触发）。
 func handleLock(ctx *Context) error {
@@ -476,7 +553,23 @@ func handleLock(ctx *Context) error {
 			// 在冲突时挂起等待，而不是立即拒绝。Samba smb2_lock.c:341-347
 			// 同判：首元素裸 SHARED/EXCLUSIVE ⇒ blocking。
 			//
-			// 等待是同步有界的（见本函数注释的「已知差距」）。
+			// 优先走规范语义：把请求挂起，由独立 goroutine 等待并异步补发
+			// 响应，期间 CANCEL 可命中（见 async.go / waitLockStop）。
+			if ar, ok := ctx.Defer(); ok {
+				// ⚠️ path 必须在这里**拷成值**再交给 goroutine。
+				// open.Path 会被 SET_INFO(FileRenameInformation) 就地改写
+				// （set_info.go 的 open.Path = dst），那处写入没有加锁，
+				// 让后台 goroutine 去读 *open 的字段就是实打实的数据竞争。
+				// 拷贝出来的字符串不可变，授予与回滚都用它，口径自洽。
+				path := open.Path
+				elem := req.Locks[0]
+				go waitLockAsync(ar, table, open, path, elem)
+				// 响应由 waitLockAsync 补发，这里不写任何响应体。
+				// Dispatch 看到 ctx.async != nil 会按挂起处理。
+				return nil
+			}
+			// 挂不起来（无异步通路 / 非复合链末条 / 未决数达上限）：
+			// 退回 bh4-A#4 的同步有界等待，行为与 v0.5.x 完全一致。
 			st = table.waitLock(open.Path, open, req.Locks[0],
 				blockingLockMaxWait, maxBlockingLockWaiters)
 		}
