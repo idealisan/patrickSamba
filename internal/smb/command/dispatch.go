@@ -102,6 +102,30 @@ func Dispatch(ctx *Context) {
 	err := dispatch(ctx)
 	if err != nil {
 		ctx.fail(status.FromVFSError(err))
+	} else if ctx.async != nil {
+		// 请求被 handler 挂起（见 async.go）。两条路与 CANCEL 的处置同源：
+		//
+		//   - 客户端置了 SMB2_FLAGS_ASYNC_COMMAND：回一条**只有头**的 interim
+		//     STATUS_PENDING（Samba smbd_smb2_request_pending_queue 同做法），
+		//     AsyncId 由服务端分配，最终响应稍后以相同 AsyncId 单发补上；
+		//   - 未置位：本条消息在当前帧里**一个字节都不回**，客户端继续等，
+		//     最终响应到了才算完。
+		//
+		// 挂起的请求不算失败，因此不置 Chain.Failed —— 后面也没有消息了
+		// （Defer 只允许复合链末条挂起）。
+		if ctx.async.interim {
+			ctx.Status = status.Pending
+			ctx.ResetBody()
+			ctx.RespHeader.Flags |= wire.FlagAsyncCommand
+			ctx.RespHeader.AsyncID = ctx.async.key.asyncID
+		} else {
+			// 与 CANCEL 完全同构：连响应头一起丢弃，本帧里不留痕迹。
+			// 必须**直接返回**，不能走到下面的 finishHeader() —— 那会把
+			// 64 字节响应头又追加回来，本帧就多出一条空响应。
+			ctx.suppress = true
+			ctx.discard()
+			return
+		}
 	}
 	ctx.finishHeader()
 

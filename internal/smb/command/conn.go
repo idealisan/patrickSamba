@@ -80,6 +80,12 @@ type Conn struct {
 	// breakSender 由 internal/server 注入，用于异步推送 oplock/lease break（见 oplock.go）。
 	breakSender BreakSender
 
+	// asyncSink 由 internal/server 注入，用于异步补发挂起请求的响应（见 async.go）。
+	asyncSink AsyncSink
+
+	// async 是本连接的未决请求表（MS-SMB2 §3.3.4.4 / §3.3.5.16）。
+	async asyncTable
+
 	// aapl 是 Apple SMB2 扩展的协商结果（见 aapl.go）。
 	// 由 CREATE 上的 AAPL create context 置位，QUERY_DIRECTORY 读取。
 	aapl aaplState
@@ -196,6 +202,30 @@ func (c *Conn) Close() {
 
 	for _, s := range sessions {
 		s.Close()
+	}
+
+	// 未决请求必须在 c.mu 之外拆除，理由见 abortPending 的注释。
+	c.abortPending()
+}
+
+// abortPending 让本连接上全部挂起的请求立即停止等待。
+//
+// **必须在 c.mu 之外调用**：AsyncRequest.Complete 的调用链是
+// 「t.mu（摘表）→ c.mu.RLock（取 asyncSink）」，若在 c.mu 内取 t.mu 就凑齐了
+// 一个加锁顺序反转（c.mu→t.mu 与 t.mu→c.mu 同时存在）。
+//
+// 不逐条补发响应：连接都要关了，补发必然失败；等待方只需要一个明确的
+// "别等了"信号来释放 goroutine 与它持有的资源（例如已授予的字节范围锁）。
+func (c *Conn) abortPending() {
+	for _, r := range c.async.close() {
+		r.mu.Lock()
+		fn := r.onAbort
+		r.onAbort = nil
+		r.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
+		close(r.abort)
 	}
 }
 

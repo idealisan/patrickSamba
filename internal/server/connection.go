@@ -83,9 +83,12 @@ func newConnection(s *Server, nc net.Conn) *Connection {
 		credits: NewCredits(DefaultMaxCredits),
 	}
 
-	// 给协议层一条主动向客户端推送 oplock/lease break 的通路。
-	// 必须在读循环启动**之前**注入。
+	// 给协议层两条"从别的 goroutine 往这条连接写东西"的通路。
+	// 都必须读循环启动**之前**注入。
 	c.state.SetBreakSender(breakSender{c: c})
+	// 异步响应补发通路：CHANGE_NOTIFY 与阻塞 LOCK 靠它把挂起的请求
+	// 稍后补上最终响应（见 command/async.go）。
+	c.state.SetAsyncSink(asyncSender{c: c})
 
 	// 认证完成前施加一个短得多的**绝对**期限：未认证连接同样占着
 	// MaxConnections 槽位，若也享受 15 分钟的空闲超时，几百条一言不发的
