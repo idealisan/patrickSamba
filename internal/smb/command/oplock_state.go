@@ -66,6 +66,12 @@ type breakWait struct {
 	acked bool
 	// epoch 是租约的版本号，确认报文必须带回同一个值（MS-SMB2 §2.2.25.2）。
 	epoch uint16
+	// sent 表示 break 通知是否已经发出过。
+	//
+	// beginBreak 对"已经在等的条目"返回**同一个** wait，多个等待方会拿到它。
+	// 没有这个标记的话，第二个等待方会给同一个持有者再发一遍 break ——
+	// 客户端对重复 break 的处置各家不一，最坏会直接断连。
+	sent bool
 }
 
 // ack 记录一次确认并唤醒等待者。重复确认无害。
@@ -128,46 +134,47 @@ type oplockEntry struct {
 	breaking *breakWait
 }
 
-// cachingData 报告本条目是否许可客户端**缓存数据**（而不是只缓存句柄）。
-//
-// 这是"能不能不等确认就放行"的分界线：只缓存句柄（H）的条目被强行打破
-// 也不会造成数据不一致，缓存读/写的条目必须等确认。
-func (e *oplockEntry) cachingData() bool {
-	if e.lease {
-		return e.leaseState&(wire.LeaseReadCaching|wire.LeaseWriteCaching) != 0
-	}
-	return e.level != wire.OplockLevelNone && e.level != wire.OplockLevelII
-}
-
 // oplockTable 是一个共享上的 oplock/lease 表。零值可用。
 //
 // 挂在 Share 上（与 locks / shareModes 同理）：缓存许可的意义就是跨会话。
 type oplockTable struct {
 	mu sync.Mutex
-	// m 按文件身份索引。
-	m map[oplockKey]*oplockEntry
+	// m 按文件身份索引，**值是列表**。
+	//
+	// 为什么是列表而不是单条目：标准做法允许**多个并发只读者各持一份读缓存**
+	// （Level II oplock / R lease）。只留一条的话，第二个只读客户端什么也
+	// 拿不到 —— 正确性没问题，但白白丢掉一份收益，而且与 Samba/Windows 的
+	// 行为不一致。
+	//
+	// 不变式：列表里**至多一个**条目在缓存写（cachesWrite）。缓存写必须与
+	// 所有其他打开者互斥，两个并存的写缓存者会各自写脏对方的数据。
+	m map[oplockKey][]*oplockEntry
 	// leases 按 LeaseKey 索引，用于把客户端回的 lease break 确认定位到条目。
 	leases map[[16]byte]*oplockEntry
 	// breaking 是当前进行中的 break 数（受 maxOplockBreaksPerShare 约束）。
 	breaking int
 }
 
-// lookup 按文件身份查找。调用方必须已持有 t.mu。
-func (t *oplockTable) lookup(k oplockKey) *oplockEntry {
-	return t.m[k]
+// lookupAll 按文件身份取出全部条目（拷贝一份，调用方可安全持有）。
+func (t *oplockTable) lookupAll(k oplockKey) []*oplockEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.m[k]) == 0 {
+		return nil
+	}
+	out := make([]*oplockEntry, len(t.m[k]))
+	copy(out, t.m[k])
+	return out
 }
 
-// grant 登记一次授予。
-//
-// 同一对象上只允许一个条目：oplock/lease 的语义就是"排他地允许缓存"，
-// 两个条目并存意味着两套互相不知道对方的缓存。
+// grant 登记一次授予，追加到该对象的条目列表。
 func (t *oplockTable) grant(k oplockKey, e *oplockEntry) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m == nil {
-		t.m = make(map[oplockKey]*oplockEntry)
+		t.m = make(map[oplockKey][]*oplockEntry)
 	}
-	t.m[k] = e
+	t.m[k] = append(t.m[k], e)
 	if e.lease {
 		if t.leases == nil {
 			t.leases = make(map[[16]byte]*oplockEntry)
@@ -179,21 +186,54 @@ func (t *oplockTable) grant(k oplockKey, e *oplockEntry) {
 // release 释放某个句柄持有的全部条目（句柄关闭时调用）。幂等。
 func (t *oplockTable) release(o *Open) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	for k, e := range t.m {
-		if e.owner != o {
-			continue
+	var orphans []*breakWait
+	for k, list := range t.m {
+		kept := make([]*oplockEntry, 0, len(list))
+		for _, e := range list {
+			if e.owner != o {
+				kept = append(kept, e)
+				continue
+			}
+			if e.lease {
+				delete(t.leases, e.leaseKey)
+			}
+			if e.breaking != nil {
+				// 句柄都关了，不可能再有确认 —— 唤醒等待者，
+				// 别让它干等到超时。finish 在锁外调（它会关 channel，
+				// 唤醒的 goroutine 可能立刻回头取 t.mu）。
+				t.breaking--
+				orphans = append(orphans, e.breaking)
+				e.breaking = nil
+			}
 		}
-		delete(t.m, k)
-		if e.lease {
-			delete(t.leases, e.leaseKey)
-		}
-		if e.breaking != nil {
-			// 句柄都关了，不可能再有确认 —— 唤醒等待者，别让它干等到超时。
-			t.breaking--
-			e.breaking.finish()
+		if len(kept) == 0 {
+			delete(t.m, k)
+		} else {
+			t.m[k] = kept
 		}
 	}
+	t.mu.Unlock()
+
+	for _, w := range orphans {
+		w.finish()
+	}
+}
+
+// removeEntry 从某个对象的条目列表里摘掉一条。调用方必须已持有 t.mu。
+func (t *oplockTable) removeEntry(k oplockKey, e *oplockEntry) {
+	list := t.m[k]
+	for i, cur := range list {
+		if cur != e {
+			continue
+		}
+		list = append(list[:i], list[i+1:]...)
+		break
+	}
+	if len(list) == 0 {
+		delete(t.m, k)
+		return
+	}
+	t.m[k] = list
 }
 
 // ackLease 处理客户端回的 lease break 确认（MS-SMB2 §2.2.25.2）。
@@ -209,7 +249,9 @@ func (t *oplockTable) ackLease(key [16]byte, state wire.LeaseState) bool {
 	// 它比服务端要求的更低也合法（例如直接放弃全部缓存）。
 	e.leaseState = state
 	if state == wire.LeaseNone {
-		delete(t.m, oplockKeyOf(e))
+		// 降到"什么都不缓存"= 不再持有，整条摘掉（H 位单独留着仍是有效授予，
+		// 只有全 0 才代表放弃）。
+		t.removeEntry(oplockKeyOf(e), e)
 		delete(t.leases, key)
 	}
 	t.breaking--
@@ -230,9 +272,14 @@ func (t *oplockTable) ackOplock(o *Open, level wire.OplockLevel) bool {
 		hit *oplockEntry
 		key oplockKey
 	)
-	for k, e := range t.m {
-		if e.owner == o && !e.lease {
-			hit, key = e, k
+	for k, list := range t.m {
+		for _, e := range list {
+			if e.owner == o && !e.lease {
+				hit, key = e, k
+				break
+			}
+		}
+		if hit != nil {
 			break
 		}
 	}
@@ -243,7 +290,7 @@ func (t *oplockTable) ackOplock(o *Open, level wire.OplockLevel) bool {
 	w := hit.breaking
 	hit.level = level
 	if level == wire.OplockLevelNone {
-		delete(t.m, key)
+		t.removeEntry(key, hit)
 	}
 	t.breaking--
 	hit.breaking = nil
@@ -264,55 +311,66 @@ func oplockKeyOf(e *oplockEntry) oplockKey {
 	return oplockKey{fileID: e.owner.oplockFileID, stream: e.owner.Stream}
 }
 
-// conflict 判定既有条目与一次新的打开是否冲突，冲突时给出"应降到"的级别/状态。
+// cachesWrite 报告本条目是否许可客户端**缓存写**。
 //
-// 判定口径（Samba source3/smbd/oplock.c: attempt_oplock_break /
-// smbd_smb2_create 的 break 决策）：
-//
-//	既有 EXCLUSIVE / BATCH / W 位：别人**读写都**会脏 → 写打开降到 NONE，
-//	  只读打开降到 II（读缓存仍然有效 —— 没人改数据）
-//	既有 II / R 位：别人只读没问题；别人要写 → 降到 NONE，否则会读到旧内容
-//	既有 H 位：只影响句柄缓存，数据共享不受影响，不需要打破
-//
-// 同一**会话**（持有者自己再开一次）永不冲突 —— 客户端不会打破自己的缓存，
-// 它知道自己有几只手在动这个文件。跨会话才是需要协调的情形。
-//
-// 口径选会话而不是句柄：一次会话内的多个句柄共享同一份客户端缓存，
-// 打破其中一个等于打破全部，没有意义。
-func (e *oplockEntry) conflictsWith(sess *Session, write bool) (wire.OplockLevel, wire.LeaseState, bool) {
-	if e.owner != nil && sess != nil && e.owner.Session == sess {
-		return 0, 0, false
-	}
+// 缓存写意味着客户端可以把写攒在本地不落盘 —— 只要还有一个写缓存者存在，
+// 其他任何访问者看到的都可能是过期数据。因此它是**排他**的：
+// 表的不变式是「同一对象至多一个写缓存者」。
+func (e *oplockEntry) cachesWrite() bool {
 	if e.lease {
-		has := e.leaseState
-		switch {
-		case has&wire.LeaseWriteCaching != 0:
-			// 写缓存：别人读写都必须先让它落盘。
-			keep := wire.LeaseHandleCaching
-			if !write {
-				// 对方只读：数据不会被改，读缓存可以留着。
-				keep |= wire.LeaseReadCaching
-			}
-			return 0, has & keep, true
-		case has&wire.LeaseReadCaching != 0 && write:
-			// 读缓存 + 对方要写：不打破会读到旧内容。
-			return 0, has &^ wire.LeaseReadCaching, true
-		}
-		return 0, 0, false
+		return e.leaseState&wire.LeaseWriteCaching != 0
 	}
+	return e.level == wire.OplockLevelExclusive || e.level == wire.OplockLevelBatch
+}
 
-	switch e.level {
-	case wire.OplockLevelExclusive, wire.OplockLevelBatch:
-		if write {
-			return wire.OplockLevelNone, 0, true
-		}
-		return wire.OplockLevelII, 0, true
-	case wire.OplockLevelII:
-		if write {
-			return wire.OplockLevelNone, 0, true
-		}
+// cachesRead 报告本条目是否许可客户端**缓存读**。
+//
+// 缓存读（Level II / R 位）**不是排他的**：多个并发只读者可以各持一份，
+// 因为它们谁也不会改数据。这正是标准做法与"每文件只留一条条目"的差别所在。
+func (e *oplockEntry) cachesRead() bool {
+	if e.lease {
+		return e.leaseState&wire.LeaseReadCaching != 0
 	}
-	return 0, 0, false
+	// EXCLUSIVE / BATCH 同时缓存读和写。
+	return e.level == wire.OplockLevelII ||
+		e.level == wire.OplockLevelExclusive ||
+		e.level == wire.OplockLevelBatch
+}
+
+// cachingData 报告本条目是否缓存了**数据**（读或写任一）。
+//
+// 只缓存句柄（H 位）的条目返回 false —— 它不影响数据一致性，
+// 因此永远不需要被打破。
+func (e *oplockEntry) cachingData() bool {
+	return e.cachesRead() || e.cachesWrite()
+}
+
+// breakTarget 给出一次 break 应当要求本条目降到哪一级。
+//
+// 判定（Samba source3/smbd/oplock.c 与 smbd_smb2_create 的 break 决策）：
+//
+//	newOpenerWrites = true  → 降到什么都不缓存。
+//	  对方要写，本方的**读**缓存也会变成旧内容，所以 R 位必须一起去掉。
+//	newOpenerWrites = false → 降到只读缓存。
+//	  对方只读，数据不会被改，本方的读缓存仍然有效，只需交出写缓存。
+//
+// H（句柄缓存）两种情形都保留：它只影响"要不要重新打开"，与数据无关。
+func (e *oplockEntry) breakTarget(newOpenerWrites bool) (wire.OplockLevel, wire.LeaseState) {
+	if e.lease {
+		if newOpenerWrites {
+			return 0, e.leaseState & wire.LeaseHandleCaching
+		}
+		// 保留 R 与 H，去掉 W。
+		return 0, e.leaseState &^ wire.LeaseWriteCaching
+	}
+	if newOpenerWrites {
+		return wire.OplockLevelNone, 0
+	}
+	// 交出写缓存后至少还能留着 Level II（读缓存）。
+	if e.level == wire.OplockLevelII {
+		return wire.OplockLevelII, 0
+	}
+	return wire.OplockLevelII, 0
 }
 
 // beginBreak 登记一次进行中的 break 并构造其等待句柄。
@@ -356,13 +414,13 @@ func (t *oplockTable) cancelBreak(e *oplockEntry) {
 	if e.lease {
 		e.leaseState &= w.wantState
 		if e.leaseState == wire.LeaseNone {
-			delete(t.m, oplockKeyOf(e))
+			t.removeEntry(oplockKeyOf(e), e)
 			delete(t.leases, e.leaseKey)
 		}
 	} else {
 		e.level = w.wantLevel
 		if e.level == wire.OplockLevelNone {
-			delete(t.m, oplockKeyOf(e))
+			t.removeEntry(oplockKeyOf(e), e)
 		}
 	}
 	t.mu.Unlock()

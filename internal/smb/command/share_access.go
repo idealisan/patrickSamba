@@ -91,6 +91,25 @@ func (t *shareModeTable) otherOpeners(key shareModeKey) bool {
 	return len(t.m[key]) > 0
 }
 
+// hasWriteOpener 报告该对象上是否有别的句柄带**写权限**。
+//
+// 供 oplock/lease 授予判定用：别人握着写权限时，我们再缓存读就会被
+// 悄无声息地写脏 —— 而 SMB 的 break 只在**打开**时触发，不在写入时触发，
+// 所以判据必须放在授予这一刻，不能指望"回头再打破"。
+//
+// 判据只看**权限**（access），不看有没有真的在读：持有写权限的句柄随时
+// 可能写，按"会写"处理是唯一安全的口径。
+func (t *shareModeTable) hasWriteOpener(key shareModeKey) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, e := range t.m[key] {
+		if e.access&writeAccessMask != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // maskConflict 判定一个维度上的双向冲突（MS-FSA §2.1.5.1.2）。
 //
 // accessBits 是该维度的访问位集合，shareBit 是与之配对的共享位：

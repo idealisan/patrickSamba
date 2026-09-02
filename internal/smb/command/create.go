@@ -170,7 +170,9 @@ func deferCreateForOplockBreak(ctx *Context, req *wire.CreateRequest, fs vfs.Fil
 		//
 		// cancelBreak 会按"已打破"把条目降到要求的状态，于是下一次打开不再
 		// 冲突，客户端重试即可成功。
-		pending.share.oplocks.cancelBreak(pending.entry)
+		for _, e := range pending.victims {
+			pending.share.oplocks.cancelBreak(e)
+		}
 		return status.SharingViolation
 	}
 	go func() {
