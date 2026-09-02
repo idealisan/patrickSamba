@@ -148,16 +148,24 @@ type fakeBreakSender struct {
 	lastTarget BreakTarget
 	oplocks    int
 	leases     int
+
+	// lastOplock / lastLease 记下最近一次的报文体。
+	// 授予路径（oplock_grant_test.go）要断言"要求降到哪个级别"，
+	// 只计数不够 —— 计数看不出降级方向给错了。
+	lastOplock wire.OplockBreak
+	lastLease  wire.LeaseBreakNotification
 }
 
-func (f *fakeBreakSender) SendOplockBreak(t BreakTarget, _ wire.OplockBreak) error {
+func (f *fakeBreakSender) SendOplockBreak(t BreakTarget, b wire.OplockBreak) error {
 	f.lastTarget = t
+	f.lastOplock = b
 	f.oplocks++
 	return nil
 }
 
-func (f *fakeBreakSender) SendLeaseBreak(t BreakTarget, _ wire.LeaseBreakNotification) error {
+func (f *fakeBreakSender) SendLeaseBreak(t BreakTarget, b wire.LeaseBreakNotification) error {
 	f.lastTarget = t
+	f.lastLease = b
 	f.leases++
 	return nil
 }

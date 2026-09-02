@@ -82,11 +82,6 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 	if !ctx.Conn.Settings.Oplocks {
 		return oplockPlan{}, nil, status.Success
 	}
-	// 见上方第 3 条：非末条不授予。
-	if ctx.Header.NextCommand != 0 {
-		return oplockPlan{}, nil, status.Success
-	}
-
 	// 客户端请求的租约（没有就是 nil，不是错误 —— 大多数请求都没有）。
 	wantLease, err := wire.FindLeaseContext(req.Contexts)
 	if err != nil {
@@ -103,7 +98,7 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 	if serr != nil {
 		// 目标不存在：不可能有人持有它的缓存许可，也不可能有别的打开者。
 		// 新建文件是 oplock 收益最大的场景之一（刚创建、马上写）。
-		return grantOplock(req, wantLease), nil, status.Success
+		return grantIfDeferrable(ctx, req, wantLease), nil, status.Success
 	}
 
 	key := oplockKey{fileID: attr.FileID, stream: stream}
@@ -136,7 +131,23 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 	if share.shareModes.otherOpeners(shareModeKey{fileID: attr.FileID, stream: stream}) {
 		return oplockPlan{}, nil, status.Success
 	}
-	return grantOplock(req, wantLease), nil, status.Success
+	return grantIfDeferrable(ctx, req, wantLease), nil, status.Success
+}
+
+// grantIfDeferrable 决定授予，但对**复合链中间**的 CREATE 一律不授予。
+//
+// 它需要挂起通路才能在将来冲突时等 break 确认，而异步响应是单发的，
+// 链中间挂起等于把一条复合响应链拆成两帧（见 Context.Defer 的「末条限制」）。
+// 不授予就没有缓存许可，也就永远不需要由它触发 break —— 从根上避开。
+//
+// ⚠️ 这条判断**只能**放在"是否授予"这一步，绝不能提前到 planOplock 开头：
+// 那样会让复合链中间的 CREATE 连带跳过 break 检查，
+// 直接放行一次会读到脏数据的访问。
+func grantIfDeferrable(ctx *Context, req *wire.CreateRequest, wantLease *wire.LeaseContext) oplockPlan {
+	if ctx.Header.NextCommand != 0 {
+		return oplockPlan{}
+	}
+	return grantOplock(req, wantLease)
 }
 
 // grantOplock 按客户端的请求决定授予什么。
@@ -171,11 +182,23 @@ func grantOplock(req *wire.CreateRequest, wantLease *wire.LeaseContext) oplockPl
 // 与读循环的响应写出互斥。没有注入时（单元测试）什么都不做 ——
 // 调用方随后会等超时并按"已打破"推进，行为仍然正确，只是慢。
 func sendOplockBreak(ctx *Context, e *oplockEntry, level wire.OplockLevel, state wire.LeaseState) {
-	sender := ctx.Conn.BreakSender()
-	if sender == nil || e.owner == nil {
+	if e.owner == nil {
 		return
 	}
-	target := BreakTarget{SessionID: 0, TreeID: 0}
+	// ⚠️ 必须用**持有者**那一条连接的 BreakSender，不是 ctx.Conn。
+	//
+	// ctx.Conn 是**发起新打开的那个客户端**的连接 —— 把 break 通知写进它，
+	// 通知会发错人：该让出缓存的是持有者，而发起者此刻正等着被推迟的响应。
+	// 这个错误不会报错，只会表现为"永远等不到确认、每次都熬到超时"，
+	// 现象是第二个客户端的打开莫名地慢 30 秒。
+	var sender BreakSender
+	if e.owner.Session != nil && e.owner.Session.Conn != nil {
+		sender = e.owner.Session.Conn.BreakSender()
+	}
+	if sender == nil {
+		return
+	}
+	target := BreakTarget{}
 	if e.owner.Session != nil {
 		target.SessionID = e.owner.Session.ID
 	}
