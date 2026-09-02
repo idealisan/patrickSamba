@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/mdns"
 	"github.com/finalappstore/stupidsamba/internal/server"
 )
 
@@ -140,46 +139,20 @@ func run(configPath string, checkOnly bool) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(context.Background()) }()
 
-	responder := startMDNS(cfg, log)
+	discoveries := startDiscovery(cfg, log)
 
 	select {
 	case sig := <-sigCh:
 		log.Info("收到退出信号，开始优雅关闭", "signal", sig.String())
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, server.ErrServerClosed) {
-			shutdown(responder, srv, log, sigCh)
+			shutdown(discoveries, srv, log, sigCh)
 			return err
 		}
 	}
 
-	shutdown(responder, srv, log, sigCh)
+	shutdown(discoveries, srv, log, sigCh)
 	return nil
-}
-
-// startMDNS 按配置启动 mDNS responder，未启用或启动失败时返回 nil。
-//
-// mDNS 只影响「能不能被自动发现」，起不来不该拖垮文件共享本身 ——
-// 客户端仍可用 IP 直连，所以这里只告警不返回错误。
-func startMDNS(cfg *config.Config, log *slog.Logger) *mdns.Responder {
-	if !cfg.MDNS.Enabled {
-		log.Info("mDNS 未启用（mdns.enabled=false），服务不会被自动发现")
-		return nil
-	}
-
-	r, err := mdns.New(cfg.MDNS, cfg.Listen.Port, cfg.Shares)
-	if err != nil {
-		log.Warn("mDNS 构造失败，跳过服务发现广播", "err", err)
-		return nil
-	}
-	r.SetLogger(log.With("component", "mdns"))
-
-	// 刻意传 Background 而不是信号 ctx：ctx 取消会让 responder 直接停摆
-	// 而**不发 goodbye**，我们要的是退出时先撤回名字，因此统一由 Stop 收尾。
-	if err := r.Start(context.Background()); err != nil {
-		log.Warn("mDNS 启动失败，服务仍可通过 IP/主机名访问", "err", err)
-		return nil
-	}
-	return r
 }
 
 // shutdown 优雅关闭：停止 accept → mDNS goodbye → 等待在途请求 → 强制收尾。
@@ -187,23 +160,22 @@ func startMDNS(cfg *config.Config, log *slog.Logger) *mdns.Responder {
 // 三段顺序都有理由：
 //   - 先停 accept：关闭期间不该再放新客户端进来。srv.Shutdown 的第一件事
 //     就是关监听套接字，所以先把它挂到 goroutine 上跑起来。
-//   - 再发 goodbye（TTL=0）：把自己从客户端的服务列表里摘掉。晚于关监听会
-//     留下"Finder 里还看得见但点进去连不上"的窗口，早于关监听则等于还在
-//     广播一个正在退场的服务。
+//   - 再停服务发现（mDNS goodbye TTL=0、NetBIOS 与 WS-Discovery 停止应答）：
+//     把自己从客户端的服务列表里摘掉。晚于关监听会留下"Finder 里还看得见
+//     但点进去连不上"的窗口，早于关监听则等于还在广播一个正在退场的服务。
 //   - 最后等在途请求自然结束，超时（或再收到一次信号）才强制断开。
 //
 // force 用于接收第二次退出信号：卡住的客户端不该让 Ctrl-C 失效。
-func shutdown(r *mdns.Responder, srv *server.Server, log *slog.Logger, force <-chan os.Signal) {
+func shutdown(discoveries []discovery, srv *server.Server, log *slog.Logger, force <-chan os.Signal) {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() { done <- srv.Shutdown(ctx) }()
 
-	// r.Stop 会发两轮 goodbye（各隔 250ms），期间 accept 已经停了。
-	if r != nil {
-		r.Stop()
-	}
+	// mDNS 的 Stop 会发两轮 goodbye（各隔 250ms），期间 accept 已经停了。
+	// 三个发现组件用同一套顺序收尾：都先撤回宣告，再等在途请求。
+	stopDiscovery(discoveries)
 
 	go func() {
 		select {

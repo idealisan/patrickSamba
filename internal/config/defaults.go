@@ -82,6 +82,27 @@ func ApplyDefaults(c *Config) {
 		c.MDNS.Apple.Enabled = &t
 	}
 
+	// ---- WS-Discovery / NetBIOS ----
+	//
+	// 两者都**默认关闭**（Enabled 是 bool，零值 false），理由见 config.WSDiscovery
+	// 与 config.NetBIOS 的字段注释：都没有 Windows 真机验收，而且要占真实端口。
+	// 这里只补派生字段，不替用户打开开关。
+
+	// NetBIOS 名默认沿用 SMB 服务器名：两个名字对不上会让 Windows 用户困惑
+	// （「网络」里看到的名字和 \\NAME 用的名字不是一个）。
+	if c.NetBIOS.Name == "" {
+		c.NetBIOS.Name = c.Server.Name
+	}
+	c.NetBIOS.Name = strings.ToUpper(c.NetBIOS.Name)
+	// 工作组默认沿用 SMB 的工作组/域名，同理。
+	if c.NetBIOS.Workgroup == "" {
+		c.NetBIOS.Workgroup = c.Server.Domain
+	}
+	c.NetBIOS.Workgroup = strings.ToUpper(c.NetBIOS.Workgroup)
+	if c.NetBIOS.Comment == "" {
+		c.NetBIOS.Comment = DefaultNetBIOSComment
+	}
+
 	if c.Log.Level == "" {
 		c.Log.Level = DefaultLogLevel
 	}

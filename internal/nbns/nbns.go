@@ -244,38 +244,65 @@ func (r *Responder) readLoop(ctx context.Context) {
 func (r *Responder) handleQuery(b []byte, src *net.UDPAddr) {
 	q := parseQuery(b)
 	if q == nil {
-		// 137 端口上什么都可能发过来，解析不了是常态。
+		// 137 端口上什么都可能发过来，解析不了是常态，不记日志。
 		return
 	}
+	if r.replyFor(q, src) {
+		return
+	}
+	// 走到这里说明这条查询我们不打算应答。留一条 debug：排查"客户端查了
+	// 但没答"这类问题时，这是唯一的线索 —— 得能分清是"不该答"还是
+	// "该答却漏了"。
+	r.log.Debug("忽略 NBNS 查询", "name", q.name.String(),
+		"qtype", q.qtype, "from", src)
+}
 
+// replyFor 尝试应答一条查询，返回是否应答了。
+//
+// 应答对象（RFC 1002 §4.2.2）：
+//   - qtype = NBSTAT 且名字属于本节点**或是通配符** → 节点状态应答
+//   - 匹配本节点唯一名 → 肯定应答（NB_FLAGS 唯一）
+//   - 匹配组名 → 肯定应答（NB_FLAGS 置 G）
+//   - 其余一律**不答**。NetBIOS 查询是广播的，乱答会污染别人的名字解析
+//     （尤其不能对不属于自己的名字做"好心"的转发应答）。
+func (r *Responder) replyFor(q *nameQuery, src *net.UDPAddr) bool {
 	switch q.qtype {
 	case qTypeNBStat:
-		if !r.owns(q.name) {
-			return
+		// 节点状态查询（`nbtstat -A` / `nmblookup -A`）通常把名字写成通配符
+		// `*`，查的不是"某个名字在不在"，而是"这台机器上都有哪些名字"。
+		// 只在我们持有该名字时才应答，会让这一路**永远不答** ——
+		// 实测 nmblookup -A 得到的就是 "No reply"。
+		if !r.owns(q.name) && !q.name.isWildcard() {
+			return false
 		}
 		all := append(append([]Name{}, r.names...), r.groupNames...)
 		resp := buildNodeStatusResponse(q, all)
 		if resp == nil {
-			return
+			return false
 		}
 		r.reply(resp, src)
 		r.log.Debug("已应答节点状态查询", "name", q.name.String(), "to", src)
+		return true
 
 	case qTypeNB:
 		if r.ownsUnique(q.name) {
 			if resp := buildNameResponse(q, r.addressFor(src), false); resp != nil {
 				r.reply(resp, src)
-				r.log.Debug("已应答名字查询", "name", q.name.String(), "ip", r.addressFor(src), "to", src)
+				r.log.Debug("已应答名字查询", "name", q.name.String(),
+					"ip", r.addressFor(src), "to", src)
+				return true
 			}
-			return
+			return false
 		}
 		if r.ownsGroup(q.name) {
 			if resp := buildNameResponse(q, r.addressFor(src), true); resp != nil {
 				r.reply(resp, src)
 				r.log.Debug("已应答组名查询", "name", q.name.String(), "to", src)
+				return true
 			}
 		}
 	}
+	return false
 }
 
 // reply 把应答写回查询方。

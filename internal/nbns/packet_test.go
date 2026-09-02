@@ -89,6 +89,43 @@ func TestWireNameRoundTrip(t *testing.T) {
 	}
 }
 
+// TestWildcardPaddedWithNUL 钉一个真实踩过的坑。
+//
+// Samba 的 `nmblookup -A`（节点状态查询）发来的通配符名字是
+// `*<0x00>×14` 而不是 `*<空格>×14`。只按空格 trim 的话，名字会解析成
+// "*\x00\x00…"，isWildcard 判定失配，节点状态查询永远不答 ——
+// 客户端侧看到的是 "No reply"，而服务端日志一切正常。
+func TestWildcardPaddedWithNUL(t *testing.T) {
+	raw := Name{Label: "*", Suffix: SuffixWorkstation}.Bytes()
+	// 手工把填充换成 NUL，复现 nmblookup 的实际写法。
+	for i := 1; i < NameSize-1; i++ {
+		raw[i] = 0x00
+	}
+	got, ok := parseWireName(append(append([]byte{0x20}, encodeLevel1(raw)...), 0x00))
+	if !ok {
+		t.Fatal("解析失败")
+	}
+	if !got.isWildcard() {
+		t.Fatalf("NUL 填充的通配符名字应被识别为通配符，实际 %q", got.Label)
+	}
+	if got.Label != "*" {
+		t.Fatalf("填充应被去掉，实际标签 %q", got.Label)
+	}
+}
+
+// TestIsWildcardRejectsOrdinaryName：普通名字不能被当成通配符，
+// 否则任何节点状态查询都会被当成"查全部"而泄露名字表。
+func TestIsWildcardRejectsOrdinaryName(t *testing.T) {
+	// 复合字面量在 if 条件里必须整体加括号，否则 `{` 会被解析成块起始。
+	// （Go 的这个语法坑只在 if/for/switch 的条件位置出现。）
+	if (Name{Label: "MYHOST", Suffix: 0x00}).isWildcard() {
+		t.Fatal("普通名字不应被当成通配符")
+	}
+	if (Name{Label: "*ERVER", Suffix: 0x00}).isWildcard() {
+		t.Fatal("含 * 但不是纯通配符的名字不应被当成通配符")
+	}
+}
+
 func TestParseWireNameRejectsBadLengthPrefix(t *testing.T) {
 	w := Name{Label: "SRV", Suffix: SuffixFileServer}.wire()
 	w[0] = 0x10

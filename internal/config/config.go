@@ -10,7 +10,11 @@ type Config struct {
 	Auth   Auth    `yaml:"auth"`
 	Shares []Share `yaml:"shares"`
 	MDNS   MDNS    `yaml:"mdns"`
-	Log    Log     `yaml:"log"`
+	// WSDiscovery 是 WS-Discovery（Windows「网络」自动发现）。
+	WSDiscovery WSDiscovery `yaml:"ws_discovery"`
+	// NetBIOS 是 NetBIOS 名称服务（`\\NAME` 解析与网上邻居浏览）。
+	NetBIOS NetBIOS `yaml:"netbios"`
+	Log     Log     `yaml:"log"`
 
 	// FilesystemMode 决定 OS 能力（扩展属性、稀疏文件、命名流、稳定 FileID、
 	// 创建时间、DOS 属性）走原生实现还是本项目自带实现（AGENTS.md §1.2 C9）。
@@ -212,6 +216,60 @@ func (a AppleMDNS) EnabledOn() bool {
 	return *a.Enabled
 }
 
+// WSDiscovery 是 WS-Discovery 服务发现（让 Windows「网络」发现本机）。
+//
+// 与 mDNS 是**并列的两套**协议，覆盖不同的客户端：
+//
+//	macOS / Linux  →  mDNS（Bonjour）
+//	Windows        →  WS-Discovery + NetBIOS
+//
+// Windows 10 之后也能听 mDNS，但「网络」列表主要还是靠 WS-Discovery，
+// 所以想让 Windows 用户点开就能看见，这一段得开。
+//
+// 默认**关闭**：本特性没有 Windows 真机验收（开发容器里没有 Windows），
+// 而 3702/5357 是要占住的真实端口。想试就显式打开。
+type WSDiscovery struct {
+	// Enabled 开关，默认 false。
+	Enabled bool `yaml:"enabled"`
+	// Interfaces 限定网卡名，留空表示所有支持组播的网卡。
+	Interfaces []string `yaml:"interfaces"`
+	// UUID 是设备标识。留空则按「服务器名 + 工作组」派生一个**稳定**的
+	// UUIDv5 —— 跨重启不变，Windows 网络列表里的条目才不会每次重启都攒
+	// 一个新的同名僵尸。
+	//
+	// 需要显式钉死的主要场景：同一台机器上跑多个实例（派生值会撞）。
+	UUID string `yaml:"uuid"`
+	// MetadataPort 是 WS-Transfer Get 的 HTTP 端口，默认 5357。
+	// 负数表示不启用元数据端点：主机仍能被列出来，但点开取不到详情。
+	MetadataPort int `yaml:"metadata_port"`
+}
+
+// NetBIOS 是 NetBIOS 名称服务（`\\NAME` 解析与网上邻居浏览）。
+//
+// 与 WS-Discovery 互补：WS-Discovery 让 Windows 看见"有这台设备"，
+// NetBIOS 让 `\\NAME` 这个名字**能被解析**，两者缺一都会在 Windows 上
+// 表现为"看得见图标但打不开"或"打得开但搜不到"。
+//
+// 默认**关闭**，且有一个额外门槛：137/138 是**特权端口**，非 root 时
+// 绑不上（处理办法与 SMB 445 完全一样，见 README「已知限制与说明」）。
+type NetBIOS struct {
+	// Enabled 开关，默认 false。
+	Enabled bool `yaml:"enabled"`
+	// Interfaces 限定网卡名，留空表示所有支持广播的网卡。
+	Interfaces []string `yaml:"interfaces"`
+	// Name 是本机 NetBIOS 名，留空则用 Server.Name（自动截断到 15 字节）。
+	Name string `yaml:"name"`
+	// Workgroup 是工作组名，留空用 Server.Domain。
+	Workgroup string `yaml:"workgroup"`
+	// Comment 是网上邻居里显示的说明文字。
+	Comment string `yaml:"comment"`
+	// AnnounceIntervalSeconds 是主机宣告间隔（秒），默认 240（4 分钟）。
+	//
+	// 宣告是"我还在"的保活。太稀疏会让刚开机的客户端等太久才看见我们，
+	// 太密则白白刷局域网。
+	AnnounceIntervalSeconds int `yaml:"announce_interval_seconds"`
+}
+
 // Log 是日志设置。
 type Log struct {
 	// Level 取值 debug/info/warn/error。
@@ -234,6 +292,11 @@ const (
 	// auto = 与历史版本行为完全一致（只按方言默认值签名，不协商 GMAC）。
 	DefaultSigningAlgorithm = "auto"
 	DefaultAppleModel       = "MacSamba"
+	// DefaultNetBIOSComment 是网上邻居里默认显示的说明文字。
+	//
+	// 不写死版本号：注释里带版本会让升级后显示与实况不符，
+	// 而这是用户第一眼看到的自我介绍，宁可笼统也不要失真。
+	DefaultNetBIOSComment = "stupidSamba file server"
 	// DefaultAppleMDNS 是 MDNS.Apple.Enabled 的默认值：默认开启 Apple 扩展记录。
 	// 理由见 AppleMDNS.Enabled 字段注释。与 DefaultFilesystemMode 同理保持 const。
 	DefaultAppleMDNS = true
