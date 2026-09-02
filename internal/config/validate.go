@@ -531,7 +531,7 @@ func validateAuth(c *Config, errs *ValidationErrors) {
 }
 
 func validateMDNS(c *Config, errs *ValidationErrors) {
-	if !c.MDNS.Enabled {
+	if !c.MDNS.EnabledOn() {
 		return
 	}
 

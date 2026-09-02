@@ -61,18 +61,26 @@ func startDiscovery(cfg *config.Config, log *slog.Logger) []discovery {
 	add := func(name string, newFn func() (discovery, error)) {
 		d, err := newFn()
 		if err != nil {
-			if errors.Is(err, errDiscoveryDisabled) {
-				log.Info("服务发现组件未启用", "component", name)
+			if errors.Is(err, errDiscoveryDisabled) && !errors.Is(err, wsd.ErrDisabled) &&
+				!errors.Is(err, nbns.ErrDisabled) {
+				log.Info("服务发现组件未启用（配置里显式关闭）", "component", name)
 				return
 			}
-			log.Warn("服务发现组件启动失败，该途径的自动发现不可用",
+			// 「想开但开不起来」：按项目原则**不崩溃**，记一条 WARN 后
+			// 继续跑其他功能。常见的开不起来：端口被占用、非 root 绑不上
+			// 特权端口、当前环境没有符合要求的网卡、端口上已有别的实现。
+			// 三套协议彼此独立，倒掉一个不影响另外两个，也不影响文件共享。
+			log.Warn("服务发现组件无法启用，该途径的自动发现不可用（其他功能照常）",
 				"component", name, "err", err)
 			return
 		}
 		// 刻意传 Background 而不是信号 ctx：ctx 取消会让组件直接停摆，
 		// 而退出时我们要的是先撤回宣告（mDNS goodbye），统一由 Stop 收尾。
 		if err := d.Start(context.Background()); err != nil {
-			log.Warn("服务发现组件启动失败，该途径的自动发现不可用",
+			// 与上面 New 失败同一条降级路径：不崩溃，记 WARN 后继续。
+			// 差别只在出错环节（这里是 bind / JoinGroup 阶段），
+			// 因此特权端口的提示挂在这里。
+			log.Warn("服务发现组件无法启用，该途径的自动发现不可用（其他功能照常）",
 				"component", name, "err", privilegedPortHint(err))
 			return
 		}
@@ -98,7 +106,7 @@ func stopDiscovery(ds []discovery) {
 
 // newMDNS 构造 mDNS responder。
 func newMDNS(cfg *config.Config, log *slog.Logger) (discovery, error) {
-	if !cfg.MDNS.Enabled {
+	if !cfg.MDNS.EnabledOn() {
 		return nil, errDiscoveryDisabled
 	}
 	r, err := mdns.New(cfg.MDNS, cfg.Listen.Port, cfg.Shares)
@@ -115,7 +123,7 @@ func newMDNS(cfg *config.Config, log *slog.Logger) (discovery, error) {
 // 所以映射只能落在 cmd 层 —— 这正是低耦合要的：协议实现不随配置
 // 结构的变化而改动。
 func newWSD(cfg *config.Config, log *slog.Logger) (discovery, error) {
-	if !cfg.WSDiscovery.Enabled {
+	if !cfg.WSDiscovery.EnabledOn() {
 		return nil, errDiscoveryDisabled
 	}
 	r, err := wsd.New(wsd.Options{
@@ -136,7 +144,7 @@ func newWSD(cfg *config.Config, log *slog.Logger) (discovery, error) {
 
 // newNBNS 构造 NetBIOS 名称服务响应器。
 func newNBNS(cfg *config.Config, log *slog.Logger) (discovery, error) {
-	if !cfg.NetBIOS.Enabled {
+	if !cfg.NetBIOS.EnabledOn() {
 		return nil, errDiscoveryDisabled
 	}
 	var interval time.Duration

@@ -63,7 +63,12 @@ var (
 	groupIPv6 = net.ParseIP("ff02::c")
 )
 
-// ErrDisabled 表示 WS-Discovery 未启用，供调用方区分「没开」与「起不来」。
+// ErrDisabled 表示 WS-Discovery 没有启用。
+//
+// 两种情形都用它，调用方按 err 的**包装文本**区分：
+//   - 配置里关掉了（`enabled: false`）→ 直接返回本哨兵，属预期，记 INFO；
+//   - 环境不具备开不起来（如没有可用组播网卡）→ 包装本哨兵并带上原因，
+//     属降级，记 WARN。
 var ErrDisabled = errors.New("wsd: 未启用")
 
 // Options 是 WS-Discovery 的自包含配置。
@@ -118,6 +123,13 @@ func New(o Options) (*Responder, error) {
 	ifaces, err := netiface.Select(o.Interfaces, netiface.NeedMulticast)
 	if err != nil {
 		return nil, fmt.Errorf("wsd: %w", err)
+	}
+	// 一张可用网卡都没有 = 这套协议在当前环境里起不到作用。
+	// 此时**不启动**（返回 ErrDisabled）而不是照常 bind：那会白白占住
+	// 3702/5357 两个端口，却一条报文也收不到、一个宣告也发不出去。
+	// 按"开不了就降级继续"的原则，调用方记一条 WARN 后继续跑其他功能。
+	if len(ifaces) == 0 {
+		return nil, fmt.Errorf("%w: 没有可用的组播网卡", ErrDisabled)
 	}
 
 	uuid := o.UUID

@@ -327,7 +327,7 @@ done
 | `signing_required` | 强制 SMB 签名（防中间人篡改） | `false` |
 | `encryption_required` | 强制 SMB3 加密：3.0/3.0.2 用 AES-128-CCM，3.1.1 用协商出的算法。开启时 `min_dialect` 与 `max_dialect` **都必须 ≥ 3.0，否则启动直接报错**（SMB 2.x 没有加密能力，这类客户端会被拒绝连接，是预期行为而非 bug）；开启后协商到 2.0.2/2.1 的客户端会在协商阶段被拒绝，而非降级为明文 | `false` |
 | `max_connections` | 并发连接数上限。**`0` 或不填 = 默认上限 256，本项不支持「不限」**；超过上限的新连接会被直接关闭 | `256` |
-| `oplocks` | 允许授予 oplock / lease（客户端本地缓存，能显著提高小文件密集读写吞吐）。打开后宣告 `SMB2_GLOBAL_CAP_LEASING`。**默认关闭** —— 未做 Windows/macOS 真机验收，而这类实现错误的代价是**静默的脏数据**。已知边界见[已知限制](#notes) | `false` |
+| `oplocks` | 允许授予 oplock / lease（客户端本地缓存，能显著提高小文件密集读写吞吐）。打开后宣告 `SMB2_GLOBAL_CAP_LEASING`。**默认开启**（授予规则本身已是"安全时才授予"）。已知边界见[已知限制](#notes)；客户端行为异常时把它设成 `false` 是首选排查手段 | `true` |
 
 ### `listen`
 
@@ -385,7 +385,7 @@ done
 
 | 字段 | 含义 | 默认值 |
 |---|---|---|
-| `enabled` | WS-Discovery 开关 | `false` |
+| `enabled` | WS-Discovery 开关 | `true` |
 | `interfaces` | 限定网卡名，留空表示所有支持组播的网卡 | 所有网卡 |
 | `uuid` | 设备标识。**留空则按名字派生一个稳定的 UUIDv5**（跨重启不变，Windows 网络列表才不会攒同名僵尸条目）。同一台机器跑多个实例时需要各自钉一个 | 按名字派生 |
 | `metadata_port` | WS-Transfer `Get` 的 HTTP 端口；Windows 列出主机后会来这里取详情。填 `-1` 表示不启用（主机仍能列出，但点开无信息） | `5357` |
@@ -397,7 +397,7 @@ done
 
 | 字段 | 含义 | 默认值 |
 |---|---|---|
-| `enabled` | NetBIOS 名称服务开关 | `false` |
+| `enabled` | NetBIOS 名称服务开关 | `true` |
 | `interfaces` | 限定网卡名，留空表示所有支持广播的网卡 | 所有网卡 |
 | `name` | 本机 NetBIOS 名，留空用 `server.name`（自动大写、超 15 字节截断） | `server.name` |
 | `workgroup` | 工作组名，留空用 `server.domain` | `server.domain` |
@@ -514,10 +514,14 @@ done
 | 协议 | 端口 | 让谁能发现 | 配置段 | 默认 |
 |---|---|---|---|---|
 | mDNS / DNS-SD | UDP 5353 | macOS / Linux（Finder、文件管理器） | `mdns.enabled` | `true` |
-| **WS-Discovery**（v0.7.0 新增） | UDP 3702 + TCP 5357 | **Windows「网络」** | `ws_discovery.enabled` | `false` |
-| **NetBIOS**（v0.7.0 新增） | UDP 137 / 138 | **`\\NAME` 解析、网上邻居浏览列表** | `netbios.enabled` | `false` |
+| **WS-Discovery**（v0.7.0 新增） | UDP 3702 + TCP 5357 | **Windows「网络」** | `ws_discovery.enabled` | `true` |
+| **NetBIOS**（v0.7.0 新增） | UDP 137 / 138 | **`\\NAME` 解析、网上邻居浏览列表** | `netbios.enabled` | `true` |
 
-后两者默认关闭，理由见「[已知限制与说明](#notes)」。
+**三者不是互斥的**（各覆盖各的客户端），默认**全部开启**：有条件就尽量都开。
+任一项开不起来都只记一条 `WARN` 并跳过，SMB 与其余发现途径照常工作 ——
+实测把 137 端口占住后，mDNS 与 WS-Discovery 照常启动、`\\IP` 访问完全正常。
+
+不想要某项就显式写 `enabled: false`（`*bool`，能区分「未设置」与「显式关闭」）。
 
 #### mDNS / DNS-SD
 
@@ -664,13 +668,14 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
 
 5. **单文件语义**：本服务是**文件共享**，不做打印机共享、不做域控、不做 DFS。
 
-6. **oplock / lease 默认关闭，且有三条已知边界**：`server.oplocks`（默认 `false`）。
-   打开后 `CREATE` 会授予 oplock / lease，`NEGOTIATE` 宣告 `SMB2_GLOBAL_CAP_LEASING`。
+6. **oplock / lease 默认开启，但有三条已知边界**：`server.oplocks`（默认 `true`）。
 
-   - **为什么默认关**：授予缓存许可等于许可客户端把读写缓存在本地，服务端必须在
-     别的客户端动这个文件时先打破它**并等确认**。这类实现错误的表现是另一个客户端
+   - **默认开的理由**：授予规则本身已经是"安全时才授予"（见下面三条边界），
+     默认关等于让所有用户都用不上这份收益。
+   - **代价要清楚**：授予缓存许可等于许可客户端把读写缓存在本地，服务端必须在
+     别的客户端动这个文件时先打破它**并等确认**。这条没做对的表现是另一个客户端
      读到旧内容 —— **静默的脏数据**，没有任何一方会报错。本特性尚未在 Windows /
-     macOS 真机上验收，在此之前保守一侧是正确的默认。
+     macOS 真机上验收。**客户端行为异常时，把它设成 `false` 是首选排查手段。**
    - **边界一**：复合链中间的 `CREATE` 不授予（它需要挂起通路才能在冲突时等确认，
      而异步响应是单发的）。现实里 Windows 资源管理器的 `[CREATE, QUERY_INFO, CLOSE]`
      这类短链拿不到缓存许可，不影响正确性。
@@ -680,12 +685,11 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
    - **边界三**：等确认的上限是 30 秒（与 Samba 的超时后强行推进同款），超时按
      「已打破」处理并放行被推迟的打开。
 
-7. **WS-Discovery 与 NetBIOS 都默认关闭，且没有 Windows 真机验收**（v0.7.0 新增）。
+7. **WS-Discovery 与 NetBIOS 默认开启，但没有 Windows 真机验收**（v0.7.0 新增）。
 
-   - **为什么默认关**：这两套协议都是"在局域网里大声报出自己"的行为，
-     默认打开等于替所有用户决定了要占 3702 / 5357 / 137 / 138 这些端口、
-     并向网段内广播主机信息。开发容器里没有 Windows，这两项**没有真机验收**，
-     所以保守一侧是正确的默认。
+   - **默认开的理由**：三套发现协议不互斥，有条件就尽量都开；开不起来只记
+     `WARN` 并跳过，不影响 SMB 与其余发现途径。不想要就显式 `enabled: false`。
+     代价是要占 3702 / 5357 / 137 / 138 端口并向网段广播主机信息。
    - **验证强度**：只到**协议级**（`nmblookup` 4.22 实测名字查询/组名/节点状态
      全部正确；手写 WS-Discovery 客户端实测 `Probe`→`ProbeMatch`、`Resolve`→
      `ResolveMatch`、WS-Transfer `Get` 全部正确）。**没有**在任何真实 Windows
@@ -694,6 +698,11 @@ Time Machine 未通过验收**不影响普通文件共享功能**——后者是
    - **NetBIOS 只实现了 nmbd 的子集**：不做 WINS 服务器、浏览主控选举、
      域主控浏览、名字注册冲突仲裁。若你的网络依赖 NetBIOS 浏览主控选举来
      汇总列表，本服务**不参与**选举 —— 它只会宣告自己，不会替别人维护列表。
+
+> **贯穿全项目的默认规则**：**能开就尽量开，开不了就降级继续。**
+> 任何可选能力（三套发现协议、oplock/lease）的默认值都是开启；
+> 因端口被占、权限不足、环境不具备等原因开不起来时，只记一条 `WARN`
+> 并跳过该能力，**不会让服务崩溃或拒绝启动** —— 其余功能照常提供。
 
 <!-- BEGIN-OSCAP-WIRING-STATUS-README：本条与 CHANGELOG 的同名块、configs/example.yaml 的
      同名段、AGENTS.md §1.2 的同名块是**一套四处**，接线 PR 合入后四处都要改，
