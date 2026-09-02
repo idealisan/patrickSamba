@@ -246,6 +246,60 @@ mdns:
     # 需要 apple.enabled: true，且至少有一个共享设了 time_machine: true。
     advertise_time_machine: true
 
+# WS-Discovery：让 **Windows** 的「网络」自动发现本机。
+#
+# 它与上面的 mDNS 是并列的两套协议，覆盖不同的客户端：
+#   macOS / Linux → mDNS（Bonjour）
+#   Windows       → WS-Discovery + NetBIOS
+# Windows 10 之后也能听 mDNS，但「网络」列表主要靠 WS-Discovery。
+#
+# 本进程自己实现，不 fork/exec 外部进程（社区里常见的做法是挂一个 wsdd
+# Python 守护进程），自己在 239.255.255.250:3702 上收发组播。
+#
+# **默认关闭**：没有 Windows 真机验收，且要占 3702 / 5357 两个端口。
+ws_discovery:
+  enabled: false
+  # 限定网卡名（如 ["eth0"]），留空表示所有支持组播的网卡。
+  interfaces: []
+  # 设备 UUID。留空则按「服务器名 + 工作组」派生一个**稳定**的 UUIDv5：
+  # 跨重启不变，Windows 网络列表里的条目才不会每次重启都攒一个新的同名僵尸。
+  # 需要显式钉死的主要场景：同一台机器上跑多个实例（派生值会撞）。
+  uuid: ""
+  # WS-Transfer Get 的 HTTP 端口（元数据端点）。Windows 列出主机后会来问
+  # 这里取详情（显示名、类型）。填 -1 表示不启用：主机仍能被列出来，
+  # 但点开取不到信息。
+  metadata_port: 5357
+
+# NetBIOS 名称服务：让 `\\NAME` 能被解析，并让本机出现在网上邻居的浏览列表里。
+#
+# 与 WS-Discovery 互补，缺一个都会让 Windows 用户别扭：
+#   只开 WS-Discovery  → 看得见图标，但 \\NAME 解析不了
+#   只开 NetBIOS       → 名字能解析，但网络列表里搜不到
+#
+# 本进程自己实现（不 fork/exec nmbd），自己在 137/138 收发。
+# 只做「让别人能看见我」这一半 —— **不做** WINS 服务器、浏览主控选举、
+# 域主控浏览，那些属于参与一个 NetBIOS 工作组的治理，范围远超此目标。
+#
+# **默认关闭**，且有一个额外门槛：137/138 是**特权端口（<1024）**，
+# 非 root 时绑不上。三种解决办法与 SMB 的 445 完全一样：
+#   1. 以 root 运行；
+#   2. sudo setcap 'cap_net_bind_service=+ep' /path/to/stupidsamba；
+#   3. 关掉本段（Windows 仍能通过 WS-Discovery 或 IP 直连访问）。
+# 绑 138 失败只告警并退化到临时端口（宣告仍会发，但部分严格客户端
+# 可能不采信）；绑 137 失败则整个组件起不来。
+netbios:
+  enabled: false
+  interfaces: []
+  # 本机 NetBIOS 名，留空用 server.name（自动大写、超 15 字节会截断）。
+  name: ""
+  # 工作组名，留空用 server.domain。
+  workgroup: ""
+  # 网上邻居里显示的说明文字。
+  comment: "stupidSamba file server"
+  # 主机宣告间隔（秒）。宣告是"我还在"的保活：太稀疏客户端要等很久才
+  # 看见我们，太密则白白刷局域网。
+  announce_interval_seconds: 240
+
 log:
   # debug / info / warn / error
   level: info

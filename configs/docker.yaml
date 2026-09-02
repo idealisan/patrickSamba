@@ -68,6 +68,22 @@ mdns:
     enabled: true
     model: MacSamba
 
+# 下面两个发现组件（WS-Discovery / NetBIOS）在桥接网络下同样没有意义，
+# 理由与 mDNS 完全一样：组播与广播都出不了 docker0 网桥，能出去的
+# 也只是容器内部的 172.17.x.x 地址，客户端照着连必然失败。
+#
+# 要让 Windows / 网上邻居发现容器里的服务，用 `--network host` 起容器，
+# 并挂载一份把这两段改成 true 的配置。注意 137/138 是特权端口 ——
+# `docker run` 默认以 root 运行所以能绑上，非 root 容器需要额外授权。
+
+# WS-Discovery（Windows「网络」）。全项目默认即 false。
+ws_discovery:
+  enabled: false
+
+# NetBIOS 名称服务（\\NAME 解析与网上邻居浏览）。全项目默认即 false。
+netbios:
+  enabled: false
+
 log:
   level: info
   format: text

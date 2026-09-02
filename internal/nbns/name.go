@@ -114,9 +114,18 @@ func nibble(c byte) (byte, bool) {
 	return c - 'A', true
 }
 
-// labelOf 从 16 字节 NetBIOS 名里取回名字部分（去掉填充空格与后缀）。
+// namePadding 是名字部分的填充字节集合。
+//
+// 除了空格（0x20），**NUL（0x00）也必须算填充**：实测 Samba 的
+// `nmblookup -A` 发来的节点状态查询里，通配符名字是 `*<0x00>×14`
+// 而不是 `*<空格>×14`。只按空格 trim 的话，那个名字会变成
+// "*\x00\x00…"，于是任何"这个名字是不是通配符"的判定都失配，
+// 表现为节点状态查询**永远不答**（nmblookup 侧看到 "No reply"）。
+const namePadding = " \x00"
+
+// labelOf 从 16 字节 NetBIOS 名里取回名字部分（去掉填充与后缀）。
 func labelOf(nb [NameSize]byte) string {
-	return strings.TrimRight(string(nb[:NameSize-1]), " ")
+	return strings.Trim(string(nb[:NameSize-1]), namePadding)
 }
 
 // parseWireName 从报文里的 Name 字段解析出 NetBIOS 名。
@@ -134,6 +143,15 @@ func parseWireName(b []byte) (Name, bool) {
 		return Name{}, false
 	}
 	return Name{Label: labelOf(nb), Suffix: nb[NameSize-1]}, true
+}
+
+// isWildcard 报告这是不是节点状态查询用的通配符名（`*`）。
+//
+// `nbtstat -A` / `nmblookup -A` 发来的节点状态查询把名字字段写成 `*`，
+// 语义是"告诉我这台机器上都有什么名字"，而不是问某个具体名字。
+// 按名字匹配去拦它，这一路就永远答不上来。
+func (n Name) isWildcard() bool {
+	return strings.Trim(n.Label, namePadding) == "*"
 }
 
 // namesEqual 比较两个 NetBIOS 名：名字部分大小写不敏感，后缀必须一致。
