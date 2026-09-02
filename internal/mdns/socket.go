@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/finalappstore/stupidsamba/internal/netiface"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -228,76 +229,29 @@ func listenIPv6() (*ipv6.PacketConn, error) {
 //
 // names 为空时自动挑选：UP、支持组播、且不是回环。
 // 显式指定网卡名时放宽回环限制（方便在单机环境里做集成测试）。
+// usableInterfaces 返回可用于 mDNS 的网卡。
+//
+// 判定逻辑在 internal/netiface —— 与 WS-Discovery、NetBIOS 共用同一份口径，
+// 免得三个组件各自漂移（表现会是"mDNS 能发现、WS-Discovery 发现不了"）。
+// 这里只负责加上 "mdns: " 前缀，让日志里一眼看得出是哪个组件在报错。
 func usableInterfaces(names []string) ([]net.Interface, error) {
-	all, err := net.Interfaces()
+	out, err := netiface.Select(names, netiface.NeedMulticast)
 	if err != nil {
-		return nil, fmt.Errorf("mdns: 枚举网卡失败: %w", err)
-	}
-
-	if len(names) > 0 {
-		byName := make(map[string]net.Interface, len(all))
-		for _, ifi := range all {
-			byName[ifi.Name] = ifi
-		}
-		out := make([]net.Interface, 0, len(names))
-		for _, n := range names {
-			ifi, ok := byName[n]
-			if !ok {
-				return nil, fmt.Errorf("mdns: 配置里指定的网卡 %q 不存在", n)
-			}
-			if ifi.Flags&net.FlagUp == 0 {
-				return nil, fmt.Errorf("mdns: 网卡 %q 当前不是 UP 状态", n)
-			}
-			if ifi.Flags&net.FlagMulticast == 0 {
-				return nil, fmt.Errorf("mdns: 网卡 %q 不支持组播，无法用于 mDNS", n)
-			}
-			out = append(out, ifi)
-		}
-		return out, nil
-	}
-
-	var out []net.Interface
-	for _, ifi := range all {
-		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagMulticast == 0 {
-			continue
-		}
-		if ifi.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		out = append(out, ifi)
+		return nil, fmt.Errorf("mdns: %w", err)
 	}
 	return out, nil
 }
 
 // interfaceIPs 返回网卡上可用于 A/AAAA 记录的地址。
 //
-// Bonjour 会把链路本地地址（169.254/16、fe80::/10）也一并宣告，
-// 因为 mDNS 的作用范围本来就是单条链路，这里保持一致行为。
+// 同样委托给 internal/netiface。Bonjour 会把链路本地地址（169.254/16、
+// fe80::/10）一并宣告，因为 mDNS 的作用范围本来就是单条链路 —— 那份包里的
+// 注释有完整理由。
 func interfaceIPs(ifi *net.Interface) (v4, v6 []net.IP) {
-	addrs, err := ifi.Addrs()
-	if err != nil {
+	if ifi == nil {
 		return nil, nil
 	}
-	for _, a := range addrs {
-		var ip net.IP
-		switch v := a.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		default:
-			continue
-		}
-		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
-			continue
-		}
-		if ip4 := ip.To4(); ip4 != nil {
-			v4 = append(v4, ip4)
-		} else if ip16 := ip.To16(); ip16 != nil {
-			v6 = append(v6, ip16)
-		}
-	}
-	return v4, v6
+	return netiface.Addrs(*ifi)
 }
 
 // run 启动收包循环，每个收到的报文交给 handle。ctx 取消后退出。
