@@ -146,7 +146,10 @@ func handleNegotiate(ctx *Context) error {
 	}
 
 	encryption := c.Cipher != 0
-	c.ServerCapabilities = wire.Capabilities(d.ServerCapabilities(encryption))
+	// LEASING 只在 server.oplocks 打开时宣告：宣告即承诺"客户端可以拿租约，
+	// 我会在别人动文件时打破它"，没实现就是撒谎，客户端会据此把数据缓存在
+	// 本地（见 oplock_state.go 顶部）。
+	c.ServerCapabilities = wire.Capabilities(d.ServerCapabilities(encryption, set.Oplocks))
 
 	now := time.Now()
 	start := set.StartTime

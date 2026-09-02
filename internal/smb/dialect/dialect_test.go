@@ -71,24 +71,24 @@ func TestNegotiatePicksHighestCommon(t *testing.T) {
 
 func TestCapabilities(t *testing.T) {
 	// 2.0.2 不支持 LARGE_MTU。
-	if c := SMB202.ServerCapabilities(true); c&CapLargeMTU != 0 {
+	if c := SMB202.ServerCapabilities(true, true); c&CapLargeMTU != 0 {
 		t.Fatal("2.0.2 不应宣告 CAP_LARGE_MTU")
 	}
 	// 2.1 起必须宣告 LARGE_MTU。
-	if c := SMB210.ServerCapabilities(false); c&CapLargeMTU == 0 {
+	if c := SMB210.ServerCapabilities(false, false); c&CapLargeMTU == 0 {
 		t.Fatal("2.1 必须宣告 CAP_LARGE_MTU")
 	}
 	// 任何方言都不得宣告 CAP_DFS（我们不实现 DFS）。
 	for _, d := range All {
-		if c := d.ServerCapabilities(true); c&CapDFS != 0 {
+		if c := d.ServerCapabilities(true, true); c&CapDFS != 0 {
 			t.Fatalf("%v 不应宣告 CAP_DFS", d)
 		}
 	}
 	// 3.0 开加密时宣告 CAP_ENCRYPTION；3.1.1 改用 negotiate context，不置该位。
-	if c := SMB300.ServerCapabilities(true); c&CapEncryption == 0 {
+	if c := SMB300.ServerCapabilities(true, false); c&CapEncryption == 0 {
 		t.Fatal("3.0 开启加密时应宣告 CAP_ENCRYPTION")
 	}
-	if c := SMB311.ServerCapabilities(true); c&CapEncryption != 0 {
+	if c := SMB311.ServerCapabilities(true, false); c&CapEncryption != 0 {
 		t.Fatal("3.1.1 不应通过 Capabilities 位宣告加密")
 	}
 }

@@ -166,15 +166,22 @@ const (
 //
 // 刻意**不宣告** CAP_DFS：我们不实现 DFS，宣告了客户端会发
 // FSCTL_DFS_GET_REFERRALS 并期待有效应答（protocol-notes §7）。
-// 同样不宣告 MULTI_CHANNEL / PERSISTENT_HANDLES / LEASING / DIRECTORY_LEASING，
+// 同样不宣告 MULTI_CHANNEL / PERSISTENT_HANDLES / DIRECTORY_LEASING，
 // 因为这些能力都没有实现，宣告即撒谎，会导致客户端行为异常。
 //
 // encryption 参数由上层根据配置与 3.1.1 cipher 协商结果传入；
 // 仅 3.0/3.0.2 通过本位宣告加密能力，3.1.1 改用 negotiate context。
-func (d Dialect) ServerCapabilities(encryption bool) uint32 {
+//
+// leasing 参数由上层按 server.oplocks 传入。租约要 SMB 2.1 起才有
+// （MS-SMB2 §3.3.5.9.11 的租约语义依赖 2.1 的 create context），
+// 2.0.2 下即使开了也不宣告 —— 宣告了客户端会发 RqLs 而我们不认。
+func (d Dialect) ServerCapabilities(encryption, leasing bool) uint32 {
 	var caps uint32
 	if d.SupportsMultiCredit() {
 		caps |= CapLargeMTU
+	}
+	if leasing && d >= SMB210 {
+		caps |= CapLeasing
 	}
 	// MS-SMB2 §3.3.5.4：3.1.1 的加密能力通过 ENCRYPTION_CAPABILITIES
 	// negotiate context 表达，Capabilities 里的 CAP_ENCRYPTION 位

@@ -120,6 +120,83 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		}
 	}
 
+	// ---- oplock / lease（见 oplock_grant.go / oplock_state.go）----
+	//
+	// 判定必须赶在 fs.Open 之前：需要打破既有缓存许可时，本次 CREATE 会被
+	// 挂起并在后台 goroutine 里从这一步继续；挂起前若已经动过文件系统，
+	// 继续时会动第二次（FILE_CREATE 之类的 disposition 不是幂等的）。
+	plan, pending, pst := planOplock(ctx, req, fs, path, stream, access)
+	if pst != status.Success {
+		return pst
+	}
+	if pending != nil {
+		return deferCreateForOplockBreak(ctx, req, fs, path, stream, access, cc, pending)
+	}
+
+	st, out := openCreate(ctx, req, fs, path, stream, access, cc, plan, ctx.Out, nil)
+	ctx.Out = out
+	if st != status.Success {
+		return st
+	}
+	// ⚠️ 必须显式回 nil：status.Status 实现了 error，直接 `return st` 会
+	// 返回一个**非 nil 的 error 接口**包着零值 Status，调用方的
+	// `err != nil` 判定全部失真（sharing violation 用例就是这么红的）。
+	return nil
+}
+
+// deferCreateForOplockBreak 把需要等 break 确认的 CREATE 挂起。
+//
+// 为什么要挂起而不是原地等：确认报文要靠**读循环**才能收进来，而原地等
+// 就占着读循环 —— 那是一个谁也解不开的死锁（等确认 → 确认进不来）。
+// 挂起之后读循环照常收帧，客户端的 OPLOCK_BREAK 确认才到得了
+// （见 async.go 与 oplock_state.go 的 breakWait）。
+//
+// 退路：挂不起来时（无异步通路 / 复合链中间）回 STATUS_SHARING_VIOLATION。
+// 这不是偷懒 —— 不能等确认却放行，就是放行一次**会读到脏数据**的访问，
+// 那比一次可重试的失败糟得多。
+func deferCreateForOplockBreak(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
+	path, stream string, access wire.Access, cc *createContexts, pending *oplockPending) error {
+
+	ar, ok := ctx.Defer()
+	if !ok {
+		ctx.Log.Warn("需要打破 oplock 但本次 CREATE 无法挂起，按共享冲突回绝",
+			"path", path, "share", ctx.Tree.Share.Name)
+		return status.SharingViolation
+	}
+	go func() {
+		// 等确认或超时。超时路径会按"已打破"推进，因此这里**必定**继续，
+		// 不存在"确认没来就一直挂着"的情况。
+		awaitOplockBreak(pending)
+		// 后半段在后台 goroutine 里跑：out 传 nil，得到的就只是响应体，
+		// 由 ar.Complete 加头补发（原复合响应帧此时已经写出去了）。
+		var created *Open
+		st, body := openCreate(ctx, req, fs, path, stream, access, cc, oplockPlan{}, nil, &created)
+		if !ar.Complete(st, func(dst []byte) ([]byte, error) {
+			return append(dst, body...), nil
+		}) {
+			// 期间被取消：句柄已经建好了，必须收回去，否则它连同它
+			// 登记的共享模式、oplock 条目一起泄漏。
+			if created != nil {
+				created.close()
+			}
+		}
+	}()
+	// 响应由上面的 goroutine 补发；Dispatch 看到 ctx.async != nil 会按挂起处理。
+	return nil
+}
+
+// openCreate 执行 CREATE 的后半段：打开文件 → 登记句柄 → 组装响应。
+//
+// out 是响应缓冲：复合链里传当前累积的缓冲；异步补发时传 nil，
+// 此时返回的切片只是**响应体**（不含 64 字节头）。
+// created 非 nil 时回填新建的句柄，供调用方在取消路径上回收。
+//
+// 拆成独立函数是为了让"等 oplock break"能插在**打开文件之前**：
+// 前半段只做校验不改状态，因此可以安全地推迟到确认之后再继续。
+func openCreate(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
+	path, stream string, access wire.Access, cc *createContexts,
+	plan oplockPlan, out []byte, created **Open) (status.Status, []byte) {
+
 	openReq := &vfs.OpenRequest{
 		Path:           path,
 		Stream:         stream,
@@ -131,20 +208,20 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	h, action, err := fs.Open(openReq)
 	if err != nil {
 		ctx.Log.Debug("CREATE 打开失败", "path", path, "stream", stream, "err", err)
-		return createStatus(err, req.CreateDisposition)
+		return createStatus(err, req.CreateDisposition), out
 	}
 
 	// Opened 阶段要在 Stat 之前跑：AlSi 的预留结果必须反映进响应的
 	// AllocationSize。
 	if err := cc.opened(ctx, h, action); err != nil {
 		_ = h.Close()
-		return err
+		return asStatus(err), out
 	}
 
 	attr, err := h.Stat()
 	if err != nil {
 		_ = h.Close()
-		return status.FromVFSError(err)
+		return status.FromVFSError(err), out
 	}
 
 	isDir := attr.FileAttributes&vfs.FileAttributeDirectory != 0
@@ -152,11 +229,11 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	// VFS 后端可能没能力提前判断，这里兜底（MS-SMB2 §3.3.5.9）。
 	if req.CreateOptions&wire.FileDirectoryFile != 0 && !isDir {
 		_ = h.Close()
-		return status.NotADirectory
+		return status.NotADirectory, out
 	}
 	if req.CreateOptions&wire.FileNonDirectoryFile != 0 && isDir {
 		_ = h.Close()
-		return status.FileIsADirectory
+		return status.FileIsADirectory, out
 	}
 
 	open := &Open{
@@ -170,6 +247,11 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		CreateAction:   wire.CreateAction(action),
 		CreateOptions:  req.CreateOptions,
 		FileAttributes: wire.FileAttributes(attr.FileAttributes),
+		// 文件身份：oplock/lease 表按它索引（见 oplock_state.go 的 oplockKey）。
+		oplockFileID: attr.FileID,
+	}
+	if created != nil {
+		*created = open
 	}
 	// 权威的共享模式判定：判定与登记在同一次持锁内完成，收口并发竞态
 	// （两个 CREATE 同时通过预检的情形）。文件身份取自**已打开句柄**的
@@ -180,7 +262,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 			"path", path, "stream", stream,
 			"access", uint32(access), "share", uint32(req.ShareAccess))
 		_ = h.Close()
-		return st
+		return st, out
 	}
 
 	// ⚠️ 从这里往下的失败路径一律用 open.close() 而不是 h.Close()：
@@ -189,7 +271,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 	if req.CreateOptions&wire.FileDeleteOnClose != 0 {
 		if err := ctx.RequireWritable(); err != nil {
 			open.close()
-			return err
+			return asStatus(err), out
 		}
 		open.SetDeleteOnClose(true)
 		// vfs 层在 OpenDeleteOnClose 下会在 Close 时自行删除文件，
@@ -199,9 +281,13 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 
 	if st := ctx.Session.AddOpen(open); st != status.Success {
 		open.close()
-		return st
+		return st, out
 	}
 	ctx.Chain.LastOpen = open
+
+	// 缓存许可在这里落地：句柄已经进表、共享模式已通过，此刻授予的
+	// oplock/lease 与"谁打开了这个文件"两件事不会再分叉。
+	applyGrant(ctx.Tree.Share, open, plan)
 
 	// Registered 阶段：需要一个完整 Open 的 context（durable / lease）在这里
 	// 生效。失败要把已经登记的句柄摘掉，不能留孤儿。
@@ -209,14 +295,11 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		ctx.Session.RemoveOpen(open.Volatile)
 		ctx.Chain.LastOpen = nil
 		open.close()
-		return err
+		return asStatus(err), out
 	}
 
 	resp := &wire.CreateResponse{
-		// 不实现 oplock/lease：一律回 NONE。客户端会退化成不缓存，
-		// 正确性不受影响（protocol-notes §9）。lease 模块会在 Respond 阶段
-		// 覆写 OplockLevel，无需在此特殊对待。
-		OplockLevel:    wire.OplockLevelNone,
+		OplockLevel:    plan.responseLevel(),
 		CreateAction:   open.CreateAction,
 		CreationTime:   vfs.TimeToFiletime(attr.CreateTime),
 		LastAccessTime: vfs.TimeToFiletime(attr.AccessTime),
@@ -228,22 +311,30 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 		FileID:         wire.FileID{Persistent: open.Persistent, Volatile: open.Volatile},
 	}
 
-	// Respond 阶段：各 context handler 往 resp.Contexts 追加响应 context，
-	// 并可能覆写 resp.OplockLevel（lease）。返回错误表示整个 CREATE 失败，
-	// 必须回收已经登记、尚未对外可见的句柄。
+	// 租约响应 context（RqLs）。与 create context 注册表**无关**：
+	// 注册表不认识 RqLs（会当作未知 context 静默忽略），租约的授予判定
+	// 走 oplock_grant.go，这里只负责把结果写进响应。
+	if plan.kind == oplockPlanLease {
+		resp.Contexts = append(resp.Contexts, wire.CreateContext{
+			Name: wire.CreateContextRqLs,
+			Data: plan.lease.Encode(),
+		})
+	}
+
+	// Respond 阶段：各 context handler 往 resp.Contexts 追加响应 context。
+	// 返回错误表示整个 CREATE 失败，必须回收已经登记、尚未对外可见的句柄。
 	if err := cc.respond(ctx, open, resp, attr); err != nil {
 		ctx.Session.RemoveOpen(open.Volatile)
 		ctx.Chain.LastOpen = nil
 		open.close()
-		return err
+		return asStatus(err), out
 	}
 
-	out, err := resp.Append(ctx.Out)
+	out, err = resp.Append(out)
 	if err != nil {
 		ctx.Log.Error("编码 CREATE Response 失败", "err", err)
-		return status.InsuffServerResources
+		return status.InsuffServerResources, out
 	}
-	ctx.Out = out
 
 	// 变更记账（CHANGE_NOTIFY，见 notify_hub.go）。
 	//
@@ -262,8 +353,39 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 
 	ctx.Log.Debug("CREATE",
 		"share", ctx.Tree.Share.Name, "path", path, "dir", isDir,
-		"action", action, "fid", open.Volatile)
-	return nil
+		"action", action, "fid", open.Volatile, "oplock", plan.responseLevel())
+	return status.Success, out
+}
+
+// asStatus 把一个 handler 错误收敛成 NTSTATUS。
+//
+// openCreate 的签名返回 status.Status 而不是 error（因为异步补发路径需要
+// 一个具体的状态码），而它内部的 cc.opened / cc.registered / cc.respond
+// 返回的是 error —— 那些错误**绝大多数**已经是 status.Status，
+// 直接映射会二次加工成错误的码。
+func asStatus(err error) status.Status {
+	switch e := err.(type) {
+	case nil:
+		return status.Success
+	case status.Status:
+		return e
+	default:
+		return status.FromVFSError(err)
+	}
+}
+
+// responseLevel 把授予计划翻译成 CREATE Response 的 OplockLevel 字段。
+//
+// 租约族恒为 SMB2_OPLOCK_LEVEL_LEASE(0xFF)（MS-SMB2 §2.2.14）：
+// 它与具体的 oplock 级别是互斥的两套取值，真实状态在 RqLs context 里。
+func (p oplockPlan) responseLevel() wire.OplockLevel {
+	switch p.kind {
+	case oplockPlanLevel:
+		return p.level
+	case oplockPlanLease:
+		return wire.OplockLevelLease
+	}
+	return wire.OplockLevelNone
 }
 
 // createPipe 在 IPC$ 上打开一个命名管道。

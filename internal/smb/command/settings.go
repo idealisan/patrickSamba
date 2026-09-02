@@ -86,6 +86,15 @@ type Settings struct {
 	// AllowGuest 允许 guest 降级登录。
 	AllowGuest bool
 
+	// Oplocks 允许授予 oplock / lease（客户端本地缓存）。
+	//
+	// 关闭时 CREATE 一律回 SMB2_OPLOCK_LEVEL_NONE 且不宣告
+	// SMB2_GLOBAL_CAP_LEASING —— 与引入本特性之前的行为完全一致。
+	// 默认关闭的理由见 docs / CHANGELOG：本特性尚未在 Windows / macOS
+	// 真机上验收，而授予缓存许可出错的后果是**静默的脏数据**，
+	// 不是连不上。没有真机验证之前，保守一侧是正确的默认。
+	Oplocks bool
+
 	// Auth 是认证后端（SPNEGO/NTLMv2）。
 	Auth auth.Provider
 
@@ -180,6 +189,10 @@ type Share struct {
 	// shareModes 是本共享的共享模式（ShareAccess）表（见 share_access.go）。
 	// 与 locks 同理：跨会话可见才有意义。零值可用。
 	shareModes shareModeTable
+
+	// oplocks 是本共享的 oplock / lease 表（见 oplock_state.go）。
+	// 与 locks 同理挂在 Share 上。零值可用（未开启时全程不碰）。
+	oplocks oplockTable
 
 	// notify 是本共享的目录变更事件中心（见 notify_hub.go）。
 	//

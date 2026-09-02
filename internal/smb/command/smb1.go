@@ -152,7 +152,10 @@ func AppendSMB1NegotiateReply(conn *Conn, dialects []string, out []byte) ([]byte
 		SecurityMode:    wire.NegotiateSigningEnabled,
 		DialectRevision: revision,
 		ServerGUID:      conn.Settings.ServerGUID,
-		Capabilities:    wire.Capabilities(chosen.ServerCapabilities(false)),
+		// 不宣告加密：SMB1 入口只是把客户端升级到 SMB2，真正的加密能力
+		// 由随后的 SMB2 NEGOTIATE 协商（那里才看得到 cipher 列表）。
+		// 同样不宣告 LEASING：本入口选出的方言是 2.0.2，租约要 2.1 起。
+		Capabilities: wire.Capabilities(chosen.ServerCapabilities(false, false)),
 		MaxTransactSize: chosen.MaxTransactSize(),
 		MaxReadSize:     chosen.MaxTransactSize(),
 		MaxWriteSize:    chosen.MaxTransactSize(),
