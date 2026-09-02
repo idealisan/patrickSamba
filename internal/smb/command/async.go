@@ -126,8 +126,44 @@ type AsyncRequest struct {
 	mu sync.Mutex
 	// onAbort 由等待方注册，取消时被调用一次（在锁外调用）。
 	onAbort func()
+	// resume 非 nil 表示本请求是**复合链中间**被挂起的：
+	// 完成方式是"续跑这条链剩下的消息"，而不是单独补发一条响应。
+	//
+	// 由 internal/server 在暂停链时设置（见 SetResume）。command 层不知道
+	// 复合链的存在 —— 它只提供一个"完成后回调"的位置。
+	resume func()
+
 	// settled 表示结果已定（Complete 或 Cancel 之一已经胜出）。
 	settled bool
+}
+
+// SetResume 登记"本请求完成后要续跑复合链"的回调。
+//
+// 与 Complete 的竞态在这里收口：
+//   - SetResume 先到 → 存下回调，Complete 稍后会调用它；
+//   - Complete 先到 → settled 已置位，SetResume 立刻（在新的 goroutine 里）
+//     执行回调，否则剩下的消息永远没人处理，客户端会挂死。
+//
+// 两侧都在 r.mu 下判定 settled，因此不会漏也不会重。
+func (r *AsyncRequest) SetResume(fn func()) {
+	if fn == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.settled {
+		r.mu.Unlock()
+		go fn()
+		return
+	}
+	r.resume = fn
+	r.mu.Unlock()
+}
+
+// takeResume 取出并清空续跑回调。调用方必须已持有 r.mu。
+func (r *AsyncRequest) takeResume() func() {
+	fn := r.resume
+	r.resume = nil
+	return fn
 }
 
 // Cancelled 报告本请求是否已被取消。等待方在退出等待前应当查一次，
@@ -184,6 +220,13 @@ func (r *AsyncRequest) Complete(st status.Status, build func(dst []byte) ([]byte
 
 	// 从未决表摘除之后才写响应，避免"响应已发出但仍在表里"的窗口
 	// （那个窗口里迟到的 CANCEL 会试图再次应答同一个 MessageId）。
+	// 续跑回调要在 settled 之后、发送之前取出，并且**只取一次**：
+	// 取走后置 nil，保证任何路径下都至多续跑一遍。
+	var resume func()
+	r.mu.Lock()
+	resume = r.takeResume()
+	r.mu.Unlock()
+
 	body, hdr := r.buildResponse(st, build)
 	if sink := r.conn.asyncSinkOrNil(); sink != nil {
 		if err := sink.SendAsyncResponse(hdr, body, r.signKey, r.encrypted); err != nil {
@@ -191,6 +234,12 @@ func (r *AsyncRequest) Complete(st status.Status, build func(dst []byte) ([]byte
 			// 送不到，不需要也不应该重投（客户端早就超时了）。
 			_ = err
 		}
+	}
+
+	// 续跑必须放在**发送之后**：sendUnsolicited 内部持有连接的写锁，
+	// 而续跑也要拿同一把锁去写剩下的响应帧 —— 在这里同步调用会死锁。
+	if resume != nil {
+		resume()
 	}
 	return true
 }
@@ -394,10 +443,6 @@ func (c *Context) Defer() (*AsyncRequest, bool) {
 		return nil, false
 	}
 	if c.Conn.asyncSinkOrNil() == nil {
-		return nil, false
-	}
-	// 见上方「限制」：非末条消息不挂起。
-	if c.Header.NextCommand != 0 {
 		return nil, false
 	}
 

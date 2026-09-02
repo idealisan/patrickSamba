@@ -77,7 +77,7 @@ func TestVNIRejectMarksDisconnect(t *testing.T) {
 	if got := respStatus(t, resp); got != status.AccessDenied {
 		t.Fatalf("篡改的 VNI 期望 STATUS_ACCESS_DENIED，实际 %s", got)
 	}
-	if !c.vniDropPending {
+	if !c.vniDropPending.Load() {
 		t.Fatal("VNI 复核失败后必须标记断连（MS-SMB2 §3.3.5.15.12 MUST terminate）")
 	}
 }
@@ -99,7 +99,7 @@ func TestVNISuccessDoesNotMarkDisconnect(t *testing.T) {
 	if got := respStatus(t, resp); got != status.Success {
 		t.Fatalf("忠实的 VNI 应成功，实际 %s", got)
 	}
-	if c.vniDropPending {
+	if c.vniDropPending.Load() {
 		t.Fatal("校验通过的 VNI 不应触发断连")
 	}
 }
@@ -118,7 +118,7 @@ func TestOtherAccessDeniedDoesNotMarkDisconnect(t *testing.T) {
 	if got := respStatus(t, resp); got != status.AccessDenied {
 		t.Fatalf("未签名请求期望 STATUS_ACCESS_DENIED，实际 %s", got)
 	}
-	if c.vniDropPending {
+	if c.vniDropPending.Load() {
 		t.Fatal("普通 ACCESS_DENIED 不应触发断连标记")
 	}
 }

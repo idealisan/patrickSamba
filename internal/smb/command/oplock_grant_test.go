@@ -33,6 +33,23 @@ type oplockEnv struct {
 	breakA *fakeBreakSender
 }
 
+// newOplockEnvNoSink 与 newOplockEnv 的差别：B **没有**注入异步 sink。
+//
+// 用于验证降级路径 —— 拿不到挂起通路时，需要 break 的打开必须回
+// STATUS_SHARING_VIOLATION，而不是放行走掉（那会造成脏读）。
+func newOplockEnvNoSink(t *testing.T, oplocks bool) *oplockEnv {
+	t.Helper()
+	root := t.TempDir()
+	fs := newQueryDirTestFS(t, root)
+	share := &Share{Name: "data", Type: wire.ShareTypeDisk, FS: fs}
+
+	breakA := &fakeBreakSender{}
+	e := &oplockEnv{share: share, breakA: breakA}
+	e.connA, e.a = newOplockClient(t, share, oplocks, nil, breakA)
+	e.connB, e.b = newOplockClient(t, share, oplocks, nil, nil)
+	return e
+}
+
 func newOplockEnv(t *testing.T, oplocks bool) *oplockEnv {
 	t.Helper()
 	root := t.TempDir()
@@ -354,9 +371,11 @@ func TestOplockBreakDefersConflictingCreate(t *testing.T) {
 	}
 }
 
-// TestMidChainCreateStillBreaksExistingOplock：复合链中间的 CREATE
-// **拿不到**缓存许可，但绝不能因此跳过 break 检查 —— 那会直接放行一次
-// 会读到脏数据的访问。
+// TestMidChainCreateStillBreaksExistingOplock 钉一条极易写错的判定。
+//
+// 曾经（v0.7.0）把「复合链中间就返回」的短路写在 planOplock **开头**，
+// 于是链中间的 CREATE 连带跳过了 break 检查 —— 别的客户端读到的可能是
+// 持有者还攥在本地缓存里的旧内容，而服务端日志一切正常。
 func TestMidChainCreateStillBreaksExistingOplock(t *testing.T) {
 	e := newOplockEnv(t, true)
 	if _, resp := openWith(t, e.a, "f.txt", accessRW, shareAll,
@@ -364,7 +383,7 @@ func TestMidChainCreateStillBreaksExistingOplock(t *testing.T) {
 		t.Fatal("A 打开失败")
 	}
 
-	// B 的 CREATE 是复合链中间的一条（NextCommand != 0），且拿不到挂起通路。
+	// B 的 CREATE 是复合链中间的一条（NextCommand != 0）。
 	e.b.Header = wire.Header{NextCommand: 128}
 	e.b.Out = make([]byte, wire.HeaderSize)
 	e.b.Chain = &Chain{}
@@ -375,31 +394,35 @@ func TestMidChainCreateStillBreaksExistingOplock(t *testing.T) {
 		CreateDisposition:    wire.FileOpenIf,
 		RequestedOplockLevel: wire.OplockLevelBatch,
 	})
-	// 挂不起来 → 必须回共享冲突，而不是悄无声息地放行。
-	if err != status.SharingViolation {
-		t.Fatalf("无法等确认时应回 STATUS_SHARING_VIOLATION，实际 %v", err)
+	// v0.7.2 起：链中间**也能挂起**（server 层会续跑剩下的消息），
+	// 所以这里是"挂起"而不是回绝。v0.7.0/1 时这里回 SHARING_VIOLATION。
+	if err != nil {
+		t.Fatalf("链中间的 CREATE 应当被挂起而不是当场失败，实际 %v", err)
 	}
-	// break 通知**已经发出**：A 收到后会让出缓存，B 重试即可成功。
+	if e.b.Async() == nil {
+		t.Fatal("冲突时必须挂起等待 break 确认")
+	}
+	// 关键：break **已经发出**了 —— 若被链位置的短路吃掉，这里会是 0 条。
 	if got := e.breakA.oplocks; got != 1 {
-		t.Fatalf("即便要回绝也应先发出 break，实际发了 %d 条", got)
+		t.Fatalf("链中间的 CREATE 同样必须发出 break，实际 %d 条", got)
 	}
-
-	// 回绝路径必须把这次 break **就地收尾**，否则进行中的 break 计数会
-	// 永久占着（攒够上限后该共享上所有冲突打开都变成 SHARING_VIOLATION，
-	// 且重开服务才能恢复）。
-	//
-	// 可观测后果：B 换成可挂起的普通打开后应当**直接成功**，
-	// 既不需要再发一次 break，也不会被推迟。
-	e.b.Header = wire.Header{}
-	if _, resp := openWith(t, e.b, "f.txt", accessRW, shareAll,
+	// 没有可挂起通路时（无 async sink）才回退到回绝。
+	plain := newOplockEnvNoSink(t, true)
+	if _, resp := openWith(t, plain.a, "f.txt", accessRW, shareAll,
 		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelBatch}); resp == nil {
-		t.Fatal("重试打开应当成功")
+		t.Fatal("A 打开失败")
 	}
-	if e.b.Async() != nil {
-		t.Fatal("重试不应再被推迟（说明上一次 break 没被收尾）")
-	}
-	if got := e.breakA.oplocks; got != 1 {
-		t.Fatalf("重试不应再发 break，累计 %d 条（应为 1）", got)
+	plain.b.Header = wire.Header{NextCommand: 128}
+	plain.b.Out = make([]byte, wire.HeaderSize)
+	plain.b.Chain = &Chain{}
+	if err := createFile(plain.b, &wire.CreateRequest{
+		Name:                 "f.txt",
+		DesiredAccess:        accessRW,
+		ShareAccess:          shareAll,
+		CreateDisposition:    wire.FileOpenIf,
+		RequestedOplockLevel: wire.OplockLevelBatch,
+	}); err != status.SharingViolation {
+		t.Fatalf("挂不起来时应回 STATUS_SHARING_VIOLATION，实际 %v", err)
 	}
 }
 
