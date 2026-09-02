@@ -140,7 +140,10 @@ func handleOplockBreak(ctx *Context) error {
 		if err != nil {
 			return status.InvalidParameter
 		}
-		if !table.ackLease(req.LeaseKey, req.LeaseState) {
+		if ctx.Tree == nil || ctx.Tree.Share == nil {
+			return status.InvalidOplockProtocol
+		}
+		if !ctx.Tree.Share.oplocks.ackLease(req.LeaseKey, req.LeaseState) {
 			ctx.Log.Warn("收到 lease break 确认，但没有匹配的等待中租约",
 				"lease_key", req.LeaseKey, "session", ctx.Header.SessionID)
 			return status.InvalidOplockProtocol

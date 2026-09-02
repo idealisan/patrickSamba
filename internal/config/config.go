@@ -81,6 +81,20 @@ type Server struct {
 	// 用 *bool 而非 bool：YAML 里分不清"未设置"与"显式 false"，
 	// 而本项默认值是 true（与 Share.Browseable 同理）。
 	SMB1 *bool `yaml:"smb1"`
+
+	// Oplocks 允许向客户端授予 oplock / lease（客户端本地缓存）。
+	//
+	// **默认关闭**（零值 false）。打开后 NEGOTIATE 会宣告
+	// SMB2_GLOBAL_CAP_LEASING，CREATE 会按请求授予 oplock/lease。
+	//
+	// 默认关闭不是因为功能不全，而是因为**这类错误的后果是静默的脏数据**：
+	// 授予缓存许可意味着许可客户端把读写缓存在本地，服务端必须在别的客户端
+	// 动这个文件时先打破它并等确认 —— 做错一步就是第二个客户端读到旧内容，
+	// 而没有任何一方会报错。本特性尚未在 Windows / macOS 真机上验收，
+	// 在拿到真机验证之前，保守一侧是正确的默认。
+	//
+	// 打开前请读 README「已知限制与说明」里关于 oplock/lease 的那一条。
+	Oplocks bool `yaml:"oplocks"`
 }
 
 // Listen 是监听设置。
