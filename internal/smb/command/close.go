@@ -89,6 +89,10 @@ func handleClose(ctx *Context) error {
 	// Stream 字段在 close 之后仍然可读（close 只清 Handle/Pipe），
 	// 但这里先取快照更直观：删除对象由「打开时是什么」决定。
 	delStream := open.Stream
+	// vfsOwnsDelete 时删除发生在 open.close() 内部的 vfs 句柄关闭里，
+	// 命令层不参与；为了让 CHANGE_NOTIFY 也覆盖这条路，这里单独记一笔。
+	vfsDeleted := open.DeleteOnClose() && open.Handle != nil && open.vfsOwnsDelete
+	isDir := open.IsDir
 	open.close()
 
 	// delete-on-close 的实际删除必须在句柄关闭之后做
@@ -98,7 +102,18 @@ func handleClose(ctx *Context) error {
 			// 删除失败不影响 CLOSE 本身成功 —— 客户端已经认为句柄没了，
 			// 回错误只会让它困惑。记日志即可。
 			ctx.Log.Warn("delete-on-close 删除失败", "path", delPath, "stream", delStream, "err", err)
+		} else if delStream == "" {
+			// 变更记账（CHANGE_NOTIFY）：只记**基础对象**的删除。
+			// 删一个命名流不构成目录项变更，FILE_NOTIFY_INFORMATION 里
+			// 也没有"删流"对应的 Action（那属于 STREAM_NAME 过滤位的范畴，
+			// 而删除流的可见后果是文件内容变了，不是目录里少一项）。
+			ctx.notifyHub().notifyRemoved(delPath, isDir)
 		}
+	}
+	if vfsDeleted && delStream == "" {
+		// vfs 侧的删除没有失败通路可查（vfsOwnsDelete 时命令层不参与删除），
+		// 按"已删"记账：FILE_DELETE_ON_CLOSE 的语义就是无条件删。
+		ctx.notifyHub().notifyRemoved(delPath, isDir)
 	}
 
 	ctx.Out = resp.Append(ctx.Out)

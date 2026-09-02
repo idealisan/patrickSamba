@@ -180,6 +180,12 @@ type Share struct {
 	// shareModes 是本共享的共享模式（ShareAccess）表（见 share_access.go）。
 	// 与 locks 同理：跨会话可见才有意义。零值可用。
 	shareModes shareModeTable
+
+	// notify 是本共享的目录变更事件中心（见 notify_hub.go）。
+	//
+	// 与 locks 同理挂在 Share 上：一个客户端改动目录，要能通知到另一个
+	// 客户端挂着的 CHANGE_NOTIFY。零值可用（无订阅时投递是空转）。
+	notify notifyHub
 }
 
 // IsIPC 报告本共享是否为 IPC$ 管道共享。

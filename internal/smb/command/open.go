@@ -266,6 +266,10 @@ func (o *Open) close() {
 	o.mu.Unlock()
 	if tree != nil && tree.Share != nil {
 		tree.Share.locks.releaseAll(o.Path, o)
+		// 目录句柄关闭：其上的未决 CHANGE_NOTIFY 回 STATUS_NOTIFY_CLEANUP
+		// （MS-SMB2 §3.3.5.19）。不处理的话那些请求会一直挂到客户端超时。
+		// 与 shareModes 同理放在这里 —— 这是全部句柄消失路径的唯一汇合处。
+		tree.Share.notify.cleanup(o)
 	}
 
 	if h != nil {
