@@ -172,24 +172,77 @@ func TestOplockNotGrantedWhenOtherOpener(t *testing.T) {
 
 // TestSecondOpenerDoesNotShareCache：A 持有许可时 B 的打开**不授予**
 // （表按对象只留一条条目，两条并存意味着两套互不知情的缓存）。
-func TestSecondOpenerDoesNotShareCache(t *testing.T) {
+// TestConcurrentReadersEachGetReadCache 钉住「多个并发只读者各持一份读缓存」。
+//
+// 这是**标准做法**（Samba / Windows）：Level II oplock 与 R lease 都不是排他的，
+// 因为只读者谁也不会改数据。v0.7.2 之前表里每文件只留一条条目，第二个只读
+// 客户端什么都拿不到 —— 正确性没问题，但白丢一份收益，而且与标准不一致。
+//
+// 变异自检方向：
+//   - 把 planOplock 的 default 分支改成恒不授予 → 本用例变红；
+//   - 把表改回单条目（grant 覆盖而不是 append）→ countFor 断言变红。
+func TestConcurrentReadersEachGetReadCache(t *testing.T) {
 	e := newOplockEnv(t, true)
 	a, respA := openWith(t, e.a, "f.txt", wire.FileReadData, shareAll,
 		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelII})
 	if a == nil || respA == nil {
 		t.Fatal("A 打开失败")
 	}
-	// A 的 II（读缓存）+ B 只读：不构成冲突，但也不授予第二条。
-	_, respB := openWith(t, e.b, "f.txt", wire.FileReadData, shareAll,
+	if respA.OplockLevel != wire.OplockLevelII {
+		t.Fatalf("首个只读打开者应拿到 Level II，实际 %v", respA.OplockLevel)
+	}
+
+	// B 也是只读：与 A 的读缓存不冲突，**应当同样拿到读缓存**。
+	b, respB := openWith(t, e.b, "f.txt", wire.FileReadData, shareAll,
 		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelII})
-	if respB == nil {
+	if b == nil || respB == nil {
 		t.Fatal("B 打开失败")
 	}
-	if respB.OplockLevel != wire.OplockLevelNone {
-		t.Fatalf("第二个打开者不应拿到缓存许可，实际 %v", respB.OplockLevel)
+	if respB.OplockLevel != wire.OplockLevelII {
+		t.Fatalf("第二个只读打开者应同样拿到 Level II，实际 %v", respB.OplockLevel)
 	}
-	if got := e.share.oplocks.count(); got != 1 {
-		t.Fatalf("表里应只有 1 条条目，实际 %d", got)
+
+	// 关键是**两条并存**，不是覆盖成一条。
+	key := oplockKey{fileID: a.oplockFileID, stream: a.Stream}
+	if got := e.share.oplocks.countFor(key); got != 2 {
+		t.Fatalf("同一文件上应有 2 条读缓存条目，实际 %d", got)
+	}
+	if !e.share.oplocks.has(a) || !e.share.oplocks.has(b) {
+		t.Fatal("两个句柄都应能在表里找到自己的条目")
+	}
+}
+
+// TestWriteOpenerBreaksReadCaches：要写的人进来时，**读缓存也必须打破**。
+//
+// 这一条是数据正确性的分界线：读者缓存着旧内容，写者改完文件后
+// 读者再读就会拿到旧数据 —— 而没有任何一方会报错。
+func TestWriteOpenerBreaksReadCaches(t *testing.T) {
+	e := newOplockEnv(t, true)
+	a, _ := openWith(t, e.a, "f.txt", wire.FileReadData, shareAll,
+		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelII})
+	if a == nil {
+		t.Fatal("A 打开失败")
+	}
+
+	// B 要写：必须打破 A 的读缓存，因此这次打开要被推迟。
+	e.b.Out = make([]byte, wire.HeaderSize)
+	e.b.Chain = &Chain{}
+	err := createFile(e.b, &wire.CreateRequest{
+		Name:                 "f.txt",
+		DesiredAccess:        accessRW,
+		ShareAccess:          shareAll,
+		CreateDisposition:    wire.FileOpenIf,
+		RequestedOplockLevel: wire.OplockLevelBatch,
+	})
+	if err != nil {
+		t.Fatalf("B 的 CREATE 不应当场失败，实际 %v", err)
+	}
+	if e.b.Async() == nil {
+		t.Fatal("写者进来时应先打破读缓存，因此 B 的 CREATE 必须挂起")
+	}
+	// 打破目标是 NONE：读缓存也留不住。
+	if got := e.breakA.lastOplock.OplockLevel; got != wire.OplockLevelNone {
+		t.Fatalf("写者进来时读缓存应被要求降到 NONE，实际 %v", got)
 	}
 }
 
@@ -434,19 +487,34 @@ func TestOplockRejectsUnknownLeaseState(t *testing.T) {
 }
 
 // has 报告表里是否有某个句柄的条目（测试辅助，顺带验证 count 的实现）。
+// has 报告表里是否有该句柄的条目。
 func (t *oplockTable) has(o *Open) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, e := range t.m {
-		if e.owner == o {
-			return true
+	for _, list := range t.m {
+		for _, e := range list {
+			if e.owner == o {
+				return true
+			}
 		}
 	}
 	return false
 }
 
+// countFor 返回某个对象上的条目条数（多读者并存时 > 1）。
+func (t *oplockTable) countFor(k oplockKey) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.m[k])
+}
+
+// count 返回表里的条目总数（跨所有对象）。
 func (t *oplockTable) count() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return len(t.m)
+	n := 0
+	for _, list := range t.m {
+		n += len(list)
+	}
+	return n
 }
