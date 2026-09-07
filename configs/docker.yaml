@@ -79,11 +79,15 @@ mdns:
 # 并挂载一份把这三段改成 true 的配置。注意 137/138 是特权端口 ——
 # `docker run` 默认以 root 运行所以能绑上，非 root 容器需要额外授权。
 
-# WS-Discovery（Windows「网络」）。全项目默认即 false。
+# 注：下面这两项在**全项目**里的默认值是 true（v0.7.1 起「能开就尽量开」），
+# 这里显式写 false 是**覆盖**，不是复述默认值 —— 理由见上面那段。
+# 桥接网络下想让它们生效，用 --network host 并改成 true。
+
+# WS-Discovery（Windows「网络」）。
 ws_discovery:
   enabled: false
 
-# NetBIOS 名称服务（\\NAME 解析与网上邻居浏览）。全项目默认即 false。
+# NetBIOS 名称服务（\\NAME 解析与网上邻居浏览）。
 netbios:
   enabled: false
 
