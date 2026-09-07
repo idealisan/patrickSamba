@@ -5,6 +5,90 @@
 
 ---
 
+## v0.7.3（2026-09-07，正式版）
+
+> 本版只修 bug 与文档，不新增能力。三处代码改动全是 v0.7.2 引入或暴露的：
+> 两条会**真正打挂服务 / 读错数据**的缺陷，以及一批与当前行为矛盾的注释。
+
+### 一、break 超时的收尾会 panic —— 一次超时带走整个进程
+
+`wait()` 的超时分支先 `close(w.done)`，紧接着 `awaitOplockBreak` 对同一条目调
+`cancelBreak`，又关了一次 —— `panic: close of closed channel`。
+
+它跑在挂起 CREATE 的 goroutine 上（`create.go` 里 `go func()` 那一段），
+**不在 `serve()` 的 recover 范围内**。所以后果不是"这条连接断掉"，而是
+**整个进程退出**：任何一个客户端 30 秒不回 break 确认就够触发。
+这是本版最严重的一条。
+
+- `breakWait` 新增 `closed` 标记，`finish()` 改为幂等；`ack` / 等到超时 /
+  `release` 的 orphan 收尾这三条**彼此并发**的路径共用它。
+- 顺带修掉同一处的另一半：确认与超时恰好交错时（确认先关、超时后关）同样 panic。
+- 回归用例：`TestOplockBreakTimeoutThenCancelDoesNotPanic`、
+  `TestOplockBreakAckAndTimeoutRace`。变异自检已实测：把 `finish()` 改回裸
+  `close(w.done)`，前者直接报 `panic: close of closed channel` 变红。
+
+### 二、复合链续跑拿着读缓冲的别名切片
+
+`runChain` 把 `frame[pos+segLen:]` 原样存进 `chainPause.rest`，但明文帧直接别名
+`Transport` 的读缓冲 —— `transport.go` 的 `ReadFrame` 复用 `t.rbuf`。读循环紧接着
+的下一次 `ReadFrame` 就把同一块内存写成下一个请求，而续跑发生在**另一个 goroutine**
+上、且更晚，于是它解析到的是别人的字节（表现为随机协议错误或直接断连）。
+
+- 新增 `copyChainRest()`：续跑所需的剩余字节一律拷一份。加密路径的明文是新分配的、
+  本不受影响，但两条路径共用这一处，不区分。
+- 只有真正跑 `serve()` 读循环才会出现；直接调 `handleSMB2Chain` 的用例覆盖不到，
+  所以新用例在调用后把入参帧**涂掉**，以此模拟缓冲复用。
+- 回归用例：`TestCompoundMidChainResumeOwnsRestBytes`（变异自检已实测变红）。
+
+### 三、`w.sent` 无锁读写：数据竞争 + 可能重复发 break
+
+多个等待方会拿到 `beginBreak` 返回的**同一个** `breakWait`，各自跑在自己的
+goroutine 上裸读写 `sent`。`-race` 能报出来；交错不利时两个并发打开会给同一个
+持有者发两遍 break —— 客户端对重复 break 的处置各家不一，最坏直接断连。
+
+- 新增 `oplockTable.markSent()`：判定与置位在表锁下一次完成。
+- 回归用例：`TestOplockBreakSentOnlyOnce`（16 并发，断言只发一次）。
+
+### 四、订正一批与当前行为矛盾的注释与文档
+
+- `async.go` / `dispatch.go`：`Defer` 的注释仍写「只允许复合链末条挂起」，
+  该限制 v0.7.2 已取消。
+- `oplock_grant.go`：文件头「三条收紧」的第 2、3 条与 v0.7.2 的实际行为矛盾 ——
+  现在表按对象存**列表**、多个只读者可并存，链中间的 `CREATE` 同样会授予。
+- `grantIfDeferrable`：`a332f2e` 已把两处调用点改成 `grantOplock`，它成了死代码，
+  但注释仍宣称「链中间 CREATE 一律不授予」。按 §7.5 的禁止删除红线**未删除**，
+  只把注释改成「已从授予路径摘下，勿接回」。
+- `oplock_state.go`：注释引用的 `handleOplockConflict` 并不存在。
+- `configs/docker.yaml`：`ws_discovery` / `netbios` 被注成「全项目默认即 false」，
+  与 v0.7.1 的默认值翻转矛盾（同文件另一段注释反而是对的）。
+- `README.md`：安装章节仍停在 v0.4.0 —— Release 直链、四个平台文件名、`curl`
+  示例、两处 Docker tag、构建示例的 `-ldflags`，全部更新到 v0.7.2；
+  另订正三处过期描述（镜像注记仍写着旧的 guest 试用配置、Time Machine 两处
+  「oplock 默认关闭」、「截至 v0.4.0」）。
+- `AGENTS.md` §10.3 新增第 1 条「缺工具链就自己装」：本轮曾因容器里没有 Go 而
+  只做人工审读，实际上装 Go 10 秒、装 gcc 16 秒。附可复制的安装命令，并注明
+  `-race` 所需的 CGO **只开在测试路径**，发布产物仍须 `CGO_ENABLED=0`（§1 C1）。
+
+### 实测
+
+- `go build ./...`、`go vet ./...` 全绿。
+- `go test ./...` 全 20 个包全绿。
+- `CGO_ENABLED=1 go test -race -count=1 ./internal/server/ ./internal/smb/command/`
+  全绿（gcc 已装）。
+- 两个新缺陷均做了**变异自检**：把修复改回原样后对应用例变红，确认用例真的
+  抓得住，不是"写了就绿"。
+
+### 已知问题 / 未实现（v0.7.3）
+
+- 与 v0.7.2 相同：**目录 lease** 仍未实现；oplock/lease 与三套发现协议**均无
+  Windows / macOS 真机验收**；宿主机本地访问没有内核层协调。
+- 本版两个缺陷都是在容器内用单元测试 + `-race` 复现并验证的，**没有真机证据**。
+- 另有一处未改的设计问题（v0.6.0 遗留，非本版引入）：`ackLease` / `ackOplock`
+  直接采信客户端回报的状态，未对"高于服务端要求"的情形做收敛。合规客户端只会
+  回报等于或低于要求的状态，所以实践中不触发；但要堵就得先定策略，留待后续版本。
+
+---
+
 ## v0.7.2（2026-09-02，正式版）
 
 > 本版把 oplock/lease 向**标准做法**又推进两步，并补上一条此前漏写的风险说明。
