@@ -15,11 +15,18 @@ import (
 //
 // 三条收紧（每条都对应一种具体的脏数据路径）：
 //
-//  1. 该对象上已经有别的句柄打开着 → 不授予写缓存类许可
-//     （EXCLUSIVE / BATCH / W 位）。读缓存（II / R 位）也不授予 ——
-//     表按对象只留一条条目，两条并存意味着两套互不知情的缓存。
-//  2. 该对象上已经有 oplock/lease 条目 → 不授予（同上，避免双条目）。
-//  3. 复合链中间的 CREATE → 不授予。见下方 planOplock 的说明。
+//  1. 该对象上已经有别的句柄打开着 → 不授予**写**缓存类许可
+//     （EXCLUSIVE / BATCH / W 位）。读缓存（II / R 位）只在"没人能改数据"
+//     时授予：没有条目在缓存写、也没有别的句柄握着写权限。
+//  2. 该对象上已经有 oplock/lease 条目 → 同样不授予写缓存。
+//     v0.7.2 起表按对象存**列表**，多个只读者可以各持一份读缓存
+//     （对齐 Samba / Windows 的 Level II 与 R lease），
+//     但"至多一个写缓存者"这条不变式没有松动。
+//  3. 复合链中间的 CREATE 也曾一律不授予 —— 那条限制自 v0.7.2 起**已取消**：
+//     链中间也能挂起续跑了（见 internal/server 的 runChain / resumeChain），
+//     因此 grantOplock 不再区分链位置。
+//     ⚠️ 切勿把这个判断提前到 planOplock 开头做"链中间短路"：那会连带
+//     跳过下面的 break 检查，直接放行一次会读到脏数据的访问。
 // ---------------------------------------------------------------------------
 
 // oplockPlanKind 区分本次 CREATE 授予的是哪一类。
@@ -197,10 +204,10 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 				"path", path, "share", share.Name)
 			return oplockPlan{}, nil, status.SharingViolation
 		}
-		// beginBreak 已存在时返回同一个 wait —— 只有新建的那次才需要发通知，
-		// 否则会给同一个持有者重复发第二遍 break。
-		if !w.sent {
-			w.sent = true
+		// beginBreak 已存在时返回同一个 wait —— 只有**第一个**拿到它的
+		// 调用方发通知，否则会给同一个持有者重复发第二遍 break。
+		// 判定走 markSent（在表锁下置位），不能裸读 w.sent。
+		if share.oplocks.markSent(w) {
 			sendOplockBreak(ctx, e, levels[i], states[i])
 		}
 		if !containsWait(waits, w) {
@@ -267,12 +274,15 @@ func readOnlyPlan(req *wire.CreateRequest, wantLease *wire.LeaseContext) oplockP
 
 // grantIfDeferrable 决定授予，但对**复合链中间**的 CREATE 一律不授予。
 //
-// 它需要挂起通路才能在将来冲突时等 break 确认，而异步响应是单发的，
-// 链中间挂起等于把一条复合响应链拆成两帧（见 Context.Defer 的「末条限制」）。
-// 不授予就没有缓存许可，也就永远不需要由它触发 break —— 从根上避开。
+// ⚠️ **本函数已从授予路径上摘下**（v0.7.2）：此前链中间挂起没法续跑
+// （异步响应是单发的），只能靠"不授予"来避免由它触发 break；
+// internal/server 的 runChain / resumeChain 补上续跑机制后，
+// planOplock 的两处调用点已改为直接调 grantOplock。
+// 它留在这里只为记录这条判据的来历，**不要接回去** —— 接回去会让链中间的
+// CREATE 重新拿不到 oplock。
 //
-// ⚠️ 这条判断**只能**放在"是否授予"这一步，绝不能提前到 planOplock 开头：
-// 那样会让复合链中间的 CREATE 连带跳过 break 检查，
+// 另一半教训仍然有效：这条判断**只能**放在"是否授予"这一步，绝不能提前到
+// planOplock 开头 —— 那样会让复合链中间的 CREATE 连带跳过 break 检查，
 // 直接放行一次会读到脏数据的访问。
 func grantIfDeferrable(ctx *Context, req *wire.CreateRequest, wantLease *wire.LeaseContext) oplockPlan {
 	if ctx.Header.NextCommand != 0 {

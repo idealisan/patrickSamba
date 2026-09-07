@@ -24,7 +24,8 @@ import (
 //
 // 「等确认」这条在这里不阻塞读循环：需要打破时 CREATE 走 Context.Defer
 // 挂起（见 async.go），读循环照常收帧，客户端的 break 确认才能进得来。
-// 挂不起来（复合链中间）时**不授予也不强闯** —— 见 handleOplockConflict。
+// 挂不起来时**不授予也不强闯** —— 按共享冲突回绝，见 create.go 的
+// deferCreateForOplockBreak。
 // ---------------------------------------------------------------------------
 
 const (
@@ -64,6 +65,15 @@ type breakWait struct {
 	wantState wire.LeaseState
 	// acked 表示持有者已经确认（而不是等超时）。
 	acked bool
+	// closed 表示 done 已经关过。
+	//
+	// 关通道必须**只做一次**，而能关它的有三条彼此并发的路径：
+	// 持有者确认（ack）、wait 等到超时、持有者句柄关闭（release 的
+	// orphan 收尾）。它们谁先谁后都不确定，且后到的仍会走完整的收尾流程
+	// （超时那条紧接着就要 cancelBreak）。没有这个标记就是
+	// "close of closed channel" —— panic 发生在挂起请求的 goroutine 上，
+	// 不在 serve 的 recover 范围内，一次 break 超时会带走整个进程。
+	closed bool
 	// epoch 是租约的版本号，确认报文必须带回同一个值（MS-SMB2 §2.2.25.2）。
 	epoch uint16
 	// sent 表示 break 通知是否已经发出过。
@@ -71,6 +81,9 @@ type breakWait struct {
 	// beginBreak 对"已经在等的条目"返回**同一个** wait，多个等待方会拿到它。
 	// 没有这个标记的话，第二个等待方会给同一个持有者再发一遍 break ——
 	// 客户端对重复 break 的处置各家不一，最坏会直接断连。
+	//
+	// 由 oplockTable.mu 保护，只经 markSent 读写：等待方各自跑在自己的
+	// goroutine 上，裸读写会让两个并发打开同时看到 false、各发一遍。
 	sent bool
 }
 
@@ -85,11 +98,26 @@ func (w *breakWait) ack(level wire.OplockLevel, state wire.LeaseState) {
 	w.wantLevel = level
 	w.wantState = state
 	w.mu.Unlock()
-	close(w.done)
+	w.finish()
 }
 
-// finish 由超时路径调用：按"已打破"推进，不置 acked。
-func (w *breakWait) finish() { close(w.done) }
+// finish 结束本次等待并唤醒等待者。
+//
+// 三条彼此并发的路径都会走到这里：持有者确认（ack）、wait 等到超时、
+// 持有者句柄先关了（release 的 orphan 收尾）。**必须幂等** —— 典型的一幕是
+// wait 超时后先关一次，紧接着 awaitOplockBreak 又对同一条目调 cancelBreak，
+// 那会再关一次；close 一个已关闭的 channel 是 panic，且它发生在挂起请求的
+// goroutine 上（不在 serve 的 recover 范围内），一次 break 超时就带走整个进程。
+func (w *breakWait) finish() {
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	w.closed = true
+	w.mu.Unlock()
+	close(w.done)
+}
 
 // wait 等到确认或超时。返回是否收到了确认。
 func (w *breakWait) wait(timeout time.Duration) bool {
@@ -101,13 +129,12 @@ func (w *breakWait) wait(timeout time.Duration) bool {
 		defer w.mu.Unlock()
 		return w.acked
 	case <-timer.C:
+		// "关通道"与"有没有收到确认"是两件事：确认可能恰好在这一瞬到达，
+		// 那时 done 已经关了（finish 幂等，此处是 no-op），acked 才是判据。
+		w.finish()
 		w.mu.Lock()
-		already := w.acked
-		w.mu.Unlock()
-		if !already {
-			w.finish()
-		}
-		return already
+		defer w.mu.Unlock()
+		return w.acked
 	}
 }
 
@@ -367,9 +394,6 @@ func (e *oplockEntry) breakTarget(newOpenerWrites bool) (wire.OplockLevel, wire.
 		return wire.OplockLevelNone, 0
 	}
 	// 交出写缓存后至少还能留着 Level II（读缓存）。
-	if e.level == wire.OplockLevelII {
-		return wire.OplockLevelII, 0
-	}
 	return wire.OplockLevelII, 0
 }
 
@@ -394,6 +418,21 @@ func (t *oplockTable) beginBreak(e *oplockEntry, wantLevel wire.OplockLevel, wan
 		epoch:     e.epoch,
 	}
 	return e.breaking, true
+}
+
+// markSent 报告 break 通知**是否该由本调用方发出**（真=是）。
+//
+// 判定与置位在 t.mu 下一次完成：多个等待方可能同时拿到 beginBreak 返回的
+// 同一个 wait，各自跑在自己的 goroutine 上，谁先谁后不确定。裸读写 sent
+// 既是一场数据竞争，也会在交错不利时给同一个持有者发出两遍 break。
+func (t *oplockTable) markSent(w *breakWait) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if w.sent {
+		return false
+	}
+	w.sent = true
+	return true
 }
 
 // cancelBreak 把一次进行中的 break 收尾（超时/取消路径）。

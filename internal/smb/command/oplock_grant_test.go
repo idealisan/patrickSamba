@@ -3,6 +3,8 @@ package command
 import (
 	"io"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -540,4 +542,113 @@ func (t *oplockTable) count() int {
 		n += len(list)
 	}
 	return n
+}
+
+// TestOplockBreakTimeoutThenCancelDoesNotPanic：break 超时的收尾必须幂等。
+//
+// 一次超时会连着走两步：wait 的超时分支先关一次 done，紧接着
+// awaitOplockBreak 对同一条目调 cancelBreak，那又要关一次。
+// 修复前第二步是 "close of closed channel" —— 而它跑在挂起 CREATE 的
+// goroutine 上（不在 serve 的 recover 范围内），一次 break 超时就带走整个进程。
+//
+// 变异自检：把 breakWait.finish 改回裸 close(w.done) → 本例 panic 变红。
+func TestOplockBreakTimeoutThenCancelDoesNotPanic(t *testing.T) {
+	var tbl oplockTable
+	owner := &Open{}
+	e := &oplockEntry{owner: owner, level: wire.OplockLevelBatch}
+	tbl.grant(oplockKey{}, e)
+
+	w, ok := tbl.beginBreak(e, wire.OplockLevelNone, 0)
+	if !ok {
+		t.Fatal("首个 break 应当能登记")
+	}
+
+	// 没有任何确认，等到超时。
+	if w.wait(time.Millisecond) {
+		t.Fatal("无人确认时 wait 应返回 false")
+	}
+	// 超时的下一步就是 cancelBreak（awaitOplockBreak 的收尾）。
+	tbl.cancelBreak(e)
+
+	// 迟到的确认同样不能把通道关第二次。
+	w.ack(wire.OplockLevelII, 0)
+
+	// 收尾后条目应已按"已打破"降级：要求降到 NONE，于是整条摘掉。
+	if tbl.count() != 0 {
+		t.Fatalf("cancelBreak 后应无条目，实际 %d", tbl.count())
+	}
+	if tbl.breaking != 0 {
+		t.Fatalf("cancelBreak 后进行中的 break 应归零，实际 %d", tbl.breaking)
+	}
+}
+
+// TestOplockBreakAckAndTimeoutRace：确认与超时并发时也只能关一次通道。
+//
+// 两个 goroutine 分别代表"持有者回了确认"与"等到超时"，谁先谁后不确定；
+// 无论谁赢，都不能 panic，也不能漏唤醒（wait 必须返回）。
+func TestOplockBreakAckAndTimeoutRace(t *testing.T) {
+	var tbl oplockTable
+	owner := &Open{}
+	e := &oplockEntry{owner: owner, level: wire.OplockLevelBatch}
+	tbl.grant(oplockKey{}, e)
+
+	w, ok := tbl.beginBreak(e, wire.OplockLevelNone, 0)
+	if !ok {
+		t.Fatal("首个 break 应当能登记")
+	}
+
+	done := make(chan bool, 1)
+	go func() { done <- w.wait(time.Millisecond) }()
+	go w.ack(wire.OplockLevelNone, 0)
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wait 既没被确认唤醒也没超时返回 —— 等待方被挂死了")
+	}
+
+	// 再关一次也不该出事（超时路径与确认路径都跑过了）。
+	w.finish()
+	tbl.cancelBreak(e)
+}
+
+// TestOplockBreakSentOnlyOnce：同一条 break 的通知只能发出一次。
+//
+// 多个等待方会拿到 beginBreak 返回的同一个 wait，各自跑在自己的 goroutine
+// 上。判定必须走 markSent（表锁下置位），裸读写 sent 既是一场数据竞争，
+// 也会在交错不利时给同一个持有者发两遍 break。
+//
+// 变异自检：把 markSent 换成 w.sent 的裸读写 → -race 下本例报竞争。
+func TestOplockBreakSentOnlyOnce(t *testing.T) {
+	var tbl oplockTable
+	owner := &Open{}
+	e := &oplockEntry{owner: owner, level: wire.OplockLevelBatch}
+	tbl.grant(oplockKey{}, e)
+
+	w, ok := tbl.beginBreak(e, wire.OplockLevelNone, 0)
+	if !ok {
+		t.Fatal("首个 break 应当能登记")
+	}
+
+	// 16 个并发的后续打开都要同一条 break。
+	const n = 16
+	var sent int32
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if tbl.markSent(w) {
+				atomic.AddInt32(&sent, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if sent != 1 {
+		t.Fatalf("break 通知应恰好发出一次，实际 %d 次", sent)
+	}
 }
