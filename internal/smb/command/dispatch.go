@@ -111,8 +111,9 @@ func Dispatch(ctx *Context) {
 		//   - 未置位：本条消息在当前帧里**一个字节都不回**，客户端继续等，
 		//     最终响应到了才算完。
 		//
-		// 挂起的请求不算失败，因此不置 Chain.Failed —— 后面也没有消息了
-		// （Defer 只允许复合链末条挂起）。
+		// 挂起的请求不算失败，因此不置 Chain.Failed —— 链里若还有后续消息，
+		// 它们交给续跑处理（v0.7.2 起中间挂起同样可行，见 internal/server
+		// 的 runChain / resumeChain），不在这里提前判死。
 		if ctx.async.interim {
 			ctx.Status = status.Pending
 			ctx.ResetBody()

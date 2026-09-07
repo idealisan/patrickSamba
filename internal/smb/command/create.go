@@ -151,7 +151,7 @@ func createFile(ctx *Context, req *wire.CreateRequest) error {
 // 挂起之后读循环照常收帧，客户端的 OPLOCK_BREAK 确认才到得了
 // （见 async.go 与 oplock_state.go 的 breakWait）。
 //
-// 退路：挂不起来时（无异步通路 / 复合链中间）回 STATUS_SHARING_VIOLATION。
+// 退路：挂不起来时（无异步通路 / 未决数达上限）回 STATUS_SHARING_VIOLATION。
 // 这不是偷懒 —— 不能等确认却放行，就是放行一次**会读到脏数据**的访问，
 // 那比一次可重试的失败糟得多。
 func deferCreateForOplockBreak(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,

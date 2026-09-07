@@ -423,20 +423,18 @@ func (c *Conn) cancelPending(k asyncKey) bool {
 // 返回 (nil, false) 表示**挂不起来**，handler 必须立即同步应答：
 //
 //   - 没有注入 AsyncSink（单元测试构造的裸 Conn，或连接正在拆除）；
-//   - 本条消息不是复合链的最后一条 —— 见下方限制说明；
 //   - 未决数已达 maxPendingAsync；
 //   - 同一 (SessionId, MessageId) 上已经有未决请求。
 //
-// **限制：只允许复合链的末条消息挂起。**
+// **链位置不再是限制**（v0.7.2 起）。此前只有末条消息能挂起：异步响应是
+// 单发的，链中间挂起意味着要把一条复合响应链拆成两段。现在 internal/server
+// 的 runChain 会把"剩下的字节 + 链状态"存进 chainPause，等本请求完成后由
+// resumeChain 接着跑并写成新的一帧，因此中间挂起同样可行。
 //
-// 异步响应是**单发**的：它自己是一帧，不参与任何复合链。若允许链中间的
-// 消息挂起，服务端就得把一条复合响应链拆成两段（前段立即发、后段等），
-// 而客户端对"半个复合响应"的处理各家实现并不一致。末条消息挂起时，
-// 前面各条的响应照常在同一帧里发出，末条要么回 interim STATUS_PENDING
-// （客户端置了 ASYNC_COMMAND 时）要么干脆不回，语义干净且可验证。
-//
-// 真实客户端的 CHANGE_NOTIFY / 阻塞 LOCK 都是单独一帧发出的，
-// 这个限制在实践中不会触发；万一触发，handler 退回同步语义。
+// 末条挂起时前面各条的响应照常在同一帧里发出，末条要么回 interim
+// STATUS_PENDING（客户端置了 ASYNC_COMMAND 时）要么干脆不回；
+// 中间挂起时**本帧只回到它前一条为止**，剩下的走续跑帧。
+// 复合链本质是批处理优化，分帧应答是合法的（每条带自己的 MessageId）。
 func (c *Context) Defer() (*AsyncRequest, bool) {
 	if c.async != nil {
 		// 同一条请求只能挂起一次。
