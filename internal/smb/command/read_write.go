@@ -8,6 +8,7 @@ import (
 	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
 	"github.com/finalappstore/stupidsamba/internal/smb/status"
 	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/finalappstore/stupidsamba/internal/vfs"
 )
 
 func init() {
@@ -372,8 +373,27 @@ func handleFlush(ctx *Context) error {
 	if h == nil {
 		return status.FileClosed
 	}
-	if !open.IsDir {
-		if serr := h.Sync(true); serr != nil {
+	// 目录也要真的刷。
+	//
+	// 此前这里写的是 `if !open.IsDir`，目录句柄直接跳过 Sync 回成功。
+	// 对照 Samba（source3/smbd/smb2_flush.c:155-196）并不是这样：
+	// 它在访问校验里为目录单开一道（注释原话是"if opened with *either*
+	// FILE_ADD_FILE or FILE_ADD_SUBDIRECTORY they can be flushed"），
+	// 之后**不区分目录与否**，一律 SMB_VFS_FSYNC_SEND。
+	//
+	// 对我们的影响：AAPL 在 time_machine 共享上宣告了
+	// kAAPL_SUPPORTS_FULL_SYNC，macOS 据此相信 FLUSH 之后数据已落盘。
+	// 而 Time Machine 会大量建目录 —— 目录项不刷，断电后就是"备份显示成功、
+	// 恢复时少文件"，且没有任何一方报错。
+	if serr := h.Sync(true); serr != nil {
+		// 某些平台/文件系统刷不了目录句柄（Windows 的目录句柄尤其可疑，
+		// 本容器无法验证）。这种"做不到"不该让整次 FLUSH 失败 ——
+		// 客户端（尤其是 Time Machine）会把 FLUSH 失败当成备份失败中止，
+		// 而我们对这个错误其实无能为力。记为 WARN，其余照常成功。
+		if errors.Is(serr, vfs.ErrNotSupported) {
+			ctx.Log.Warn("FLUSH：本平台不支持刷目录句柄，目录项持久化无保证",
+				"path", open.Path, "err", serr)
+		} else {
 			return status.FromVFSError(serr)
 		}
 	}

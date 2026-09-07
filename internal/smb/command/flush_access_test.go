@@ -173,3 +173,34 @@ func TestFlushReallyCallsFullSync(t *testing.T) {
 		t.Fatal("FLUSH 必须用 full=true（F_FULLFSYNC 语义），实际传的是 false")
 	}
 }
+
+// TestFlushDirectoryAlsoSyncs：目录句柄同样要刷（Samba 口径）。
+//
+// 此前 read_write.go 写的是 `if !open.IsDir { h.Sync(true) }` —— 目录直接跳过。
+// 对照 Samba（source3/smbd/smb2_flush.c:155-196）：访问校验里为目录单开一道
+// （需 FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY），之后**不区分目录与否**，
+// 一律 SMB_VFS_FSYNC_SEND。
+//
+// 差异对 Time Machine 是实质性的：AAPL 在 time_machine 共享上宣告了
+// kAAPL_SUPPORTS_FULL_SYNC，macOS 据此相信 FLUSH 之后已落盘，而 TM 会大量
+// 建目录 —— 目录项不刷，断电后就是"备份显示成功、恢复时少文件"。
+//
+// 变异自检：把 Sync 调用包回 `if !open.IsDir` → 本例变红。
+func TestFlushDirectoryAlsoSyncs(t *testing.T) {
+	ctx, dirOpen := newFlushCtx(t, true)
+	dirOpen.GrantedAccess = wire.FileWriteData | wire.FileAppendData // 即 ADD_FILE|ADD_SUBDIR
+
+	spy := &syncSpy{Handle: dirOpen.Handle}
+	dirOpen.Handle = spy
+	t.Cleanup(func() { dirOpen.Handle = spy.Handle })
+
+	if err := runFlush(ctx, dirOpen); err != nil {
+		t.Fatalf("目录句柄的 FLUSH 不应失败: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("目录句柄也应当调一次 Sync，实际 %d 次", spy.calls)
+	}
+	if !spy.full[0] {
+		t.Fatal("目录句柄的 FLUSH 同样要 full=true")
+	}
+}
