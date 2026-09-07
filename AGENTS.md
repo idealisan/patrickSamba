@@ -976,6 +976,29 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
    由 **smbclient + impacket + go-smb2** 三家满足（第四家见第 10 条 smbtorture）。
 3. **impacket 用 apt 装，不要用 pip**：`apt-get install python3-impacket`
    （pip 装会和已有的 cryptography 版本冲突）。
+
+   ⚠️ **装完必须确认 `python3` 找得到它** —— 2026-09-07 实测踩到：本容器里
+   `/usr/local/bin/python3` 是 **3.12**，排在 PATH 前面；apt 装进去的 impacket
+   落在系统 python **3.13**（`/usr/bin/python3`）的 dist-packages 里。
+   于是
+
+   ```sh
+   python3 -c "import impacket"     # → ModuleNotFoundError
+   ```
+
+   而验收脚本（`test/acceptance*.sh`、`scripts/acceptance.sh`）正是靠这一句判断
+   有没有 impacket，判不到就 **返回 77 跳过** —— 表现是"验收悄悄少一家"，
+   不看汇总里的 SKIP 根本发现不了。
+
+   跑验收前把系统 python 顶到前面：
+
+   ```sh
+   PATH=/usr/bin:$PATH sh scripts/acceptance.sh
+   ```
+
+   自检：`python3 -c "from impacket.smbconnection import SMBConnection"` 必须无输出。
+
+   同理 `smbclient` 也要装：`apt-get install smbclient`（本容器实测 4.22.10）。
 4. **致命坑一：`pkill -f <路径>` 会自杀**。该模式会匹配到执行它的 shell 自己的命令行，
    把父 shell 一起杀掉，表现为「命令无输出 / 被 SIGTERM / 服务起不来」，极难排查。
    一律用 `pkill -x stupidsamba`。起后台服务用
