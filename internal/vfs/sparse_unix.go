@@ -4,6 +4,11 @@ package vfs
 
 // sparse_unix.go —— 用 lseek(2) 的 SEEK_DATA / SEEK_HOLE 探测空洞分布。
 //
+// ⚠️ **本文件的 platformAllocatedRanges / platformSetSparse 当前没有调用点**
+// （真实路径是 vfs/optional.go → oscap 层，见 sparse_other.go 的说明）。
+// 保留只为不违反禁止删除的约定，改这里不会改变运行期行为。
+// 下面那段常量说明仍然有效，是因为 oscap/native 侧用的是同一组符号常量。
+//
 // **常量在两个平台上的数值是相反的**，这是本文件最容易踩的坑：
 //
 //	Linux   <linux/fs.h>        SEEK_DATA = 3, SEEK_HOLE = 4

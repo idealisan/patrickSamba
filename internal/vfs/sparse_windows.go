@@ -6,6 +6,10 @@ package vfs
 //
 // 走 golang.org/x/sys/windows 的 DeviceIoControl，是纯 Go 的 syscall
 // 封装，不需要 CGO（AGENTS.md C1）。
+//
+// ⚠️ **本文件的 platformAllocatedRanges / platformSetSparse 当前没有调用点**
+// （真实路径是 vfs/optional.go → oscap/native/sparse_windows.go，
+// 见 sparse_other.go 的说明）。保留只为不违反禁止删除的约定。
 
 import (
 	"errors"
