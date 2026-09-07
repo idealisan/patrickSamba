@@ -150,16 +150,16 @@ Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capabilit
 > export CNB_TOKEN=<你的个人访问令牌>
 > ```
 
-最新版本 **v0.4.0** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
+最新版本 **v0.7.2** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
 发布渠道按 **tag 名的 SemVer** 判定 —— 带连字符的 tag（`v0.2.0-rc1`）才走预发布。
 **「正式版通道」说的是发布渠道，不是成熟度背书**，成熟度以下文各节的实测证据为准）：
 
 - **Release 页（推荐，普通用户点这里下载）**：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.4.0`
+  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.7.2`
   页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
 - **原始文件直链（给脚本 / CI 用）**：
-  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0/stupidsamba_v0.4.0_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.4.0/SHA256SUMS`）。
+  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.7.2/stupidsamba_v0.7.2_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.7.2/SHA256SUMS`）。
   注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
   最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
   ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
@@ -169,33 +169,33 @@ Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capabilit
 
 | 平台 | 文件 |
 |---|---|
-| Linux x86-64 | `stupidsamba_v0.4.0_linux_amd64.tar.gz` |
-| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.4.0_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `stupidsamba_v0.4.0_darwin_arm64.tar.gz` |
-| Windows x86-64 | `stupidsamba_v0.4.0_windows_amd64.zip` |
+| Linux x86-64 | `stupidsamba_v0.7.2_linux_amd64.tar.gz` |
+| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.7.2_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `stupidsamba_v0.7.2_darwin_arm64.tar.gz` |
+| Windows x86-64 | `stupidsamba_v0.7.2_windows_amd64.zip` |
 
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.4.0
+BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.7.2
 
 # 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
-  -o stupidsamba_v0.4.0_linux_amd64.tar.gz \
-  "$BASE/stupidsamba_v0.4.0_linux_amd64.tar.gz"
+  -o stupidsamba_v0.7.2_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_v0.7.2_linux_amd64.tar.gz"
 
 # 校验完整性
 curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
 
-tar -xzf stupidsamba_v0.4.0_linux_amd64.tar.gz
-./stupidsamba_v0.4.0_linux_amd64/stupidsamba -config stupidsamba_v0.4.0_linux_amd64/configs/example.yaml
+tar -xzf stupidsamba_v0.7.2_linux_amd64.tar.gz
+./stupidsamba_v0.7.2_linux_amd64/stupidsamba -config stupidsamba_v0.7.2_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
 
 > 说明：Release 页面上保留着历史条目 `v0.1.0` ~ `v0.3.0`，以及发布流程验证用的
 > `v0.1.0-test` / `v0.0.99-probe` / `v0.2.0-rc0`。后三个是**流程验证记录**，
-> **请勿下载使用**；`v0.1.0` ~ `v0.3.0` 是旧版本，新部署请用 v0.4.0。
+> **请勿下载使用**；`v0.1.0` ~ `v0.3.0` 是旧版本，新部署请用 v0.7.2。
 
 ### 方式一之二：Docker 镜像（NAS / 家庭服务器推荐）
 
@@ -218,13 +218,16 @@ docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
 docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.7.2
 
 smbclient //127.0.0.1/public -U stupidsamba%stupidsamba -m SMB3 -c ls
 ```
 
-> 注：已发布的 v0.4.0 镜像内置的还是旧版试用配置（guest 匿名 + 回环端口示例）。
-> 上面的用法（演示账号 + `-p 445:445`）自**包含本版新内置配置的下一个镜像**起生效。
+> 注：镜像内置的 [`configs/docker.yaml`](configs/docker.yaml) **已经带演示账号**
+> （`stupidsamba` / `stupidsamba`，不是 guest 匿名），上面的用法开箱即用；
+> 启动日志会为这份公开凭据打一条 WARN。
+> v0.7.2 镜像里三套服务发现（mDNS / WS-Discovery / NetBIOS）都是**显式关闭**的 ——
+> 桥接网络下组播与广播出不去，广播一个连不上的地址比不广播更坏，详见下一节的须知。
 
 `docker pull` 会按当前平台自动挑架构，不需要指定。要在 amd64 机器上核对 arm64
 那一份，用 `docker pull --platform linux/arm64 ...`。
@@ -255,15 +258,17 @@ docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
   -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.4.0
+  docker.cnb.cool/finalappstore/stupidsamba:v0.7.2
 ```
 
 两点须知：
 
-- **mDNS 在默认桥接网络下无效，因此内置配置里是关的。** 组播报文出不了 docker0 网桥，
-  就算出得去，广播的也是容器内部的 172.17.x.x 地址，客户端照着连必然失败。
-  要让 Finder / 资源管理器自动发现，用 `--network host` 起容器，
-  并挂载一份把 `mdns.enabled` 改成 `true` 的配置。
+- **三套服务发现（mDNS / WS-Discovery / NetBIOS）在默认桥接网络下无效，因此内置
+  配置里都是显式关的。** 组播与广播报文都出不了 docker0 网桥，就算出得去，广播的
+  也是容器内部的 172.17.x.x 地址，客户端照着连必然失败。要让 Finder / 资源管理器
+  自动发现，用 `--network host` 起容器，并挂载一份把 `mdns.enabled`、
+  `ws_discovery.enabled`、`netbios.enabled` 都改成 `true` 的配置
+  （注意 137/138 是特权端口，非 root 容器需要额外授权）。
 - 容器内固定监听 445。要用非特权端口就改**宿主侧**的映射（`-p 4445:445`），
   不要改容器内端口。宿主侧换了端口后 Windows 资源管理器仍可直连：
   地址写成 `\\IP:4445\public` 带上端口号即可（Windows 11 实测可用）。
@@ -280,7 +285,7 @@ CGO_ENABLED=0 go build -o stupidsamba ./cmd/stupidsamba
 
 ```sh
 go build -trimpath \
-  -ldflags "-s -w -X main.version=v0.4.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -ldflags "-s -w -X main.version=v0.7.2 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   -o stupidsamba ./cmd/stupidsamba
 ```
 
@@ -498,9 +503,11 @@ done
   `FILE_NOTIFY_INFORMATION`，支持 `SMB2_WATCH_TREE` 递归与 `CompletionFilter` 过滤。
   变更由**命令层记账**（自己的写路径），不用 inotify —— 理由见
   [已知限制](#notes) 第 4 条。
-- **oplock / lease**：`server.oplocks: true` 时授予 oplock（II / EXCLUSIVE / BATCH）
-  与租约（RqLs v1 / v2），并在冲突时发 break 通知**等确认**后才放行新的打开。
-  **默认关闭**，理由与边界见[已知限制](#notes) 第 6 条。
+- **oplock / lease**：`server.oplocks: true`（**默认**）时授予 oplock
+  （II / EXCLUSIVE / BATCH）与租约（RqLs v1 / v2），并在冲突时发 break 通知
+  **等确认**后才放行新的打开。理由与边界见[已知限制](#notes) 第 6 条。
+  v0.7.2 起**多个并发只读者可以各持一份读缓存**（Level II / R lease 不是排他的），
+  与 Samba / Windows 对齐；"至多一个写缓存者"这条不变式没有松动。
 - **异步未决请求表**：`CHANGE_NOTIFY` 与阻塞锁共用。请求挂起后读循环照常收帧，
   因此 `CANCEL` 能真正取消一个正在等待的请求（此前 `CANCEL` 只能静默丢弃 ——
   不存在可被取消的未决请求）。
@@ -565,7 +572,7 @@ Windows 网络列表里留下一个新的同名条目。
 
 ## Time Machine 状态 <a name="timemachine"></a>
 
-> **截至 v0.4.0（含），本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
+> **截至 v0.7.2（含），本项目从未跑过一次真实的 Time Machine 备份，更没有做过恢复**——
 > 开发环境里没有 macOS，「备份并成功恢复」一次都没有发生过（v0.2.0 时如此，
 > 此后三个版本也没有补上这个验证）。
 > 下面列的是「服务端前置能力已实现并实测」，**不等于「Time Machine 能用」**：前者是
@@ -608,12 +615,12 @@ Windows 网络列表里留下一个新的同名条目。
 
 但以下能力仍缺，可能导致备份不稳定甚至失败（按对 Time Machine 的实际影响排序）：
 
-- **oplock / lease** —— v0.6.0 已实现，但**默认关闭**（`server.oplocks: false`）。
-  保持默认时客户端仍退化为不缓存，`.sparsebundle` 的 band 目录那种小文件密集写
-  吞吐明显低于 Samba；不影响正确性。打开能改善吞吐，代价与三条边界见
+- **oplock / lease** —— v0.6.0 已实现，v0.7.1 起**默认开启**（`server.oplocks: true`）。
+  它改善的正是 `.sparsebundle` 的 band 目录那种小文件密集写吞吐；关掉时客户端
+  退化为不缓存，吞吐明显低于 Samba，但不影响正确性。代价与三条边界见
   「[已知限制与说明](#notes)」第 6 条。
-  **注意：这是这一节的结论里唯一在近期发生过实质变化的项，但变化的是"有了开关"，
-  不是"验证过了" —— 本项目至今没有 macOS 真机数据，打开后的真实表现未知。**
+  **注意：默认值变了，但"验证过了"没有变 —— 本项目至今没有 macOS 真机数据，
+  开启后的真实表现未知。**
 - **AAPL resolveID** —— 对 TM 本身**无实际影响**（我们不宣告 `kAAPL_SUPPORT_RESOLVE_ID`，
   客户端就不会使用），仅 Finder 的别名 / 最近项目按 64 位 file id 反查路径会退化为按路径查找。
 
@@ -621,9 +628,9 @@ Windows 网络列表里留下一个新的同名条目。
 
 - **不要拿真实备份数据试。** 请仅用测试数据（或一台可随时清空的机器）试用，确认能完成
   一轮完整备份并成功浏览快照后，再考虑放真实数据。**请勿把它作为唯一一份备份的目的地。**
-- **最可能的失败模式是稳定性，不是连不上。** oplock / lease 默认关闭，客户端退化为不缓存，
-  长时间大体量备份（`.sparsebundle` band 目录海量小文件）下的表现未知——可能慢，
-  也可能中途报错。
+- **最可能的失败模式是稳定性，不是连不上。** oplock / lease 虽已默认开启，但**没有
+  macOS 真机证据**，长时间大体量备份（`.sparsebundle` band 目录海量小文件）下的
+  表现未知——可能慢，也可能中途报错。
   **所有 macOS 版本均未经实测**，不要写成「某版本有点抖」这类暗示我们试过的口吻。
 - **备份共享务必显式设 `quota_bytes`。** 不设时上报宿主真实剩余空间，Time Machine 会一路
   写满磁盘。注意：`quota_bytes` 上报的**可用空间 = 配额 − 宿主卷已用空间**（出于性能不
