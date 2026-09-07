@@ -126,3 +126,50 @@ func TestFlushWithoutHandleRejected(t *testing.T) {
 	open.Handle = nil
 	wantStatus(t, "无 fd 句柄的 FLUSH", runFlush(ctx, open), status.FileClosed)
 }
+
+// syncSpy 记录 Sync 的调用与参数，其余方法委托给真实句柄。
+//
+// 嵌入 vfs.Handle 接口：未覆盖的方法自动提升，于是它仍然是合法的 vfs.Handle，
+// 不必为了做间谍去实现一整个接口。
+type syncSpy struct {
+	vfs.Handle
+	calls int
+	full  []bool
+}
+
+func (s *syncSpy) Sync(full bool) error {
+	s.calls++
+	s.full = append(s.full, full)
+	return s.Handle.Sync(full)
+}
+
+// TestFlushReallyCallsFullSync：FLUSH 必须真的走到**强制刷盘**那一档。
+//
+// 现有的 vfs/sync_test.go 自承"数据真到盘片上要断电才知道"，它的
+// TestSyncPersistsData 靠 os.ReadFile 读回验证 —— page cache 本来就是一致的，
+// **把 Sync 改成 no-op 那条用例照样通过**。也就是说全量测试目前拦不住
+// "FLUSH 被悄悄删掉"这种回归，而这正是 Time Machine 最要命的一条
+// （AAPL 里宣告了 kAAPL_SUPPORTS_FULL_SYNC，客户端据此相信数据已落盘）。
+//
+// 本例不看落盘效果（那要断电），只钉住**调用契约**：FLUSH 必须调一次
+// Sync，且 full=true（F_FULLFSYNC 语义那一档，不是普通 fsync）。
+//
+// 变异自检：把 read_write.go 里的 h.Sync(true) 删掉 → calls 断言变红；
+// 把它改成 h.Sync(false) → full 断言变红（在 darwin 上两者不是一回事）。
+func TestFlushReallyCallsFullSync(t *testing.T) {
+	ctx, open := newFlushCtx(t, false)
+
+	spy := &syncSpy{Handle: open.Handle}
+	open.Handle = spy
+	t.Cleanup(func() { open.Handle = spy.Handle })
+
+	if err := runFlush(ctx, open); err != nil {
+		t.Fatalf("FLUSH 不应失败: %v", err)
+	}
+	if spy.calls != 1 {
+		t.Fatalf("FLUSH 应当调一次 Sync，实际 %d 次", spy.calls)
+	}
+	if !spy.full[0] {
+		t.Fatal("FLUSH 必须用 full=true（F_FULLFSYNC 语义），实际传的是 false")
+	}
+}
