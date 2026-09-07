@@ -286,3 +286,70 @@ func TestCompoundLastChainDeferDoesNotPause(t *testing.T) {
 		// 预期：没有更多帧。
 	}
 }
+
+// TestCompoundMidChainResumeOwnsRestBytes：续跑不能拿着读缓冲的别名切片。
+//
+// 明文帧直接别名 Transport 的读缓冲（transport.go 的 ReadFrame 复用
+// t.rbuf），而续跑发生在**另一个 goroutine** 上、且晚于读循环的下一次
+// ReadFrame。v0.7.2 初版把 frame[pos+segLen:] 原样存进 chainPause，
+// 于是续跑解析到的是已经被下一个请求覆盖掉的字节 —— 表现为随机的协议
+// 错误、连接被断开，且只在实际跑 serve() 循环时才出现（直接调
+// handleSMB2Chain 的用例碰不到）。
+//
+// 这里把入参帧涂掉，等价于"读循环紧接着又读了一帧"。
+// 变异自检：把 copyChainRest 换成直接返回入参 → 本例变红。
+func TestCompoundMidChainResumeOwnsRestBytes(t *testing.T) {
+	c, peer := newChainTestConn(t)
+	frames := collectFrames(t, peer)
+	dir := chainEnv(t, c)
+	fid := wire.FileID{Persistent: dir.Persistent, Volatile: dir.Volatile}
+	sessID, treeID := dir.Session.ID, dir.Tree.ID
+
+	echo1 := padTo8(buildCompoundMsg(wire.CommandEcho, 1, sessID, treeID, echoBody(), 0))
+	notify := padTo8(buildCompoundMsg(wire.CommandChangeNotify, 2, sessID, treeID,
+		notifyBody(fid, wire.NotifyChangeFileName), 0))
+	echo3 := padTo8(buildCompoundMsg(wire.CommandEcho, 3, sessID, treeID, echoBody(), 0))
+
+	frame := make([]byte, 0, len(echo1)+len(notify)+len(echo3))
+	frame = append(frame, echo1...)
+	frame = append(frame, notify...)
+	frame = append(frame, echo3...)
+	setNextCommand(frame, 0, uint32(len(echo1)))
+	setNextCommand(frame, len(echo1), uint32(len(notify)))
+
+	if _, err := c.handleSMB2Chain(frame); err != nil {
+		t.Fatalf("handleSMB2Chain: %v", err)
+	}
+
+	// 模拟读循环复用缓冲：下一次 ReadFrame 会把同一块内存写成下一个请求。
+	for i := range frame {
+		frame[i] = 0xAB
+	}
+
+	cancel := buildCompoundMsg(wire.CommandCancel, 2, sessID, treeID, cancelBody(), 0)
+	if _, err := c.handleSMB2Chain(cancel); err != nil {
+		t.Fatalf("CANCEL: %v", err)
+	}
+
+	f1 := awaitFrame(t, frames)
+	h1, err := wire.ParseHeader(f1)
+	if err != nil {
+		t.Fatalf("解析补发响应失败: %v", err)
+	}
+	if h1.MessageID != 2 {
+		t.Fatalf("补发的应是 MessageId=2 的响应，实际 %d", h1.MessageID)
+	}
+
+	// 关键断言：续跑仍按**原来**的字节回 ECHO(3)，没有读到被涂掉的内容。
+	f2 := awaitFrame(t, frames)
+	h2, err := wire.ParseHeader(f2)
+	if err != nil {
+		t.Fatalf("解析续跑响应失败: %v", err)
+	}
+	if h2.MessageID != 3 {
+		t.Fatalf("续跑应回 MessageId=3，实际 %d", h2.MessageID)
+	}
+	if h2.NextCommand != 0 {
+		t.Fatal("续跑帧的末条不应再声明后续消息")
+	}
+}

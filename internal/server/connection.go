@@ -368,6 +368,19 @@ type chainPause struct {
 	async *command.AsyncRequest
 }
 
+// copyChainRest 拷一份"链里剩下的字节"。
+//
+// ⚠️ **必须拷**：明文帧直接别名 Transport 的读缓冲（transport.go 的
+// ReadFrame 复用 t.rbuf），而续跑发生在**另一个 goroutine** 上、且晚于
+// 读循环的下一次 ReadFrame —— 不拷的话，resumeChain 解析到的是已经被
+// 下一个请求覆盖掉的字节（加密路径的 plain 是新分配的，不受影响，
+// 但两条路径共用这一处，一律拷贝）。
+func copyChainRest(rest []byte) []byte {
+	cp := make([]byte, len(rest))
+	copy(cp, rest)
+	return cp
+}
+
 // handleSMB2Frame 处理一个 SMB2 帧（可能是复合请求链）。
 //
 // encrypted 表示本帧来自 SMB3 TRANSFORM_HEADER 解密结果，
@@ -458,11 +471,11 @@ func (c *Connection) runChain(frame []byte, chain *command.Chain, encrypted bool
 		// 中途挂起：把剩下的字节交出去，等那条异步请求完成后再续跑。
 		//
 		// 末条消息挂起时不用这么做 —— 它后面没有消息，异步响应单独补发
-		// 就够了（这也正是 Context.Defer 只允许末条时才有意义的由来；
-		// 中间挂起由这里兜住）。
+		// 就够了。中间挂起由这里兜住（v0.7.2 之前 Defer 只允许末条挂起，
+		// 正是因为当时没有这段续跑机制）。
 		if ctx.Async() != nil && hdr.NextCommand != 0 {
 			return out, msgs, &chainPause{
-				rest:      frame[pos+segLen:],
+				rest:      copyChainRest(frame[pos+segLen:]),
 				chain:     chain,
 				encrypted: encrypted,
 				async:     ctx.Async(),
