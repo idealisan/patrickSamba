@@ -435,6 +435,39 @@ func (t *oplockTable) markSent(w *breakWait) bool {
 	return true
 }
 
+// breakNow 立刻把一条条目按"已打破"推进，**不等确认**。
+//
+// 只用于**不可能回确认**的持有者：句柄处于 durable 等待重连态，客户端已经断开，
+// sendOplockBreak 拿不到 Sender，等下去必然熬满整个 oplockBreakTimeout（30 秒）
+// 才由超时路径做同样的事。这里把它提前做掉，省下的 30 秒是**第二个客户端**
+// 的等待时间。
+//
+// 语义与 cancelBreak 完全一致（按"已打破"降级，最坏是丢缓存收益而不是丢数据），
+// 差别只是不需要先 beginBreak —— 没有等待方，也就没有 wait 要收尾。
+func (t *oplockTable) breakNow(e *oplockEntry, newOpenerWrites bool) {
+	t.mu.Lock()
+	if e.breaking != nil {
+		t.mu.Unlock()
+		// 上一轮已经有人在等它了：走现成的超时收尾，顺带唤醒那个等待方。
+		t.cancelBreak(e)
+		return
+	}
+	level, state := e.breakTarget(newOpenerWrites)
+	if e.lease {
+		e.leaseState &= state
+		if e.leaseState == wire.LeaseNone {
+			t.removeEntry(oplockKeyOf(e), e)
+			delete(t.leases, e.leaseKey)
+		}
+	} else {
+		e.level = level
+		if e.level == wire.OplockLevelNone {
+			t.removeEntry(oplockKeyOf(e), e)
+		}
+	}
+	t.mu.Unlock()
+}
+
 // cancelBreak 把一次进行中的 break 收尾（超时/取消路径）。
 //
 // **必须按"已打破"推进**：等待者（被推迟的打开）随后就要访问这个文件了，

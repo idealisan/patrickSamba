@@ -91,6 +91,25 @@ func (o *Open) InvalidateDurable() {
 	durableRegistry.invalidate(o)
 }
 
+// durableWaiting 报告本句柄是否正处于「等待重连」态 —— 也就是**客户端已经断开**。
+//
+// 判据是登记表里的键非空：disconnect 时写入，重连成功或过期回收时清空
+// （reap 与 reconnect 都会把它置空）。
+//
+// 这个判据是 oplock break 路径必需的：断开的持有者不可能回 break 确认，
+// 而且**必须**作废它的 durable 登记 —— 否则它重连回来，拿着一份本地缓存的
+// 脏数据继续写，而服务端早就把这个文件放给别人了（那条路径不会报错，
+// 是静默的脏数据）。见 docs/tm-prereview-20260907.md 第 2 条。
+func (o *Open) durableWaiting() bool {
+	d := o.Durable
+	if d == nil {
+		return false
+	}
+	durableRegistry.mu.Lock()
+	defer durableRegistry.mu.Unlock()
+	return d.key != ""
+}
+
 // durableEntry 是登记表里的一条记录：一个正在「等待重连」的持久句柄，
 // 以及重连校验所需的全部上下文。
 type durableEntry struct {

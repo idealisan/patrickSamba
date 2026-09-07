@@ -183,6 +183,20 @@ func planOplock(ctx *Context, req *wire.CreateRequest, fs vfs.FileSystem,
 		if e.owner != nil && ctx.Session != nil && e.owner.Session == ctx.Session {
 			continue
 		}
+		// 断开的 durable 持有者：它已经不在了，不可能回确认。
+		//
+		// 两件事必须一起做：
+		//   1. 作废它的 durable 登记 —— 否则它重连回来，拿着一份本地缓存的
+		//      脏数据继续写，而我们已经把这个文件放给别人了。那条路径
+		//      **不会报错**，是静默的脏数据（Time Machine 断线重连正是这个
+		//      场景，见 docs/tm-prereview-20260907.md 第 2 条）。
+		//   2. 它的缓存许可立刻按"已打破"推进 —— 等下去只会白熬满 30 秒，
+		//      而那 30 秒是**第二个客户端**的打开延迟。
+		if e.owner != nil && e.owner.durableWaiting() {
+			e.owner.InvalidateDurable()
+			share.oplocks.breakNow(e, newWrite)
+			continue
+		}
 		kept = append(kept, e)
 	}
 	victims = kept

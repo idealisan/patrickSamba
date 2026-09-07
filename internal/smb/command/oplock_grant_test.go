@@ -652,3 +652,74 @@ func TestOplockBreakSentOnlyOnce(t *testing.T) {
 		t.Fatalf("break 通知应恰好发出一次，实际 %d 次", sent)
 	}
 }
+
+// TestDurableWaitingHolderInvalidatedAndBrokenAtOnce：断开的 durable 持有者
+// 必须当场作废 durable 并按"已打破"推进。
+//
+// 场景就是 Time Machine 断线重连：A（TM）持有 batch oplock + durable 后断开，
+// 此时 B 打开同一文件。修复前的行为是——
+//   - break 通知发不出去（连接已断，sendOplockBreak 拿不到 Sender）；
+//   - A 的 durable 登记**仍然有效**，于是 A 重连回来，拿着一份本地缓存的
+//     脏数据继续写，而服务端早就把这个文件放给别人了：静默脏数据，不报错；
+//   - 顺带 B 还要白等满 oplockBreakTimeout（30 秒）。
+//
+// 变异自检：
+//   - 去掉 durableWaiting 分支里的 InvalidateDurable → Invalidated 断言变红；
+//   - 把 breakNow 换成"照常进 victims" → Async 与 has 两条断言变红。
+func TestDurableWaitingHolderInvalidatedAndBrokenAtOnce(t *testing.T) {
+	e := newOplockEnv(t, true)
+	a, _ := openWith(t, e.a, "f.txt", accessRW, shareAll,
+		&wire.CreateRequest{RequestedOplockLevel: wire.OplockLevelBatch})
+	if a == nil {
+		t.Fatal("A 打开失败")
+	}
+	if !e.share.oplocks.has(a) {
+		t.Fatal("A 应当持有 oplock 条目")
+	}
+
+	// 模拟 A 断线：句柄进入 durable 等待重连态（登记键非空）。
+	const testKey = "durable-waiting-test-key"
+	durableRegistry.mu.Lock()
+	a.Durable = &DurableState{Granted: true, key: testKey}
+	durableRegistry.entries[testKey] = &durableEntry{open: a}
+	durableRegistry.mu.Unlock()
+	t.Cleanup(func() {
+		durableRegistry.mu.Lock()
+		delete(durableRegistry.entries, testKey)
+		durableRegistry.mu.Unlock()
+	})
+
+	// B 以写方式打开同一文件。
+	e.b.Out = make([]byte, wire.HeaderSize)
+	e.b.Chain = &Chain{}
+	err := createFile(e.b, &wire.CreateRequest{
+		Name:                 "f.txt",
+		DesiredAccess:        accessRW,
+		ShareAccess:          shareAll,
+		CreateDisposition:    wire.FileOpenIf,
+		RequestedOplockLevel: wire.OplockLevelBatch,
+	})
+	if err != nil {
+		t.Fatalf("B 的 CREATE 不应失败，实际 %v", err)
+	}
+
+	// 一、不能挂起：断开的持有者永远回不了确认，挂起就是让 B 白等 30 秒。
+	if e.b.Async() != nil {
+		t.Fatal("持有者已断开时不应挂起 B 的 CREATE（确认永远等不到）")
+	}
+	// 二、durable 登记必须作废，否则 A 重连回来就是静默脏数据。
+	if !a.Durable.Invalidated {
+		t.Fatal("断开的 durable 持有者必须被作废")
+	}
+	if a.Durable.key != "" {
+		t.Fatalf("作废后登记键应清空，实际 %q", a.Durable.key)
+	}
+	// 三、A 的缓存许可当场按"已打破"推进（B 要写 ⇒ 降到 NONE，整条摘掉）。
+	if e.share.oplocks.has(a) {
+		t.Fatal("断开的持有者其缓存许可应当场摘掉")
+	}
+	// 四、不该给它发 break 通知 —— 连接都没了，发了也没人收。
+	if got := e.breakA.oplocks; got != 0 {
+		t.Fatalf("断开的持有者不该收到 break 通知，实际发了 %d 条", got)
+	}
+}
