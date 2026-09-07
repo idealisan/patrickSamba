@@ -916,8 +916,34 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
 
 ### 10.3 环境固有限制与避坑清单
 
-1. **Go 不在 PATH**：每个新 shell 都要 `export PATH=$PATH:/usr/local/go/bin`。
-   真没了就重装 `go1.25.0.linux-amd64.tar.gz` 到 `/usr/local/go`。
+1. **缺工具链就自己装 —— 不许以「环境里没有」为理由跳过 build / test / 验收。**
+
+   > 2026-09-07 的血泪：一轮涉及 panic 与数据竞争的修复，因为容器里没有 Go，
+   > 全程只做了人工审读，最后把「没编译、没跑测试」写进了交付说明 ——
+   > 而实际上装 Go 只要 10 秒、装 gcc 只要 16 秒。
+   > **先装，装不上再说装不上。**「环境没装」不是降低验收标准的理由，
+   > 更不是把未验证的改动当成已验证交付的借口。
+
+   每个新 shell 都要 `export PATH=$PATH:/usr/local/go/bin`
+   （已写入 `/etc/profile.d/go.sh`，新开的 login shell 自带）。真没了就重装：
+
+   ```sh
+   # 官方源不通时走阿里云镜像（实测可用，56 MB 约 10 秒）
+   curl -fL -o /tmp/go.tgz \
+     https://mirrors.aliyun.com/golang/go1.25.5.linux-amd64.tar.gz
+   tar -C /usr/local -xzf /tmp/go.tgz
+   ```
+
+   `-race` **需要 CGO**（否则报 `go: -race requires cgo`），而容器默认没有 C 编译器：
+
+   ```sh
+   apt-get update -qq && apt-get install -y -qq gcc libc6-dev
+   CGO_ENABLED=1 go test -race ./...
+   ```
+
+   ⚠️ **CGO 只开在「跑测试」这一条路上**。发布产物仍然必须 `CGO_ENABLED=0`
+   （见 §1 C1，由 `scripts/check-constraints.sh` 机器校验）——
+   为了 -race 开 CGO 不等于放宽了那条约束，两者别混为一谈。
 2. **`mount.cifs` 在本容器永远跑不通。**
 
    > **先划清边界（这段别删）**：本条只影响**测试手段**。
