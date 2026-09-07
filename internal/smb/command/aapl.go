@@ -247,6 +247,16 @@ func aaplVolumeCapabilities(ctx *Context) uint64 {
 // 各字段一律**小端**；ModelString 是 UTF-16LE、不带 NUL 结尾，
 // 前面有 4 字节保留 0 与 4 字节字节长度（Samba check_aapl 的写法）。
 func buildAAPLResponse(replyBitmap, serverCaps, volumeCaps uint64, model string) []byte {
+	// 只保留我们**真的会提供字节**的那些位。
+	//
+	// 原样回显请求位是不安全的：客户端一旦请求了未知位（例如 0x8），回复里
+	// 置了位却不带对应字节，而客户端是按"有位就有段"去解析的 —— 后面的
+	// 字段会整体错位，表现为难以定位的乱码而不是一个明确的错误。
+	//
+	// 掩码必须做在这里而不是交给调用方：下面算长度与写字节用的是同一个值，
+	// 两处一旦不同步就是畸形报文，而调用方只看到入参、看不到这个不变式。
+	replyBitmap &= aaplServerCaps | aaplVolumeCaps | aaplModelInfo
+
 	var modelBytes []byte
 	if replyBitmap&aaplModelInfo != 0 {
 		modelBytes = wire.EncodeUTF16LE(model)

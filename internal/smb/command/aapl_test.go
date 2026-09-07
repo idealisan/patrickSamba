@@ -415,3 +415,31 @@ var (
 	_ vfs.FileSystem    = (*aaplFakeFS)(nil)
 	_ vfs.AppleMetadata = (*aaplFakeAppleFS)(nil)
 )
+
+// TestBuildAAPLResponseMasksUnknownBits：未知的请求位不得出现在回复里。
+//
+// 回复的语义是"我提供了哪些段"，不是"你要了哪些"。原样回显请求位的话，
+// 客户端请求了 0x8 就会拿到一个"置了位却没有字节"的回复，按位去解析时
+// 后面的 ServerCaps / VolumeCaps / ModelString 全部错位 ——
+// 这种故障不会报错，只会表现成随机的怪值，极难定位。
+//
+// 变异自检：把 buildAAPLResponse 里的掩码去掉 → 本例与长度断言一起变红。
+func TestBuildAAPLResponseMasksUnknownBits(t *testing.T) {
+	const model = "MacSamba"
+	known := aaplServerCaps | aaplVolumeCaps | aaplModelInfo
+
+	// 未知位：0x8、0x10、以及高位随便撒几个。
+	for _, unknown := range []uint64{0x8, 0x10, 0x8000000000000000} {
+		req := unknown | known
+		got := buildAAPLResponse(req, aaplUnixBased, aaplSupportsFullSync, model)
+
+		if v := aaplLE.Uint64(got[8:16]); v != known {
+			t.Errorf("请求位 %#x 时 ReplyBitmap = %#x，期望掩码后的 %#x", unknown, v, known)
+		}
+		// 长度必须只按已知位计算：多算一个段就会多出 8 字节的空洞。
+		wantLen := 16 + 8 + 8 + 8 + 2*len(model)
+		if len(got) != wantLen {
+			t.Errorf("请求位 %#x 时长度 = %d，期望 %d", unknown, len(got), wantLen)
+		}
+	}
+}
