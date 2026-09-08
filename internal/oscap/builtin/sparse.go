@@ -9,6 +9,18 @@ package builtin
 // AllocatedRanges 不报它 —— 至于磁盘占用降没降，取决于宿主文件系统会不会
 // 自己把整块的零折叠掉。**不假装省了空间，也不因为省不了就拒绝服务。**
 //
+// # 但也不能反过来「省不了就干脆多占」
+//
+// 无条件写零是最省事的实现，代价是一次**回收**操作会让文件变胖：在支持稀疏写
+// 但没有 punch hole 的文件系统上（tmpfs、macOS 上的 APFS —— 探测判据就是
+// 「能不能打洞」，见 oscap 的 probe），被打的区间本来就是洞，写零等于把它填实。
+// 所以这里做两件尽量少占盘的事，都不需要任何可选能力：
+//
+//  1. 只写**含非零字节**的块，本来就是零的块一个字节都不碰（zeroNonZero）；
+//  2. 打洞区间顶到 EOF 时，用「截断掉再还原长度」把块真的还回去（reclaimTail）。
+//
+// 第 2 条是唯一能真回收空间的情形；第 1 条只保证不再自伤，不承诺省盘。
+//
 // # 为什么记了账还要回读校验
 //
 // 只信 KV 里记的空洞会引出一个真实的数据风险：客户端先打洞、后把真实数据
@@ -25,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 
 	"github.com/finalappstore/stupidsamba/internal/oscap"
@@ -68,7 +81,16 @@ func (a *adapter) PunchHole(ref oscap.Ref, off, length int64) error {
 		return nil
 	}
 
-	if err := a.writeZeros(ref, off, end-off); err != nil {
+	// 尾部区间先试「真回收」：截断掉再还原长度，块是真的还了回去。
+	// 中间的洞没有等价手段 —— 普通文件系统没有「只释放这几个块、前后内容原地
+	// 不动」的操作。失败不打紧：下面的写零路径会把长度顶回原样。
+	if end >= size {
+		if err := a.reclaimTail(ref, off, size); err == nil {
+			return a.addHole(ref, oscap.Range{Offset: off, Length: end - off})
+		}
+	}
+
+	if err := a.zeroNonZero(ref, off, end); err != nil {
 		return err
 	}
 
@@ -77,15 +99,97 @@ func (a *adapter) PunchHole(ref oscap.Ref, off, length int64) error {
 	return a.addHole(ref, oscap.Range{Offset: off, Length: end - off})
 }
 
-// writeZeros 把 [off, off+n) 写成零。
-func (a *adapter) writeZeros(ref oscap.Ref, off, n int64) error {
-	f, done, err := a.openWrite(ref)
+// zeroNonZero 把 [off, end) 里**含非零字节**的块写成零，整块已经是零的部分一个字节都不动。
+//
+// 为什么要先读一遍：无条件写零会把「本来就是洞」的区间填实 —— 在支持稀疏写但
+// 打不了洞的宿主上（tmpfs、macOS 的 APFS）那是净亏损，一次回收反而让文件多占盘。
+// 读一遍花的是内存带宽，换来的是不再实体化，而且整段本来就是零时连写句柄都不用开、
+// 随后的 fsync 也省了。
+//
+// 判零粒度与 AllocatedRanges 的回读校验一致（zeroBlockSize，按**文件绝对偏移**
+// 对齐），这样「记账的洞」与「查出来的洞」是同一套边界。
+func (a *adapter) zeroNonZero(ref oscap.Ref, off, end int64) error {
+	rf, rdone, err := a.openRead(ref)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer rdone()
 
-	buf := make([]byte, min64(n, scanChunkSize))
+	// 写句柄按需开：整段已经是零时一次都不用开。
+	var (
+		wf    *os.File
+		wdone func()
+	)
+	defer func() {
+		if wdone != nil {
+			wdone()
+		}
+	}()
+	ensureWrite := func() error {
+		if wf != nil {
+			return nil
+		}
+		f, done, err := a.openWrite(ref)
+		if err != nil {
+			return err
+		}
+		wf, wdone = f, done
+		return nil
+	}
+
+	// 读缓冲与写缓冲**必须**是两块：写缓冲恒为全零，读缓冲会被填进文件真实内容。
+	// 复用同一块的话，写零的时候写回去的正是刚读出来的旧数据 —— 打洞成了原地重写。
+	rbuf := make([]byte, scanChunkSize)
+	zbuf := make([]byte, scanChunkSize)
+	wrote := false
+	pos := off
+	for pos < end {
+		n := min64(end-pos, scanChunkSize)
+		read, rerr := rf.ReadAt(rbuf[:n], pos)
+		if read > 0 {
+			for _, r := range nonZeroBlocks(rbuf[:read], pos) {
+				if err := ensureWrite(); err != nil {
+					return err
+				}
+				if err := writeZerosAt(wf, zbuf, r.Offset, r.Length); err != nil {
+					return err
+				}
+				wrote = true
+			}
+			pos += int64(read)
+		}
+		if rerr != nil {
+			if !errors.Is(rerr, io.EOF) {
+				return mapPathError(rerr)
+			}
+			// pos 已越过当前 EOF，剩下的字节根本不存在。这只可能发生在
+			// reclaimTail 半途失败之后 —— 那种情况下必须写零把长度顶回 end，
+			// 绝不能当成「已经是零」跳过，否则文件就真的短了。
+			if pos < end {
+				if err := ensureWrite(); err != nil {
+					return err
+				}
+				if err := writeZerosAt(wf, zbuf, pos, end-pos); err != nil {
+					return err
+				}
+				wrote = true
+			}
+			break
+		}
+	}
+	if !wrote {
+		return nil
+	}
+	// 打洞是回收语义，客户端（Time Machine）随后可能立刻查询已分配区间。
+	// 不 sync 的话崩溃后会出现「库说是空洞、盘上还是旧数据」的不一致。
+	if err := wf.Sync(); err != nil {
+		return mapPathError(err)
+	}
+	return nil
+}
+
+// writeZerosAt 把 [off, off+n) 写成零，buf 必须是全零的复用缓冲。
+func writeZerosAt(f *os.File, buf []byte, off, n int64) error {
 	for n > 0 {
 		chunk := min64(n, int64(len(buf)))
 		if _, err := f.WriteAt(buf[:chunk], off); err != nil {
@@ -94,8 +198,46 @@ func (a *adapter) writeZeros(ref oscap.Ref, off, n int64) error {
 		off += chunk
 		n -= chunk
 	}
-	// 打洞是回收语义，客户端（Time Machine）随后可能立刻查询已分配区间。
-	// 不 sync 的话崩溃后会出现「库说是空洞、盘上还是旧数据」的不一致。
+	return nil
+}
+
+// reclaimTail 处理「打洞区间顶到 EOF」这个特例：截断掉再还原长度，把块**真的**还回去。
+//
+// 为什么只有这种情形能真回收：中间挖洞需要「只释放这几个块、前后内容原地不动」，
+// 普通文件系统没有这种操作；而尾部截断是 POSIX 基本调用，ftruncate(off) 释放
+// [off, EOF) 是货真价实的。还原长度时，支持稀疏的文件系统会把它变成洞 —— 正是
+// 我们要的；不支持的会重新分配，那种宿主上本来就没洞可省，与写零等价，不亏。
+//
+// 必须写明的代价：截断期间文件会**短暂变短**，并发读者可能读到变短的文件。它
+// 不会读到别人的数据（那个区间本来就要被清零），只是短一瞬；严格加锁那道闸在
+// 命令层（ioctl.go 的 checkIO），这里不重复拿锁。
+//
+// 失败时不承诺长度已还原 —— 由调用方回落到写零路径，写零本身会把长度顶回去。
+func (a *adapter) reclaimTail(ref oscap.Ref, off, size int64) error {
+	f, done, err := a.openWrite(ref)
+	if err != nil {
+		return err
+	}
+	defer done()
+
+	if err := f.Truncate(off); err != nil {
+		return mapPathError(err)
+	}
+	// 还原长度时不能无脑写 size：截断期间可能有别的写入者把文件又写长了，
+	// 一刀切回去会把并发写入的尾巴剪掉。取两者较大值。
+	target := size
+	if fi, serr := f.Stat(); serr == nil && fi.Size() > target {
+		target = fi.Size()
+	}
+	if err := f.Truncate(target); err != nil {
+		// 个别文件系统不能用 ftruncate 扩展（Samba 也踩过：Linux 上 fat 不行，
+		// 见 vfs_default.c 的 vfswrap_ftruncate）。退一步在末尾写一个零字节把
+		// 长度顶回去：中间那段读回来照样是零（POSIX 保证），语义不受影响。
+		if _, err := f.WriteAt([]byte{0}, target-1); err != nil {
+			return mapPathError(err)
+		}
+	}
+	// 与写零路径同理：先落盘、后记账。
 	if err := f.Sync(); err != nil {
 		return mapPathError(err)
 	}
@@ -231,6 +373,27 @@ func appendZeroBlocks(out []oscap.Range, data []byte, base int64) []oscap.Range 
 		i += n
 	}
 	return out
+}
+
+// nonZeroBlocks 与 appendZeroBlocks 互为补集：按**同一套**块边界切分（zeroBlockSize、
+// 对齐到文件绝对偏移），返回含非零字节的那些块。
+//
+// 用同一套边界不是巧合：写零时按 4 KiB 判、查洞时按另一套判，会出现「记了账但
+// 查出来不是洞」这种自己跟自己对不上的结果。
+func nonZeroBlocks(data []byte, base int64) []oscap.Range {
+	var out []oscap.Range
+	for i := 0; i < len(data); {
+		// 本块在文件里的边界（与 appendZeroBlocks 同款算法）。
+		blockEnd := (base + int64(i)) / zeroBlockSize * zeroBlockSize
+		blockEnd += zeroBlockSize
+		n := int(min64(blockEnd-(base+int64(i)), int64(len(data)-i)))
+		if !allZero(data[i : i+n]) {
+			out = append(out, oscap.Range{Offset: base + int64(i), Length: int64(n)})
+		}
+		i += n
+	}
+	// 相邻的非零块合并成一次写：本来就是为了少写，别把省下的又赔进 syscall 次数。
+	return normalizeRanges(out)
 }
 
 func allZero(b []byte) bool {

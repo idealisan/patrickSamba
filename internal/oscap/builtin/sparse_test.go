@@ -207,6 +207,157 @@ func TestPortableHolesSurviveReopen(t *testing.T) {
 	}
 }
 
+// TestPortablePunchHoleLeavesExistingHoleAlone 钉的是「回收反而变胖」这条回归。
+//
+// 无条件写零会把**本来就是洞**的区间填实。在支持稀疏写但打不了洞的宿主上
+// （tmpfs、macOS 上的 APFS —— 探测判据就是「能不能打洞」），一次回收操作
+// 于是变成了一次放大操作。这条用例就是那个可证伪的探针。
+func TestPortablePunchHoleLeavesExistingHoleAlone(t *testing.T) {
+	e := newEnv(t)
+	const blocks = 2
+	ref := e.file("band", nil)
+	// 先撑出长度、再只在后半段落数据 —— 前半段就是货真价实的洞。
+	if err := os.Truncate(ref.Path, blocks*zeroBlockSize); err != nil {
+		t.Fatalf("Truncate 失败: %v", err)
+	}
+	if err := writeAt(ref.Path, bytesRepeat(0xAA, zeroBlockSize), zeroBlockSize); err != nil {
+		t.Fatalf("写数据失败: %v", err)
+	}
+
+	before, ok := fileBlocks(ref.Path)
+	if !ok {
+		t.Skip("本平台测不出实际占用块数")
+	}
+	if err := e.set.Sparse.PunchHole(ref, 0, zeroBlockSize); err != nil {
+		t.Fatalf("PunchHole 失败: %v", err)
+	}
+	if after, _ := fileBlocks(ref.Path); after > before {
+		t.Fatalf("打洞把本来就是洞的区间填实了: 占用块数 %d → %d", before, after)
+	}
+
+	// 省盘是省盘，该有的可观测语义一条都不能少。
+	if got := e.read(ref); len(got) != blocks*zeroBlockSize ||
+		!bytes.Equal(got[:zeroBlockSize], make([]byte, zeroBlockSize)) {
+		t.Fatalf("打洞后前段读回来不是零或长度变了: len=%d", len(got))
+	}
+	got, err := e.set.Sparse.AllocatedRanges(ref, 0, blocks*zeroBlockSize)
+	if err != nil {
+		t.Fatalf("AllocatedRanges 失败: %v", err)
+	}
+	want := []oscap.Range{{Offset: zeroBlockSize, Length: zeroBlockSize}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("打洞后区间不对: 得 %v 期望 %v", got, want)
+	}
+}
+
+// TestPortablePunchHoleReclaimsTail 验的是唯一能**真**回收空间的那种情形：
+// 打洞区间顶到 EOF 时，用「截断掉再还原长度」把块真的还给文件系统。
+//
+// 分两级断言，是因为「能省多少」取决于宿主：
+//   - 任何宿主都必须满足：占用不增、长度不变、读回来是零、AllocatedRanges 不报；
+//   - 只有实测支持稀疏的宿主才额外要求：占用**下降**（真的收回来了）。
+func TestPortablePunchHoleReclaimsTail(t *testing.T) {
+	e := newEnv(t)
+	const blocks = 8
+	ref := e.file("band", bytesRepeat(0xAA, blocks*zeroBlockSize))
+
+	before, ok := fileBlocks(ref.Path)
+	if err := e.set.Sparse.PunchHole(ref, 4*zeroBlockSize, 4*zeroBlockSize); err != nil {
+		t.Fatalf("PunchHole 失败: %v", err)
+	}
+
+	// 语义一：长度不变、打洞段读回全零、洞外数据分毫未动。
+	data := e.read(ref)
+	if len(data) != blocks*zeroBlockSize {
+		t.Fatalf("尾部打洞改变了文件长度: 得 %d 期望 %d", len(data), blocks*zeroBlockSize)
+	}
+	if !bytes.Equal(data[:4*zeroBlockSize], bytesRepeat(0xAA, 4*zeroBlockSize)) {
+		t.Fatal("尾部打洞波及了洞外的数据")
+	}
+	if !bytes.Equal(data[4*zeroBlockSize:], make([]byte, 4*zeroBlockSize)) {
+		t.Fatal("尾部打洞后读回来不是零")
+	}
+
+	// 语义二：AllocatedRanges 不再报尾部。
+	got, err := e.set.Sparse.AllocatedRanges(ref, 0, blocks*zeroBlockSize)
+	if err != nil {
+		t.Fatalf("AllocatedRanges 失败: %v", err)
+	}
+	want := []oscap.Range{{Offset: 0, Length: 4 * zeroBlockSize}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("尾部打洞后区间不对: 得 %v 期望 %v", got, want)
+	}
+
+	if !ok {
+		return // 测不出块数，语义部分已验完
+	}
+	after, _ := fileBlocks(ref.Path)
+	if after > before {
+		t.Fatalf("尾部打洞反而让文件变胖: 占用块数 %d → %d", before, after)
+	}
+	if hostSupportsSparse(t) && after >= before {
+		t.Errorf("支持稀疏的宿主上，尾部打洞应当真的把块还回去: 占用块数 %d → %d", before, after)
+	}
+}
+
+// hostSupportsSparse 实测宿主会不会为「跳着写」留洞。
+//
+// 只信实测，不猜文件系统类型（oscap 的 probe 也是这个口径）：建一个撑长但不写
+// 内容的文件，占 0 块才叫支持。测不出块数的平台返回 false。
+func hostSupportsSparse(t *testing.T) bool {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		return false
+	}
+	if err := os.Truncate(p, 1<<20); err != nil {
+		return false
+	}
+	n, ok := fileBlocks(p)
+	return ok && n == 0
+}
+
+// writeAt 直接往宿主文件里写一段，模拟「客户端绕过 oscap 的普通 IO」。
+func writeAt(path string, data []byte, off int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteAt(data, off)
+	return err
+}
+
+// TestPortableNonZeroBlocksIsComplementOfAppendZeroBlocks 钉住判零边界：写零时判
+// 「非零」与查洞时判「零」必须是**同一套**块边界、互为补集。对不上的话会出现
+// 「记了账但查出来不是洞」这种自己跟自己矛盾的结果。
+func TestPortableNonZeroBlocksIsComplementOfAppendZeroBlocks(t *testing.T) {
+	data := make([]byte, 2*zeroBlockSize)
+	data[2*zeroBlockSize-1] = 1 // 末字节非零，落在第三个块里
+
+	base := int64(zeroBlockSize / 2) // 故意从块中间起，逼出对齐问题
+
+	// 非零：只有末尾那半块 [8192, 10240)。
+	wantNZ := []oscap.Range{{Offset: 2 * zeroBlockSize, Length: zeroBlockSize / 2}}
+	if got := nonZeroBlocks(data, base); !reflect.DeepEqual(got, wantNZ) {
+		t.Fatalf("nonZeroBlocks 得 %v 期望 %v", got, wantNZ)
+	}
+	// 零：其余部分，相邻块应合并成一段 [2048, 8192)。
+	wantZ := []oscap.Range{{Offset: zeroBlockSize / 2, Length: zeroBlockSize/2 + zeroBlockSize}}
+	if got := normalizeRanges(appendZeroBlocks(nil, data, base)); !reflect.DeepEqual(got, wantZ) {
+		t.Fatalf("appendZeroBlocks 得 %v 期望 %v", got, wantZ)
+	}
+	// 补集：两者相加正好铺满整个窗口，不重不漏。
+	if wantNZ[0].Length+wantZ[0].Length != int64(len(data)) {
+		t.Fatalf("两者不互补: %v + %v ≠ %d", wantNZ, wantZ, len(data))
+	}
+
+	// 全零输入一个字节都不该写。
+	if got := nonZeroBlocks(make([]byte, 3*zeroBlockSize), 0); got != nil {
+		t.Fatalf("全零输入应得 nil（一次写都不用做），实得 %v", got)
+	}
+}
+
 // TestPortableRangeMath 是区间集合运算的纯函数用例（无 IO，跑得飞快）。
 func TestPortableRangeMath(t *testing.T) {
 	t.Run("normalize", func(t *testing.T) {
