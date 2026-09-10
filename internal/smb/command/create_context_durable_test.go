@@ -20,8 +20,24 @@ import (
 // 错身份），不跳过任何反向用例（AGENTS.md §3 验收门槛）。
 
 // resetDurable 把包级登记表与默认超时复位，避免用例互相污染。
+//
+// **原地清空而不是换一个新表**：durableRegistry 是包级变量，而每条等待重连的
+// 记录现在都挂着一个 time.AfterFunc，定时器回调会经 reap→Open.close→
+// durableRegistry.remove 读这个全局变量。直接给它赋一个新表，就会与已经在飞的
+// 定时器构成 data race（-race 能复现，报在 Open.close 里读全局那一行）。
+//
+// 所以这里只清条目、并且**必须 Stop 掉每条记录的定时器**：否则上一个用例留下的
+// 定时器会在下一个用例跑到一半时触发回收，随机关掉人家正在用的句柄。
 func resetDurable() {
-	durableRegistry = newDurableRegistry()
+	durableRegistry.mu.Lock()
+	for k, e := range durableRegistry.entries {
+		if e.timer != nil {
+			e.timer.Stop()
+			e.timer = nil
+		}
+		delete(durableRegistry.entries, k)
+	}
+	durableRegistry.mu.Unlock()
 	defaultDurableTimeout = 60 * time.Second
 }
 

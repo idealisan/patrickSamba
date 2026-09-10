@@ -122,6 +122,30 @@ type durableEntry struct {
 	identity *auth.Identity
 	timeout  time.Duration
 	deadline time.Time // 进入等待重连态的过期时刻；零值表示尚未断连
+
+	// timer 是本条记录的过期清扫定时器（一次性，不是常驻 goroutine）。
+	//
+	// 由来：reap() 原本只在 register() 与 reconnect() 里被顺带调用，
+	// 于是「最后一批句柄断连之后服务端再没有 SMB 流量」时，那一批记录
+	// 要留到下一次有人连进来才被回收，且**没有任何一方会报错**。
+	//
+	// team-lead 的约束是「不要起常驻定时器 goroutine」（本项目里
+	// 『起了 goroutine 但没人管它生命周期』是另一类坑），所以这里用
+	// 有明确宿主与销毁点的一次性定时器：宿主是这条记录，销毁点在所有
+	// 摘表路径（dropLocked）。
+	timer *time.Timer
+}
+
+// dropLocked 摘掉一条记录并销毁它的定时器。调用前必须持有 r.mu。
+//
+// 所有摘表路径都必须走这里：漏掉 Stop() 的后果不只是「多跑一次空的
+// reap」，而是定时器继续持有 r 与 *Open，把本该回收的句柄再续命一轮。
+func (r *durableTable) dropLocked(key string) {
+	if e := r.entries[key]; e != nil && e.timer != nil {
+		e.timer.Stop()
+		e.timer = nil
+	}
+	delete(r.entries, key)
 }
 
 type durableTable struct {
@@ -160,7 +184,7 @@ func (r *durableTable) detachLocked(open *Open) {
 		return
 	}
 	if e := r.entries[d.key]; e != nil && e.open == open {
-		delete(r.entries, d.key)
+		r.dropLocked(d.key)
 	}
 	d.key = ""
 }
@@ -295,7 +319,31 @@ func (r *durableTable) disconnect(open *Open) bool {
 	}
 	e.deadline = time.Now().Add(d.timeout)
 	d.key = key
+	r.armLocked(e)
 	return true
+}
+
+// armLocked 给一条进入「等待重连」态的记录挂上过期清扫定时器。
+// 调用前必须持有 r.mu。
+//
+// 这是**后台回收者**：没有它，最后一批句柄断连之后若服务端再无任何 SMB
+// 流量，那一批记录要留到下一次有人连进来才被回收，而且没有任何一方会报错
+// （既不是泄漏增长，也不是崩溃，就是静静地躺着）。
+//
+// 刻意用一次性 time.AfterFunc 而不是常驻 ticker goroutine：定时器有明确的
+// 宿主（本条记录）与销毁点（dropLocked），不需要管理生命周期。回调只调
+// reap()，而 reap 自己会加锁，与并发的 register/reconnect 天然安全。
+//
+// 重连成功后记录被 dropLocked 摘掉、定时器随之 Stop()，不会误杀已复活的句柄。
+func (r *durableTable) armLocked(e *durableEntry) {
+	if e.timer != nil {
+		e.timer.Stop()
+	}
+	timeout := e.timeout
+	if timeout <= 0 {
+		timeout = defaultDurableTimeout
+	}
+	e.timer = time.AfterFunc(timeout, func() { r.reap(time.Now()) })
 }
 
 // remove 从句柄表摘除（显式 CLOSE 或作废时调用）。带归属校验，见 detachLocked。
@@ -323,7 +371,7 @@ func (r *durableTable) reap(now time.Time) {
 		if e.deadline.IsZero() || !now.After(e.deadline) {
 			continue
 		}
-		delete(r.entries, k)
+		r.dropLocked(k)
 		if e.open == nil {
 			continue
 		}
@@ -396,7 +444,7 @@ func (r *durableTable) reconnect(session *Session, tree *Tree, intent *wire.Dura
 
 		// —— 再驱逐 ——
 		if e.open == nil || e.open.Durable == nil || e.open.Durable.Invalidated {
-			delete(r.entries, key)
+			r.dropLocked(key)
 			return nil, status.ObjectNameNotFound
 		}
 		if e.deadline.IsZero() {
@@ -405,7 +453,7 @@ func (r *durableTable) reconnect(session *Session, tree *Tree, intent *wire.Dura
 			return nil, status.ObjectNameNotFound
 		}
 		if time.Now().After(e.deadline) {
-			delete(r.entries, key)
+			r.dropLocked(key)
 			e.open.Durable.key = ""
 			e.open.Durable.Invalidated = true
 			expired = e.open
@@ -413,7 +461,7 @@ func (r *durableTable) reconnect(session *Session, tree *Tree, intent *wire.Dura
 		}
 
 		open := e.open
-		delete(r.entries, key)
+		r.dropLocked(key)
 		// 认领成功，清掉等待态。这一步**必须在 r.mu 内**：key 是受 r.mu
 		// 保护的字段，锁外写会与并发的 remove/disconnect 构成 data race
 		// （-race 能稳定复现）。它只写一个字段、不取任何别的锁，

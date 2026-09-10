@@ -35,6 +35,24 @@ func (c *countingHandle) Close() error {
 	return nil
 }
 
+// durableEntryCount / durableHasEntry 在锁内读登记表。
+//
+// 有了每条记录各自的过期定时器之后，reap() 可能由定时器的 goroutine 触发，
+// 测试里裸读 durableRegistry.entries 就是**真的 data race**（-race 能复现），
+// 不是「测试代码无所谓」的小事 —— 所以读登记表一律走这两个helper。
+func durableEntryCount() int {
+	durableRegistry.mu.Lock()
+	defer durableRegistry.mu.Unlock()
+	return len(durableRegistry.entries)
+}
+
+func durableHasEntry(key string) bool {
+	durableRegistry.mu.Lock()
+	defer durableRegistry.mu.Unlock()
+	_, ok := durableRegistry.entries[key]
+	return ok
+}
+
 func qaLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // qaSession 建一个已认证会话 + 一个树连接，共用同一个 Conn。
@@ -368,7 +386,7 @@ func TestQADurableV1KeyNoCrossSessionCollision(t *testing.T) {
 	o2 := qaAddOpen(t, s2, tree2, "b.txt", &fakeHandle{})
 	grantDurable(t, ctx2, o2, dhqReq(wire.OplockLevelBatch))
 
-	if n := len(durableRegistry.entries); n != 2 {
+	if n := durableEntryCount(); n != 2 {
 		t.Fatalf("两个不同文件的 durable 句柄应各占一条登记，实得 %d 条（键碰撞）", n)
 	}
 
@@ -439,7 +457,7 @@ func TestQADurableRemoveChecksEntryOwnership(t *testing.T) {
 	o2.Durable.key = o1Key
 	o2.close()
 
-	if _, ok := durableRegistry.entries[o1Key]; !ok {
+	if !durableHasEntry(o1Key) {
 		t.Fatal("o2 的 CLOSE 删掉了 o1 的登记 —— remove 没做归属校验")
 	}
 
@@ -488,8 +506,8 @@ func TestQADurableExpiredEntryClosesHandle(t *testing.T) {
 	time.Sleep(30 * time.Millisecond) // 远超 5ms 超时
 	durableRegistry.reap(time.Now())
 
-	if len(durableRegistry.entries) != 0 {
-		t.Fatalf("reap 后登记表应为空，实得 %d 条", len(durableRegistry.entries))
+	if durableEntryCount() != 0 {
+		t.Fatalf("reap 后登记表应为空，实得 %d 条", durableEntryCount())
 	}
 	if n := h.closes.Load(); n == 0 {
 		t.Error("超时回收未关闭底层 vfs 句柄 —— fd 泄漏")
@@ -527,13 +545,51 @@ func TestQADurableExpiredEntriesReclaimedByNewRegistrations(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// 上界取 2 而非 0：最后一轮断连之后再没有任何流量触发回收，那一批
-	// 记录会留到下次有人连进来为止（已知残留，见 durable_defect_test.go
-	// 的 TestQADefectExpiryHappensWithoutReconnect）。要证明的是**不随
-	// 轮数增长**，不是恒为零。
-	if n := len(durableRegistry.entries); n > 2 {
+	// 有了每条记录各自的过期定时器之后，每一轮都会自行回收，上界不再是
+	// 「最后一批留着」。仍取 2 而不是 0：定时器回调与这里的主协程存在
+	// 天然的时间差，断言「不随轮数增长」才是这条用例要守的命题。
+	if n := durableEntryCount(); n > 2 {
 		t.Errorf("跑了 %d 轮后登记表有 %d 条 —— 过期项没被机会式回收，仍在无界增长",
 			rounds, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7b. 无任何后续流量时，最后一批过期项也要被回收
+//
+//	（原 durable_defect_test.go 的 TestQADefectExpiryHappensWithoutReconnect，
+//	 加了每条记录的过期定时器之后已修，转回归）
+//
+// ---------------------------------------------------------------------------
+//
+// 原缺陷：reap() 只有「有人连进来 / 有人重连」时才被调用。最后一批句柄
+// 断连之后服务端若再无任何 SMB 流量，那一批记录连同 *Open 与 fd 会一直
+// 留着，而且**没有任何一方会报错** —— 不增长、不崩溃，就是静静地躺着。
+//
+// 修法是给每条记录挂一次性 time.AfterFunc（durable.go 的 armLocked），
+// 销毁点是所有摘表路径共用的 dropLocked。刻意不用常驻 ticker goroutine：
+// 定时器有明确宿主与销毁点，不需要管理生命周期。
+//
+// 判据可证伪：把 disconnect() 里的 r.armLocked(e) 删掉，本用例立刻变红
+// （等到 6 倍超时之后登记表仍有 1 条）。
+func TestQADurableExpiredEntryReclaimedWithoutReconnect(t *testing.T) {
+	resetDurable()
+	defaultDurableTimeout = 20 * time.Millisecond
+
+	conn := NewConn(&Settings{}, "test", "test")
+	ctx, s, tree := qaSession(t, conn, 1, "alice", "share")
+	h := &countingHandle{}
+	open := qaAddOpen(t, s, tree, "f.txt", h)
+	grantDurable(t, ctx, open, dhqReq(wire.OplockLevelBatch))
+	s.Close() // 真实断连路径
+
+	time.Sleep(120 * time.Millisecond) // 6 倍超时
+
+	if n := durableEntryCount(); n != 0 {
+		t.Errorf("超时后无人重连时登记表未被回收，仍有 %d 条 —— 没有后台回收者", n)
+	}
+	if n := h.closes.Load(); n == 0 {
+		t.Error("后台回收者回收了记录，却没关闭底层 vfs 句柄 —— fd 泄漏")
 	}
 }
 
@@ -558,7 +614,7 @@ func TestQADurableEvictionRequiresAuthorization(t *testing.T) {
 	ctxA, sA, treeA := qaSession(t, conn, 1, "alice", "share")
 	open := qaAddOpen(t, sA, treeA, "secret.txt", &fakeHandle{})
 	grantDurable(t, ctxA, open, dhqReq(wire.OplockLevelBatch))
-	before := len(durableRegistry.entries)
+	before := durableEntryCount()
 	if before == 0 {
 		t.Fatal("前提被破坏：alice 的 durable 没有登记成功")
 	}
@@ -572,7 +628,7 @@ func TestQADurableEvictionRequiresAuthorization(t *testing.T) {
 		t.Fatalf("bob 越权重连应得 ACCESS_DENIED，实得 %v", st)
 	}
 
-	if after := len(durableRegistry.entries); after != before {
+	if after := durableEntryCount(); after != before {
 		t.Errorf("bob 的越权探测删掉了 alice 的登记：%d → %d 条（删除动作发生在身份校验之前）",
 			before, after)
 	}
