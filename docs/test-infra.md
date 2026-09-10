@@ -612,3 +612,61 @@ Win11 硬性 4 GiB + TPM 2.0）。**本容器直接排除。**
 > 愿意 → 路线 2，零成本拿下 Windows **和 macOS** 两侧的自动化部分，
 > 真机只留给 B-W4（Explorer UI）和 Time Machine 人工验收。
 > 不愿意 → 路线 1，但先去组织设置页确认自托管入口存在，再买机器。
+
+---
+
+## 三种第三方客户端实测记录（AGENTS.md §3 硬性门槛）
+
+日期：2026-09-10
+执行环境：本开发容器（Linux/amd64，非初始 user namespace）
+
+跑法（三家一起跑，或只跑其中一家）：
+
+```sh
+sh test/e2e/smoke.sh              # 三家全跑
+sh test/e2e/smoke.sh impacket     # 只跑 impacket（smbclient / gosmb2 同理）
+```
+
+判据不是「客户端说成功了」，而是驱动脚本在**服务端磁盘上**独立核对七个操作的结果，
+内容比对一律 `cmp` 整字节（原理与踩过的坑见 `test/e2e/smoke.sh` 文件头）。
+
+### 三家客户端版本与实测结果
+
+| 客户端 | 版本 | 实测 | 命令 |
+|---|---|---|---|
+| smbclient（Samba） | 4.22.10-Debian | ✅ 9/9 判据通过 | `sh test/e2e/client_smbclient.sh` |
+| impacket（Python 独立协议栈） | 0.12.0 | ✅ 9/9 判据通过 | `/usr/bin/python3 test/e2e/client_impacket.py` |
+| go-smb2（纯 Go） | v1.1.0 | ✅ 9/9 判据通过 | `sh test/e2e/client_gosmb2.sh` |
+
+外加服务端侧两条（优雅退出、无 panic）与七条磁盘判据，单次全跑共 29 项全绿。
+
+`mount.cifs` 是**第四种**客户端，在本容器**永远跑不通**：非初始 user namespace
+下内核只放行带 `FS_USERNS_MOUNT` 标志的文件系统，cifs 没有这个标志，与特权无关。
+这是环境限制，不是产品缺陷，不要再花时间试参数。
+
+### impacket 的两个坑（都会表现为「静默跳过」）
+
+1. **PATH 上第一个 python3 未必是装了 impacket 的那个。** 本容器
+   `/usr/local/bin/python3`（uv 装的 3.12）没有 impacket，系统
+   `/usr/bin/python3` 才有。裸写 `python3` 会让这一家整条被 SKIP，
+   而日志只说一句「环境缺少该客户端」——看不出是被 PATH 骗了。
+   `test/e2e/smoke.sh` 现在会逐个候选解释器实测 `import impacket`，取第一个能导入的。
+2. **不要用 pip 装 impacket**：会和已装的 cryptography 冲突。用
+   `apt-get install python3-impacket`。
+
+### 判据是否真的会红（不是只证明了「现在是绿的」）
+
+`test/e2e/reverse-control.sh` 用 `go build -overlay` 把服务端**故意改坏**
+（工作树零改动），断言套件定点红在预期的判据上。六个变异全部被抓住：
+
+| 变异 | 改坏了什么 | 被哪些判据抓住（三家各一份） |
+|---|---|---|
+| write-corrupt | 写进磁盘的字节翻一位 | `*/put-bytes` |
+| read-corrupt | 读出的字节翻一位 | `*/get-bytes` |
+| rename-noop | 回成功但没搬 | `*/rename-old-gone`、`*/rename-new-disk` |
+| remove-noop | `LocalFS.Remove` 回成功但没删 | `*/rmdir-disk` 等 |
+| doc-noop | delete-on-close 路径被掐断 | `*/rm-disk` |
+| readdir-hide | 文件在但不出现在目录列表 | `*/client-run` |
+
+客户端缺席时该脚本降级为 `[WARN]` 而不是判红 —— 让结论取决于构建机装没装
+python 包，只会掩盖真正该报警的信号。

@@ -191,6 +191,39 @@ $:
         - &gate_portable
           name: portable 模式实测 (AGENTS.md §1.2 C9)
           script: sh test/ci/portable-mode.sh
+        # ----------------------------------------------------------------
+        # 下面三关是**元门禁 + 端到端**：它们验的不是「代码长什么样」，
+        # 而是「上面那些门禁还灵不灵」「真客户端还连不连得上」。
+        #
+        # 元门禁（negative-verify）的必要性来自本项目最疼的一次事故：
+        # 第一道关卡 0.1 秒退出，后面四道全被 skip，长期无人发现。
+        # 「有 CI」不等于「CI 在跑」，只有把门禁**故意改坏看它红不红**，
+        # 才能证明它还在工作。脚本自带 40 组正反向对照，用时约 6 分钟 ——
+        # 这是它值得付的价钱：一道没人验过的门禁，等于没有门禁。
+        - &gate_negative
+          name: 元门禁：门禁本身是否还有效 (negative-verify)
+          script: sh test/ci/negative-verify.sh
+        # 三种**第三方**客户端连真服务端跑文件操作（AGENTS.md §3 硬性门槛）。
+        # 单元测试只能证明我们自己的代码自洽，只有别人家的客户端连上来通了，
+        # 才能证明协议实现是对的。
+        #
+        # go-smb2（纯 Go）那一路**必须真跑**：脚本只在 `go` 缺失时才 exit 77，
+        # 而 CI 里 go 必然存在，所以它不可能静默跳过 —— 把它 skip 掉等于
+        # 这整关失去意义。smbclient / impacket 两路缺工具时脚本会打印明确的
+        # [SKIP] 原因，不是静默溜过去。
+        - &gate_e2e
+          name: 三客户端端到端冒烟 (smoke.sh)
+          script: sh test/e2e/smoke.sh
+        # 变异测试：`go build -overlay` 把服务端故意改坏（工作树零改动），
+        # 断言冒烟套件**定点**红在预期的判据上。
+        #
+        # 「测试全绿」本身不是证据 —— 一个什么都不检查的测试也全绿。有说服力
+        # 的说法是「我把 X 改坏了，判据 Y 当场变红」。
+        # 客户端缺席时脚本降级为 [WARN] 而不是判红：让这道关的结果取决于
+        # 构建机装没装 python 包，只会掩盖真正该报警的信号。
+        - &gate_mutation
+          name: 变异测试：判据是否真的会红 (reverse-control)
+          script: sh test/e2e/reverse-control.sh
 
   pull_request:
     - runner:
@@ -215,6 +248,9 @@ $:
         - *gate_example_config
         - *gate_smoke
         - *gate_portable
+        - *gate_negative
+        - *gate_e2e
+        - *gate_mutation
 
   # ---------------------------------------------------------------- 发布
   #
@@ -259,6 +295,9 @@ $:
         - *gate_example_config
         - *gate_smoke
         - *gate_portable
+        - *gate_negative
+        - *gate_e2e
+        - *gate_mutation
         # build-release.sh 自己会逐产物自检（CGO 关没关、-trimpath 生效没、
         # GOOS/GOARCH 对不对、版本号有没有真注进去、linux 产物是不是静态链接），
         # 任一不过直接非零退出，发布就停在这里。

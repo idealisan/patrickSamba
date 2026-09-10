@@ -79,6 +79,17 @@ expected_for() {
 RC=0
 SUMMARY=""
 
+# client_ran 报告某个客户端在基线里**真的执行过**判据。
+#
+# smoke.sh 对缺席的客户端打印 `[SKIP] <client>/* (环境缺少该客户端)`，
+# 对跑过的打印 `[PASS]/[FAIL] <client>/<判据>`。二者互斥且都出现在基线里，
+# 所以「没被 SKIP 且至少有一条判据」= 真跑了。
+client_ran() {
+    [ -n "$1" ] || return 1
+    printf '%s\n' "$BASE_PLAIN" | grep -q "\[SKIP\] $1/" && return 1
+    printf '%s\n' "$BASE_PLAIN" | grep -qE "\[(PASS|FAIL)\] $1/"
+}
+
 printf '\n\033[1;36m########## 冒烟判据失败对照实验 ##########\033[0m\n'
 
 # ---------------------------------------------------------------- 基线
@@ -88,6 +99,22 @@ printf '\n\033[1;36m########## 冒烟判据失败对照实验 ##########\033[0m\
 printf '\n\033[1;36m===== 基线（无变异，必须 PASS）=====\033[0m\n'
 BASE_OUT=$(SMB_PORT=$PORT sh "$ROOT/test/e2e/smoke.sh" 2>&1)
 BASE_RESULT=$(echo "$BASE_OUT" | sed -n 's/^SMOKE-RESULT: //p')
+# BASE_PLAIN 是剥掉 ANSI 颜色码的基线输出，下面所有文本匹配都基于它。
+#
+# 不剥会踩到一个很隐蔽的坑：smoke.sh 打印的是
+#   \033[1;32m  [PASS]\033[0m smbclient/get-bytes
+# 颜色复位码夹在 `[PASS]` 与判据 ID **之间**，于是 `grep -E '\[PASS\] smbclient/'`
+# 永远匹配不上 —— 表现为「每个客户端都被判成缺席」，而肉眼看着满屏都是 PASS。
+BASE_PLAIN=$(printf '%s\n' "$BASE_OUT" | sed "s/$(printf '\033')\[[0-9;]*m//g")
+# 一个客户端都没跑起来时，后面的对照实验全是空转：变异再怎么改坏服务端，
+# 也不会有任何判据变红，而脚本会得出「判据瞎了」以外的结论 —— 那是假的。
+# 所以这里把「零客户端」当成硬失败，而不是当成「全部通过」。
+if ! printf '%s\n' "$BASE_PLAIN" | grep -qE "\[(PASS|FAIL)\] [a-z0-9]+/"; then
+    printf '\033[1;31m  [BAD] 基线里没有任何客户端真的跑了判据 —— 对照实验无意义\033[0m\n'
+    echo "$BASE_OUT" | tail -25 | sed 's/^/      /'
+    SUMMARY="$SUMMARY\n  [BAD]  基线            无客户端执行，对照实验作废"
+    RC=1
+fi
 if [ "$BASE_RESULT" = "PASS" ]; then
     printf '\033[1;32m  [OK] 基线 PASS\033[0m\n'
     SUMMARY="$SUMMARY\n  [OK]   基线            套件 PASS"
@@ -125,13 +152,39 @@ for m in $LIST; do
     printf '  套件按预期 FAIL，实际红的判据:%s\n' "$GOTFAIL"
 
     # ② 必须红在**预期的那几条**上
+    #
+    # 只校验**本次真的跑了**的客户端那几条。
+    #
+    # 原因（实测踩到）：期望清单按三家客户端写死，而 impacket 在本容器装了也
+    # 未必能被 python3 找到（/usr/local/bin 抢占 python3 那个坑，见仓库最近的
+    # 文档），smoke.sh 会 [SKIP] 掉这一家。此时 impacket/* 那几条**永远不会红**，
+    # 于是六个变异全部判成「红在别处」，实验整体红 —— 看起来像判据瞎了，
+    # 实际是一家客户端缺席。把缺席当失败，等于让这道门禁的结果取决于构建机
+    # 装没装 python 包，这既不稳定也掩盖真正该报警的信号。
+    #
+    # 处理方式：缺席的客户端**警告但不判红**（覆盖缺口要看得见），跑了的客户端
+    # 一律严格 —— 它那份期望一条都不能少。
     MISSING=""
+    SKIPPED_WANT=""
     for want in $(expected_for "$m"); do
+        client=${want%%/*}
+        if ! client_ran "$client"; then
+            case " $SKIPPED_WANT " in
+                *" $client "*) : ;;
+                *) SKIPPED_WANT="$SKIPPED_WANT $client" ;;
+            esac
+            continue
+        fi
         case " $GOTFAIL " in
             *" $want "*) : ;;
             *) MISSING="$MISSING $want" ;;
         esac
     done
+    if [ -n "$SKIPPED_WANT" ]; then
+        printf '\033[1;33m  [WARN] 客户端缺席，这几家的对照未覆盖:%s\033[0m\n' "$SKIPPED_WANT"
+        printf '\033[1;33m         （覆盖缺口；装上后这里的期望会自动生效）\033[0m\n'
+        SUMMARY="$SUMMARY\n  [WARN] $m 客户端缺席未覆盖:$SKIPPED_WANT"
+    fi
     if [ -n "$MISSING" ]; then
         printf '\033[1;31m  [BAD] 红是红了，但预期的判据没红:%s\033[0m\n' "$MISSING"
         printf '\033[1;31m        （红在别处 = 对照实验没证明想证明的东西）\033[0m\n'

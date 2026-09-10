@@ -304,8 +304,28 @@ run_case() {
     absent "$P/rmdir-disk" "$SHARE/rmd-$P"
 }
 
+# impacket 用**哪个 python3** 去跑，是个真问题（踩过，别改回裸 python3）：
+#
+# client_impacket.py 靠 `import impacket` 判定环境是否具备该客户端，导不进就
+# exit 77，驱动记为 [SKIP]。可 PATH 上第一个 python3 未必是装了 impacket 的那个
+# —— 本容器里 /usr/local/bin/python3（uv 装的 3.12）没有 impacket，系统
+# /usr/bin/python3 才有。于是出现过「明明装了 impacket，套件却把这一家整条跳过」，
+# 而日志只写一句「环境缺少该客户端」，看不出是被 PATH 骗了。
+#
+# 所以这里逐个候选解释器**实测能否 import impacket**，取第一个真能导入的；
+# 全都导不进时退回裸 python3，让客户端脚本照旧报 77（显式 SKIP，不静默）。
+IMP_PY=""
+for cand in python3 /usr/bin/python3 /usr/local/bin/python3; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c 'import impacket' >/dev/null 2>&1; then
+        IMP_PY=$cand
+        break
+    fi
+done
+[ -n "$IMP_PY" ] || IMP_PY=python3
+
 run_case smbclient sh      "$ROOT/test/e2e/client_smbclient.sh"
-run_case impacket  python3 "$ROOT/test/e2e/client_impacket.py"
+run_case impacket  "$IMP_PY" "$ROOT/test/e2e/client_impacket.py"
 run_case gosmb2    sh      "$ROOT/test/e2e/client_gosmb2.sh"
 
 # ---------------------------------------------------------------- 优雅关服务
