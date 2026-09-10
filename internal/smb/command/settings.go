@@ -86,6 +86,14 @@ type Settings struct {
 	// AllowGuest 允许 guest 降级登录。
 	AllowGuest bool
 
+	// AppleModel 是 AAPL ModelString，决定 Finder 里显示的图标形状。
+	//
+	// 与配置里的 mdns.apple.model 是**同一个值**（cmd 层装配时传入）：此前
+	// AAPL 侧硬编码 DefaultAppleModel，改了配置只有 mDNS 的 _device-info._tcp
+	// 跟着变，AAPL 响应里还是 MacSamba —— 属于「配置说的和协议回的不一致」。
+	// 空字符串表示回落到 DefaultAppleModel。
+	AppleModel string
+
 	// Oplocks 允许授予 oplock / lease（客户端本地缓存）。
 	//
 	// 关闭时 CREATE 一律回 SMB2_OPLOCK_LEVEL_NONE 且不宣告
@@ -141,6 +149,18 @@ func (s *Settings) maxOpens() int {
 		return s.MaxOpensPerSession
 	}
 	return DefaultMaxOpensPerSession
+}
+
+// appleModel 返回 AAPL ModelString 的取值。
+//
+// s 为 nil（直接构造 Conn 而没给 Settings 的极简场景）或未配置时回落到
+// DefaultAppleModel —— 与 config 层 mdns.apple.model 的默认值是同一个常量，
+// 两侧不会有第二个真相源。
+func (s *Settings) appleModel() string {
+	if s == nil || s.AppleModel == "" {
+		return DefaultAppleModel
+	}
+	return s.AppleModel
 }
 
 // FindShare 按共享名查找共享。

@@ -111,8 +111,8 @@ const aaplResponseHeaderSize = 16
 // config.DefaultAppleModel 一致。macOS 用它决定 Finder 里的图标；
 // 想显示 Time Capsule 图标可改成 "TimeCapsule8,119" 这类真实机型串。
 //
-// TODO: command.Settings 目前没有这个字段，而 settings.go 是跨模块契约
-// （由 server agent 维护），改它需要先通知。等接口稳定后从配置透传。
+// 已可从配置透传：Settings.AppleModel（cmd 层取 mdns.apple.model），
+// 为空时回落到本常量，两处来源因此一致。
 const DefaultAppleModel = "MacSamba"
 
 // aaplState 是一条连接上的 Apple 扩展协商结果。
@@ -177,7 +177,7 @@ func negotiateAAPL(ctx *Context, req *wire.CreateRequest) ([]byte, error) {
 
 	serverCaps, readdirAttr := aaplServerCapabilities(ctx, r.ClientCaps)
 	out := buildAAPLResponse(r.RequestBitmap, serverCaps,
-		aaplVolumeCapabilities(ctx), DefaultAppleModel)
+		aaplVolumeCapabilities(ctx), ctx.Conn.Settings.appleModel())
 
 	// 只有客户端**真的请求了 ServerCapabilities** 时才启用 readdir_attr。
 	//

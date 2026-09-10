@@ -261,6 +261,10 @@ func buildSettings(cfg *config.Config, provider auth.Provider, shares []*command
 		// 授予规则本身已经是"安全时才授予"，开不起来也不会有副作用。
 		Oplocks: cfg.Server.OplocksOn(),
 
+		// AAPL ModelString 与 mDNS _device-info._tcp 的 model 取同一个配置值，
+		// 否则改了配置只有一边跟着变（Finder 图标与宣告不一致）。
+		AppleModel: cfg.MDNS.Apple.Model,
+
 		Auth:   provider,
 		Shares: shares,
 		Logger: log,

@@ -140,6 +140,48 @@ func TestBuildAAPLResponseModelInfo(t *testing.T) {
 	}
 }
 
+// TestAAPLModelStringFollowsSettings：AAPL 响应里的 ModelString 必须跟着
+// Settings.AppleModel（即配置的 mdns.apple.model）走，不能是硬编码常量。
+//
+// 反向对照：把 negotiateAAPL 里的 ctx.Conn.Settings.appleModel() 换回
+// DefaultAppleModel，「自定义机型」子用例会立刻红 —— 那正是修复前的状态
+// （改配置只有 mDNS 侧跟着变，协议回的还是 MacSamba）。
+func TestAAPLModelStringFollowsSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		appleModel string
+		want       string
+	}{
+		{"未配置时回落默认值", "", DefaultAppleModel},
+		{"配置透传", "TimeCapsule8,119", "TimeCapsule8,119"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newAAPLTestContext(t, true, false, true)
+			ctx.Conn.Settings.AppleModel = tc.appleModel
+
+			out, err := negotiateAAPL(ctx, aaplCreateRequest(aaplServerQuery,
+				aaplServerCaps|aaplVolumeCaps|aaplModelInfo, 0x0f))
+			if err != nil {
+				t.Fatalf("negotiateAAPL: %v", err)
+			}
+			if len(out) < 40 {
+				t.Fatalf("响应长度 = %d，没有 ModelString 段", len(out))
+			}
+			if v := aaplLE.Uint32(out[36:40]); int(v) != 2*len(tc.want) {
+				t.Fatalf("ModelString 长度 = %d, 期望 %d", v, 2*len(tc.want))
+			}
+			got, derr := wire.DecodeUTF16LE(out[40:])
+			if derr != nil {
+				t.Fatalf("解码 ModelString: %v", derr)
+			}
+			if got != tc.want {
+				t.Errorf("ModelString = %q, 期望 %q（Settings.AppleModel=%q）",
+					got, tc.want, tc.appleModel)
+			}
+		})
+	}
+}
+
 // TestBuildAAPLResponseBitmapSegments 验证「只返回被请求的段」。
 func TestBuildAAPLResponseBitmapSegments(t *testing.T) {
 	tests := []struct {
