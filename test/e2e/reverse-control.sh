@@ -41,10 +41,12 @@ expected_for() {
     case "$1" in
     write-corrupt)
         # 写进磁盘的字节被翻了一位：put 上去的内容对不上。
-        echo "smbclient/put-bytes impacket/put-bytes gosmb2/put-bytes" ;;
+        # 交叉那六条必须一起红：写歪了只有「换一家读」才一定暴露，
+        # 自己写自己读有可能碰巧自洽。
+        echo "smbclient/put-bytes impacket/put-bytes gosmb2/put-bytes cross/smbclient-to-impacket cross/smbclient-to-gosmb2 cross/impacket-to-smbclient cross/impacket-to-gosmb2 cross/gosmb2-to-smbclient cross/gosmb2-to-impacket" ;;
     read-corrupt)
         # 读出来的字节被翻了一位：get 下来的内容对不上。
-        echo "smbclient/get-bytes impacket/get-bytes gosmb2/get-bytes" ;;
+        echo "smbclient/get-bytes impacket/get-bytes gosmb2/get-bytes cross/smbclient-to-impacket cross/smbclient-to-gosmb2 cross/impacket-to-smbclient cross/impacket-to-gosmb2 cross/gosmb2-to-smbclient cross/gosmb2-to-impacket" ;;
     rename-noop)
         # 回了成功但没搬：旧名还在、新名没有。
         echo "smbclient/rename-old-gone smbclient/rename-new-disk \

@@ -30,10 +30,73 @@ func main() {
 	user, pass, share := os.Args[3], os.Args[4], os.Args[5]
 	work, p := os.Args[6], os.Args[7]
 
+	// 单一操作模式（**交叉验证**用）：第 8 个参数起是 "<put|get|ls> ..."，
+	// 只做一件事就退出。
+	//
+	// 交叉验证要的是「A 写进去的东西由 B 读出来」，必须能把 put 与 get 拆开
+	// 交给不同客户端；跑整序列的话 B 会把 A 的夹具覆盖掉（B 会再 put 一次
+	// 同名文件），交叉就变成自交。
+	if len(os.Args) > 8 {
+		if err := runOp(net.JoinHostPort(host, port), user, pass, share, os.Args[8:]); err != nil {
+			fmt.Fprintf(os.Stderr, "  [gosmb2] 失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(net.JoinHostPort(host, port), user, pass, share, work, p); err != nil {
 		fmt.Fprintf(os.Stderr, "  [gosmb2] 失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runOp 执行一个单一操作：put <本地> <远端> / get <远端> <本地> / ls <名字>。
+func runOp(addr, user, pass, share string, args []string) error {
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("拨号: %w", err)
+	}
+	defer conn.Close()
+
+	d := &smb2.Dialer{Initiator: &smb2.NTLMInitiator{User: user, Password: pass}}
+	s, err := d.Dial(conn)
+	if err != nil {
+		return fmt.Errorf("SMB 握手/认证: %w", err)
+	}
+	defer s.Logoff()
+
+	fs, err := s.Mount(share)
+	if err != nil {
+		return fmt.Errorf("挂载 %s: %w", share, err)
+	}
+	defer fs.Umount()
+
+	switch args[0] {
+	case "put":
+		payload, err := os.ReadFile(args[1])
+		if err != nil {
+			return fmt.Errorf("读本地载荷: %w", err)
+		}
+		return fs.WriteFile(args[2], payload, 0o644)
+	case "get":
+		body, err := fs.ReadFile(args[1])
+		if err != nil {
+			return fmt.Errorf("读 %s: %w", args[1], err)
+		}
+		return os.WriteFile(args[2], body, 0o644)
+	case "ls":
+		ents, err := fs.ReadDir(".")
+		if err != nil {
+			return fmt.Errorf("ReadDir: %w", err)
+		}
+		for _, e := range ents {
+			if e.Name() == args[1] {
+				return nil
+			}
+		}
+		return fmt.Errorf("目录列表里没有 %s", args[1])
+	}
+	return fmt.Errorf("未知的单一操作: %s", args[0])
 }
 
 func run(addr, user, pass, share, work, p string) error {

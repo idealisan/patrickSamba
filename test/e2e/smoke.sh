@@ -277,6 +277,8 @@ run_case() {
         skip "$P/*" "环境缺少该客户端"
         return 0
     fi
+    # 记下「这家真跑了」，交叉验证只在这几家之间配对。
+    RAN="$RAN $P"
     if [ "$rc" != 0 ]; then
         fail "$P/client-run" "客户端脚本退出码 $rc（协议层就没跑通，下面的磁盘判据仅供参考）"
     else
@@ -324,9 +326,77 @@ for cand in python3 /usr/bin/python3 /usr/local/bin/python3; do
 done
 [ -n "$IMP_PY" ] || IMP_PY=python3
 
+RAN=""
+
 run_case smbclient sh      "$ROOT/test/e2e/client_smbclient.sh"
 run_case impacket  "$IMP_PY" "$ROOT/test/e2e/client_impacket.py"
 run_case gosmb2    sh      "$ROOT/test/e2e/client_gosmb2.sh"
+
+# ---------------------------------------------------------------- 交叉验证
+#
+# 上面三家是**并行覆盖**：每家用自己的夹具，自己写自己读。它能证明「三家都能
+# 用」，证明不了「它们看到的是同一个服务端」 —— 假如某一家的写入走了别的语义
+# （大小写折叠、稀疏、块边界、缓存回写时机），自己读自己永远自洽。
+#
+# 所以这里做**两两交叉**：A 写进去的东西必须由 B **原样**读出来，六个有序对
+# 全跑（3×2）。判据仍落在 cmp 整字节上，不受任何一家客户端诚实程度的影响。
+#
+#   cross/<写>-to-<读>     A put 的字节，B get 下来必须一个字节不差
+#   cross/<建>-dir-<看>    A 建的目录，B 的目录枚举里必须看得见
+#
+# 客户端缺席时对应的配对整条跳过并打印原因（与 run_case 的 [SKIP] 同一口径），
+# 不静默、也不把环境限制判成产品缺陷。
+run_client_op() {
+    _c=$1; shift
+    case "$_c" in
+        smbclient) timeout 120 sh      "$ROOT/test/e2e/client_smbclient.sh" "$@" ;;
+        impacket)  timeout 120 "$IMP_PY" "$ROOT/test/e2e/client_impacket.py" "$@" ;;
+        gosmb2)    timeout 120 sh      "$ROOT/test/e2e/client_gosmb2.sh"    "$@" ;;
+        *) return 2 ;;
+    esac
+}
+
+say "交叉验证（跨客户端一致性）"
+
+CROSS_CLIENTS="smbclient impacket gosmb2"
+CROSS_PAIRS=0
+for W in $CROSS_CLIENTS; do
+    for R in $CROSS_CLIENTS; do
+        [ "$W" = "$R" ] && continue
+        case " $RAN " in *" $W "*) ;; *) continue ;; esac
+        case " $RAN " in *" $R "*) ;; *) continue ;; esac
+        CROSS_PAIRS=$((CROSS_PAIRS + 1))
+
+        # 512 KiB：跨多个 READ/WRITE 分块，又不是 64K 的整数倍。
+        _src="$WORK/xc-$W-$R.bin"
+        _dst="$WORK/xc-got-$W-$R.bin"
+        head -c 524288 /dev/urandom > "$_src" || die "生成交叉载荷失败"
+        rm -f "$_dst"
+
+        if ! run_client_op "$W" 127.0.0.1 "$PORT" "$USER" "$PASS" smoke "$WORK" "$W" \
+                put "$_src" "xc-$W-$R.bin"; then
+            fail "cross/$W-to-$R" "$W 上传失败"
+            continue
+        fi
+        if ! run_client_op "$R" 127.0.0.1 "$PORT" "$USER" "$PASS" smoke "$WORK" "$R" \
+                get "xc-$W-$R.bin" "$_dst"; then
+            fail "cross/$W-to-$R" "$R 读不出 $W 写进去的文件"
+            continue
+        fi
+        same_bytes "cross/$W-to-$R" "$_src" "$_dst"
+
+        # 目录可见性：$W 在上一节建的 dir-$W，必须能被 $R 列出来。
+        if run_client_op "$R" 127.0.0.1 "$PORT" "$USER" "$PASS" smoke "$WORK" "$R" \
+                ls "dir-$W"; then
+            pass "cross/$W-dir-$R"
+        else
+            fail "cross/$W-dir-$R" "$R 的目录枚举里看不到 $W 建的 dir-$W"
+        fi
+    done
+done
+if [ "$CROSS_PAIRS" = 0 ]; then
+    skip "cross/*" "可用的客户端不足两家，交叉验证未执行（装好客户端后自动生效）"
+fi
 
 # ---------------------------------------------------------------- 优雅关服务
 

@@ -21,6 +21,37 @@ except ImportError:
     sys.exit(77)
 
 
+def one_op(conn, share: str, args: list) -> int:
+    """单一操作模式（**交叉验证**用）：只做一件事就退出。
+
+    交叉验证要的是「A 写进去的东西由 B 读出来」，必须能把 put 与 get 拆开
+    交给不同客户端；跑整序列的话 B 会把 A 的夹具覆盖掉，交叉就变成自交。
+
+        put <本地路径> <远端名>
+        get <远端名> <本地路径>
+        ls  <名字>
+    """
+    op = args[0]
+    if op == "put":
+        local, remote = args[1], args[2]
+        with open(local, "rb") as fh:
+            conn.putFile(share, remote, fh.read)
+        return 0
+    if op == "get":
+        remote, local = args[1], args[2]
+        with open(local, "wb") as fh:
+            conn.getFile(share, remote, fh.write)
+        return 0
+    if op == "ls":
+        names = [f.get_longname() for f in conn.listPath(share, "\\*")]
+        if args[1] not in names:
+            print(f"  [impacket] 目录列表里没有 {args[1]}: {names}")
+            return 1
+        return 0
+    print(f"  [impacket] 未知的单一操作: {op}")
+    return 2
+
+
 def main() -> int:
     host, port, user, password, share, workdir, p = sys.argv[1:8]
     port = int(port)
@@ -29,6 +60,13 @@ def main() -> int:
     conn = SMBConnection(host, host, sess_port=port)
     conn.login(user, password)
     print(f"  [impacket] 已登录, dialect={conn.getDialect():#06x}")
+
+    # 单一操作模式：做完就把连接收掉，不碰下面那套七操作序列。
+    if len(sys.argv) > 8:
+        try:
+            return one_op(conn, share, sys.argv[8:])
+        finally:
+            conn.close()
 
     # --- 1. 目录枚举。磁盘看不出「客户端有没有看见」，只能在客户端断言。
     names = [f.get_longname() for f in conn.listPath(share, "\\*")]

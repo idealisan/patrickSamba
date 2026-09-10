@@ -35,6 +35,41 @@ sc() {
     return 0
 }
 
+# 单一操作模式（**交叉验证**用）：第 8 个参数给定时只做这一件事就退出，
+# 不走下面那套七操作序列。
+#
+# 交叉验证要的是「A 写进去的东西由 B 读出来」，必须能把 put 与 get 拆开
+# 交给不同客户端；跑整序列的话 B 会把 A 的夹具覆盖掉（B 会再 put 一次
+# 同名文件），交叉就变成了自交。
+#
+#   put <本地路径> <远端名>
+#   get <远端名> <本地路径>
+#   ls  <名字>            （目录里必须能看到这个名字）
+OP=${8:-}
+case "$OP" in
+put)
+    [ -n "$9" ] && [ -n "${10}" ] || { echo "用法: ... put <本地路径> <远端名>"; exit 2; }
+    sc "put ${10}" "put $9 ${10}" || exit 1
+    exit 0 ;;
+get)
+    [ -n "$9" ] && [ -n "${10}" ] || { echo "用法: ... get <远端名> <本地路径>"; exit 2; }
+    sc "get $9" "get $9 ${10}" || exit 1
+    exit 0 ;;
+ls)
+    [ -n "$9" ] || { echo "用法: ... ls <名字>"; exit 2; }
+    if sc "ls" "ls"; then
+        if echo "$SC_OUT" | grep -q "$9"; then
+            exit 0
+        fi
+        echo "  [smbclient] 目录列表里没有 $9"
+        echo "$SC_OUT" | sed 's/^/      /'
+        exit 1
+    fi
+    exit 1 ;;
+"") : ;;
+*)   echo "未知的单一操作: $OP"; exit 2 ;;
+esac
+
 # --- 1. 目录枚举。磁盘看不出「客户端有没有看见」，所以这条只能在客户端断言。
 if sc "ls" "ls"; then
     for want in "seed-$P.bin" "mov-$P.bin" "del-$P.bin" "rmd-$P" "subdir"; do
