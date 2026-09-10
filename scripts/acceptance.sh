@@ -38,6 +38,23 @@ USER=${SMB_USER:-testuser}
 PASS=${SMB_PASS:-testpass123}
 ONLY=$1
 
+# impacket 用**哪个 python3** 去跑，必须实测后再定，不能裸写 python3。
+#
+# 坑（与 test/e2e/smoke.sh 同一处）：PATH 上第一个 python3 未必是装了 impacket
+# 的那个。本容器 /usr/local/bin/python3（uv 装的 3.12）没有 impacket，系统
+# /usr/bin/python3 才有 —— 裸写 python3 的表现是 impacket 用例直接
+# ModuleNotFoundError 而整条 acceptance 失败，看上去像「impacket 没装」。
+# 这里逐个候选解释器实测 `import impacket`，取第一个真能导入的。
+IMP_PY=""
+for cand in python3 /usr/bin/python3 /usr/local/bin/python3; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    if "$cand" -c 'import impacket' >/dev/null 2>&1; then
+        IMP_PY=$cand
+        break
+    fi
+done
+[ -n "$IMP_PY" ] || IMP_PY=python3
+
 WORK=$(mktemp -d /tmp/stupidsamba-acc.XXXXXX)
 SHARE="$WORK/share"
 RO="$WORK/readonly"
@@ -385,7 +402,7 @@ t_smbclient() {
 
 t_impacket() {
     command -v python3 >/dev/null 2>&1 || { echo "  跳过：缺少 python3"; return 77; }
-    python3 "$ROOT/scripts/clients/impacket_test.py" \
+    "$IMP_PY" "$ROOT/scripts/clients/impacket_test.py" \
         127.0.0.1 "$PORT" "$USER" "$PASS" public "$WORK"
 }
 
@@ -467,7 +484,7 @@ t_dialects() {
     # impacket 是独立协议栈，能显式指定方言并把协商结果读回来，
     # 用它做一遍跨栈的交叉验证（它不支持 3.0.2，原因见该脚本注释）
     if command -v python3 >/dev/null 2>&1; then
-        python3 "$ROOT/scripts/clients/impacket_dialects.py" 127.0.0.1 "$PORT" "$USER" "$PASS" public || rc=1
+        "$IMP_PY" "$ROOT/scripts/clients/impacket_dialects.py" 127.0.0.1 "$PORT" "$USER" "$PASS" public || rc=1
     else
         echo "  （缺 python3，跳过 impacket 跨栈方言断言）"
     fi
