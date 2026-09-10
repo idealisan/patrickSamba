@@ -89,14 +89,24 @@ done
 # 运行时代码（internal/、cmd/）不得 fork/exec 外部命令。
 # scripts/ 和 _test.go 是开发/测试用的，不受此限。
 
+# 依赖图判定：import 链上出现 os/exec 就红，注释骗不过依赖图。
+if printf '%s\n' "$deps" | grep -qx 'os/exec'; then
+    fail "依赖图中出现 os/exec，违反 C3（禁止依赖外部进程）"
+fi
+
+# 文本判定：补上那些**不需要 import os/exec** 的起进程原语。
+# syscall.Exec / syscall.ForkExec / syscall.StartProcess 直接走 syscall，
+# import 列表里根本没有 os/exec，只查 os/exec 会漏掉它们 —— 这是 C3 的一个真实漏洞。
+#
+# 符号后面要求紧跟左括号：否则 `syscall.Executable` 这种同前缀的合法符号会被误伤。
 exechits=$(
     find ./internal ./cmd -name '*.go' -not -name '*_test.go' 2>/dev/null | while read -r f; do
-        strip_comments "$f" | grep -n -E 'os/exec|exec\.Command' 2>/dev/null | sed "s|^|$f:|"
+        strip_comments "$f" | grep -n -E 'os/exec|exec\.Command\(|os\.StartProcess\(|syscall\.(Exec|ForkExec|StartProcess|Posix_spawn)\(' 2>/dev/null | sed "s|^|$f:|"
     done
 )
 if [ -n "$exechits" ]; then
     printf '%s\n' "$exechits"
-    fail "运行时代码中出现 os/exec，违反 C3（禁止依赖外部进程）"
+    fail "运行时代码中出现起进程原语，违反 C3（禁止依赖外部进程）"
 else
     pass "C3 运行时无外部进程调用"
 fi
