@@ -197,12 +197,6 @@ $:
         #
         # 元门禁（negative-verify）的必要性来自本项目最疼的一次事故：
         # 第一道关卡 0.1 秒退出，后面四道全被 skip，长期无人发现。
-        # 「有 CI」不等于「CI 在跑」，只有把门禁**故意改坏看它红不红**，
-        # 才能证明它还在工作。脚本自带 40 组正反向对照，用时约 6 分钟 ——
-        # 这是它值得付的价钱：一道没人验过的门禁，等于没有门禁。
-        - &gate_negative
-          name: 元门禁：门禁本身是否还有效 (negative-verify)
-          script: sh test/ci/negative-verify.sh
         # 三种**第三方**客户端连真服务端跑文件操作（AGENTS.md §3 硬性门槛）。
         # 单元测试只能证明我们自己的代码自洽，只有别人家的客户端连上来通了，
         # 才能证明协议实现是对的。
@@ -224,6 +218,28 @@ $:
         - &gate_mutation
           name: 变异测试：判据是否真的会红 (reverse-control)
           script: sh test/e2e/reverse-control.sh
+
+    # ------------------------------------------------------------------
+    # 第二条流水线：**元门禁**，与上面那条并行跑。
+    #
+    # 为什么单独开一条：元门禁要跑 40 组正反向对照，每组都是真的调 Go 工具链
+    # （其中相当一部分是「5 平台 × 全部 build tag」的编译，冷缓存下一次就要
+    # 两分钟），本地实测约 6~7 分钟。挂在上面那条流水线的末尾，等于给每次
+    # push 的关键路径直接加上 7 分钟；拆成独立流水线后两条**并行**，总时长
+    # 由「相加」变成「取最大值」，强度一点没减。
+    #
+    # 同一个事件下的多条流水线会各自成为一个独立构建，这就是并行的依据。
+    - runner:
+        cpus: 4
+      docker:
+        image: golang:1.25
+      ifModify: *if_code_changed
+      stages:
+        # 「有 CI」不等于「CI 在跑」，只有把门禁**故意改坏看它红不红**，
+        # 才能证明它还在工作。
+        - &gate_negative
+          name: 元门禁：门禁本身是否还有效 (negative-verify)
+          script: sh test/ci/negative-verify.sh
 
   pull_request:
     - runner:
@@ -248,9 +264,11 @@ $:
         - *gate_example_config
         - *gate_smoke
         - *gate_portable
-        - *gate_negative
         - *gate_e2e
         - *gate_mutation
+        # 这里**故意不跑**元门禁（*gate_negative）：它约 6~7 分钟，而 PR 的
+        # 价值在快速反馈。元门禁放在 push 与 tag_push 上跑 —— 主干与发布
+        # 都要过，PR 不必等它。
 
   # ---------------------------------------------------------------- 发布
   #
