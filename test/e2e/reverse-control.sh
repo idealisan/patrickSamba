@@ -92,6 +92,17 @@ client_ran() {
     printf '%s\n' "$BASE_PLAIN" | grep -qE "\[(PASS|FAIL)\] $1/"
 }
 
+# cross_ran 报告交叉验证那一节是否真的执行过。
+#
+# smoke.sh 在「可用客户端不足两家」时整节跳过（打印 [SKIP] cross/*），
+# 此时所有 cross/... 判据都不存在 —— 它们不是「没红」，是**没跑**。
+# 期望清单里的 cross/... 条目必须据此判定，而不是按客户端名去查：
+# cross/smbclient-to-impacket 的「客户端」叫 cross，并不对应某一家。
+cross_ran() {
+    printf '%s\n' "$BASE_PLAIN" | grep -q "\[SKIP\] cross/" && return 1
+    printf '%s\n' "$BASE_PLAIN" | grep -qE "\[(PASS|FAIL)\] cross/"
+}
+
 printf '\n\033[1;36m########## 冒烟判据失败对照实验 ##########\033[0m\n'
 
 # ---------------------------------------------------------------- 基线
@@ -144,31 +155,35 @@ for m in $LIST; do
         continue
     fi
 
-    # ① 整体必须红
-    if [ "$RESULT" != "FAIL" ]; then
-        printf '\033[1;31m  [BAD] 服务端已被改坏，套件却仍然 %s —— 我们的判据是瞎的！\033[0m\n' "$RESULT"
-        SUMMARY="$SUMMARY\n  [BAD]  $m 改坏了也没红（判据缺失）"
-        RC=1
-        continue
-    fi
-    printf '  套件按预期 FAIL，实际红的判据:%s\n' "$GOTFAIL"
-
-    # ② 必须红在**预期的那几条**上
+    # 先把「本次能校验哪些期望」算出来，① 才能区分
+    # 「判据瞎了」与「这个变异只影响缺席的客户端」。
     #
-    # 只校验**本次真的跑了**的客户端那几条。
-    #
-    # 原因（实测踩到）：期望清单按三家客户端写死，而 impacket 在本容器装了也
-    # 未必能被 python3 找到（/usr/local/bin 抢占 python3 那个坑，见仓库最近的
-    # 文档），smoke.sh 会 [SKIP] 掉这一家。此时 impacket/* 那几条**永远不会红**，
-    # 于是六个变异全部判成「红在别处」，实验整体红 —— 看起来像判据瞎了，
-    # 实际是一家客户端缺席。把缺席当失败，等于让这道门禁的结果取决于构建机
-    # 装没装 python 包，这既不稳定也掩盖真正该报警的信号。
-    #
-    # 处理方式：缺席的客户端**警告但不判红**（覆盖缺口要看得见），跑了的客户端
-    # 一律严格 —— 它那份期望一条都不能少。
+    # 实测踩到的正是后者：doc-noop 打的是 delete-on-close 那条删除路径，
+    # 而只有 smbclient / impacket 删文件时走它（go-smb2 走 LocalFS.Remove，
+    # 见 mutate.sh 与下面 expected_for 的注释）。CI 镜像里这两家缺席时，
+    # 该变异**没有任何判据能抓**，套件自然还是绿的 —— 那是覆盖缺口，
+    # 不是「我们的判据是瞎的」。把两者混为一谈，等于让这道关的结果取决于
+    # 构建机装没装 smbclient。
+    ENFORCEABLE=0
     MISSING=""
     SKIPPED_WANT=""
     for want in $(expected_for "$m"); do
+        case "$want" in
+        cross/*)
+            if cross_ran; then
+                ENFORCEABLE=$((ENFORCEABLE + 1))
+                case " $GOTFAIL " in
+                    *" $want "*) : ;;
+                    *) MISSING="$MISSING $want" ;;
+                esac
+            else
+                case " $SKIPPED_WANT " in
+                    *" cross "*) : ;;
+                    *) SKIPPED_WANT="$SKIPPED_WANT cross" ;;
+                esac
+            fi
+            continue ;;
+        esac
         client=${want%%/*}
         if ! client_ran "$client"; then
             case " $SKIPPED_WANT " in
@@ -177,11 +192,32 @@ for m in $LIST; do
             esac
             continue
         fi
+        ENFORCEABLE=$((ENFORCEABLE + 1))
         case " $GOTFAIL " in
             *" $want "*) : ;;
             *) MISSING="$MISSING $want" ;;
         esac
     done
+
+    # ① 整体必须红
+    if [ "$RESULT" != "FAIL" ]; then
+        if [ "$ENFORCEABLE" = "0" ]; then
+            printf '\033[1;33m  [WARN] 套件仍为 %s，但本变异的预期判据全落在缺席的客户端上 —— 覆盖缺口，非判据失效\033[0m\n' "$RESULT"
+            printf '\033[1;33m         （装上这些客户端后，这一条会自动变成硬判据）\033[0m\n'
+            SUMMARY="$SUMMARY\n  [WARN] $m 覆盖缺口：预期判据全属缺席客户端，未验证"
+        else
+            printf '\033[1;31m  [BAD] 服务端已被改坏，套件却仍然 %s —— 我们的判据是瞎的！\033[0m\n' "$RESULT"
+            SUMMARY="$SUMMARY\n  [BAD]  $m 改坏了也没红（判据缺失）"
+            RC=1
+        fi
+        continue
+    fi
+    printf '  套件按预期 FAIL，实际红的判据:%s\n' "$GOTFAIL"
+
+    # ② 必须红在**预期的那几条**上（清单已在 ① 之前算好，这里只汇报）
+    #
+    # 只校验**本次真的跑了**的客户端那几条：缺席的客户端警告但不判红
+    # （覆盖缺口要看得见），跑了的客户端一律严格 —— 它那份期望一条都不能少。
     if [ -n "$SKIPPED_WANT" ]; then
         printf '\033[1;33m  [WARN] 客户端缺席，这几家的对照未覆盖:%s\033[0m\n' "$SKIPPED_WANT"
         printf '\033[1;33m         （覆盖缺口；装上后这里的期望会自动生效）\033[0m\n'
