@@ -27,8 +27,19 @@ const (
 )
 
 // FlushRequest 是 SMB2 FLUSH Request（MS-SMB2 §2.2.17）。
+//
+// Reserved1 / Reserved2 是保留字段：客户端置 0，服务端不使用。
+// 之所以在结构体里留出来而不是直接丢掉，是因为它们看上去很像「能区分
+// F_FULLFSYNC 与普通刷盘的标志位」，而**并不是** —— SMB2 FLUSH 没有
+// 每请求的刷盘强度标志。Apple 的 F_FULLFSYNC 是**能力级**的宣告
+// （kAAPL_SUPPORTS_FULL_SYNC，见 command/aapl.go），意思是「本服务端的
+// FLUSH 一律按 F_FULLFSYNC 语义执行」，而不是「客户端可以在某次 FLUSH 里
+// 指定要哪种」。实现侧对应 command.handleFlush 的 Sync(true)，
+// 由 TestFlushReallyCallsFullSync 钉住（把 full 降级成 false 会红）。
 type FlushRequest struct {
-	FileID FileID
+	Reserved1 uint16
+	Reserved2 uint32
+	FileID    FileID
 }
 
 // ParseFlushRequest 解析 FLUSH Request。b 是完整消息（含 64 字节头）。
@@ -40,7 +51,11 @@ func ParseFlushRequest(b []byte) (*FlushRequest, error) {
 	if err := checkStructureSize(body, flushRequestStructureSize); err != nil {
 		return nil, fmt.Errorf("FLUSH Request: %w", err)
 	}
-	return &FlushRequest{FileID: parseFileID(body[8:])}, nil
+	return &FlushRequest{
+		Reserved1: le.Uint16(body[2:]),
+		Reserved2: le.Uint32(body[4:]),
+		FileID:    parseFileID(body[8:]),
+	}, nil
 }
 
 // Append 把 FLUSH Request 报文体追加到 dst。

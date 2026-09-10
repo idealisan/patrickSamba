@@ -223,6 +223,9 @@ func aaplVolumeCapabilities(ctx *Context) uint64 {
 
 	// kAAPL_SUPPORTS_FULL_SYNC：SMB2 FLUSH 必须具备 F_FULLFSYNC 语义。
 	// handleFlush 调用的是 Handle.Sync(true)（强制刷盘），所以这个宣告是真的。
+	// 由 TestFlushReallyCallsFullSync 钉住（Sync 被删掉或降级成 Sync(false) 会红）。
+	// 注意这是**能力级**宣告，不是每请求开关：SMB2 FLUSH 报文里没有刷盘强度
+	// 标志位（那两个 Reserved 字段只是保留字段，见 wire/flush.go）。
 	// 只在标了 time_machine 的共享上置位（同 Samba 的 fruit:time machine）。
 	if sh := ctx.Tree.Share; sh != nil && sh.TimeMachine {
 		caps |= aaplSupportsFullSync
