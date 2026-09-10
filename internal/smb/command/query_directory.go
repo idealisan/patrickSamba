@@ -55,11 +55,7 @@ func handleQueryDirectory(ctx *Context) error {
 
 	pattern, first := open.DirScan(req.FileName, req.Restart())
 
-	// SMB2_RETURN_SINGLE_ENTRY：一次只要一条。
-	batch := 0
-	if req.SingleEntry() {
-		batch = 1
-	}
+	batch := queryDirBatch(maxOut, req.FileInformationClass, req.SingleEntry())
 
 	entries, rerr := open.ReadDir(pattern, req.Restart(), batch)
 	if rerr != nil && !errors.Is(rerr, io.EOF) {
@@ -118,6 +114,33 @@ func noMoreFiles(first bool) error {
 		return status.NoSuchFile
 	}
 	return status.NoMoreFiles
+}
+
+// queryDirBatch 算出这一轮最多向后端要多少条目录项。
+//
+// 返回 0 表示不限条数。**不限条数的代价是超线性的**：每次 QUERY_DIRECTORY
+// 都会把剩余条目全部读出、写掉装得下的那几条、再把剩下的整份拷回句柄
+// （Open.UnreadDir 每次都要拷贝剩余部分）。于是每一轮都要拷贝 O(剩余条目) 个
+// 目录项，128k 个 band 的目录实测 4.44s / 2.76GB 分配 —— 也就是 O(N²)。
+// 限了批之后，每轮只读「装得下的那些」，退回时的拷贝量恒定。
+//
+// 估算用**单条最小开销**（固定头 + 一个 UTF-16 码元）作分母，因此算出来的批
+// 只会偏大不会偏小：偏大只是多读几条再退回去，代价恒定；偏小则会导致每轮
+// 装不满输出缓冲、平白多跑几次往返。
+func queryDirBatch(maxOut int, class wire.FileInfoClass, singleEntry bool) int {
+	if singleEntry {
+		// SMB2_RETURN_SINGLE_ENTRY：一次只要一条。
+		return 1
+	}
+	fixed, ok := wire.DirInfoFixedSize(class)
+	if !ok {
+		// 不认识的信息类：后面 DirEntryWriter.Add 会直接报错，
+		// 这里按旧行为返回 0，不改变错误路径上的表现。
+		return 0
+	}
+	// +1 兜底：maxOut 小于单条最小开销时至少也要取一条，否则一轮都装不下，
+	// 客户端会陷在「取 0 条、再取」的死循环里。
+	return maxOut/(fixed+2) + 1
 }
 
 // dirEntry 把 VFS 目录项翻译成线格式目录项。

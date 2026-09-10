@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -699,6 +700,99 @@ func writeStream(t *testing.T, fs vfs.FileSystem, path, stream string, data []by
 	if _, err := h.WriteAt(data, 0); err != nil {
 		t.Fatalf("写流 %s:%s: %v", path, stream, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 每轮取多少条：queryDirBatch
+// ---------------------------------------------------------------------------
+
+func TestQueryDirBatch(t *testing.T) {
+	const maxOut = 64 * 1024
+	fixed, ok := wire.DirInfoFixedSize(wire.FileIdBothDirectoryInformation)
+	if !ok {
+		t.Fatal("FileIdBothDirectoryInformation 应有固定尺寸")
+	}
+
+	// 单次只要一条。
+	if got := queryDirBatch(maxOut, wire.FileIdBothDirectoryInformation, true); got != 1 {
+		t.Fatalf("single entry: batch = %d, 期望 1", got)
+	}
+
+	// 认识的信息类必须给出**有界**的批：返回 0 表示不限条数，
+	// 那正是 O(N²) 的成因（见 queryDirBatch 的注释）。
+	got := queryDirBatch(maxOut, wire.FileIdBothDirectoryInformation, false)
+	if got <= 0 {
+		t.Fatalf("batch = %d，不限条数会让每轮都整份拷回剩余条目", got)
+	}
+	if want := maxOut / (fixed + 2); got < want {
+		t.Fatalf("batch = %d，小于按最小条目开销估出的 %d", got, want)
+	}
+	// 批不能大到「几乎把整个目录读进来」：64 KiB 缓冲一页只装得下几百条。
+	if got > 4096 {
+		t.Fatalf("batch = %d，过大：限批的意义就是不一次读整个目录", got)
+	}
+
+	// 输出缓冲小到装不下一整条时也要取一条，否则一轮装不下、客户端空转。
+	if got := queryDirBatch(8, wire.FileIdBothDirectoryInformation, false); got != 1 {
+		t.Fatalf("极小缓冲: batch = %d, 期望 1", got)
+	}
+
+	// 不认识的信息类沿用旧行为（0），错误路径上的表现不变。
+	if got := queryDirBatch(maxOut, wire.FileInfoClass(0xFF), false); got != 0 {
+		t.Fatalf("未知信息类: batch = %d, 期望 0", got)
+	}
+}
+
+// 判据：整轮枚举的分配量必须与条目数**线性**相关。
+//
+// 反向对照（这是这条测试的立身之本）：把 queryDirBatch 改成恒返回 0
+// （即修改前的「每轮不限条数」），下面的阈值就会被远远突破 ——
+//
+//	条目数    改前分配    改后分配
+//	 1 000     2.2 MB      2.1 MB
+//	10 000    38.0 MB     22.0 MB
+//	50 000   460.4 MB    110.9 MB
+//
+// 改前条目数 ×50 而分配 ×207（超线性），改后 ×52（线性）。
+func TestQueryDirectoryBatchAvoidsQuadraticAllocs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("建 2 万个文件较慢，-short 下跳过")
+	}
+
+	const n = 20_000
+	root := t.TempDir()
+	buildBandFiles(t, root, n)
+	fs := newQueryDirTestFS(t, root)
+
+	// 20k 档实测：改后约 44 MB，改前约 100 MB。阈值取两者中间。
+	const limit = 70 << 20
+
+	bytes := drainAllocBytes(t, fs, n)
+	if bytes > limit {
+		t.Fatalf("枚举 %d 条分配了 %d 字节，超过 %d 字节：疑似退回「每轮不限条数」的 O(N²) 行为",
+			n, bytes, uint64(limit))
+	}
+}
+
+// drainAllocBytes 量一次「完整枚举」总共分配了多少字节。
+//
+// 用 runtime.MemStats 的 TotalAlloc 差值而不是 testing.AllocsPerRun ——
+// 后者返回的是分配**次数**，看不到条目拷贝的字节量。
+func drainAllocBytes(t *testing.T, fs *vfs.LocalFS, n int) uint64 {
+	t.Helper()
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	ctx, open := newQueryDirTestContext(t, fs, false)
+	defer open.close()
+	if got := drainQueryDirectory(t, ctx, open); got != n+2 { // +2 是 "." 与 ".."
+		t.Fatalf("枚举到 %d 条, 期望 %d", got, n+2)
+	}
+
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
 }
 
 // ---------------------------------------------------------------------------
