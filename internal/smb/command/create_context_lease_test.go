@@ -85,6 +85,69 @@ func TestDurableGrantAllowedViaLease(t *testing.T) {
 	}
 }
 
+// TestDurableReachableOnAppleLeaseCreate
+//
+// #58 的可达性断言：真 macOS 那条链路上能不能拿到 durable handle。
+//
+// 真机验证在本环境**做不到**（容器里没有 macOS），所以这里钉的是「协议层面
+// 那条路径是通的」：按 Apple 验证第 2 步的 CREATE 形态发请求 ——
+// RequestedOplockLevel = SMB2_OPLOCK_LEVEL_LEASE(0xFF) + DH2Q + 带
+// HANDLE_CACHING 的 RqLs —— 断言真的授予了 durable 并回 DH2Q。
+//
+// 反向对照：注掉 create_context_lease.go 里那行 SetLeaseDurableEligible，
+// 「Apple 形态」这一支立刻拿不到授予（而 batch oplock 那一支照旧通过），
+// 正好指出断的是 lease 那一环而不是别处。
+//
+// 覆盖不到的部分（真机才有的时序、断线重连是否真能续上备份）如实写在这里，
+// 不在注释里假装验过。
+func TestDurableReachableOnAppleLeaseCreate(t *testing.T) {
+	resetDurable()
+
+	dh2q := (&wire.DurableRequestV2{Timeout: 0}).Encode()
+	lease := wire.LeaseContext{
+		LeaseState: wire.LeaseReadCaching | wire.LeaseWriteCaching | wire.LeaseHandleCaching,
+	}
+	lease.LeaseKey[0] = 0x5A
+
+	ctx, _, _ := newDurableTestCtx(t, "alice")
+	open := &Open{Persistent: 7, Volatile: 7, Path: "f.txt"}
+
+	// Apple 形态：lease(0xFF) + DH2Q + RqLs(HANDLE)
+	req := &wire.CreateRequest{
+		RequestedOplockLevel: wire.OplockLevelLease,
+		Contexts: []wire.CreateContext{
+			{Name: wire.CreateContextDH2Q, Data: dh2q},
+			{Name: wire.CreateContextRqLs, Data: lease.Encode()},
+		},
+	}
+	resp := grantDurable(t, ctx, open, req)
+	if open.Durable == nil || !open.Durable.Granted {
+		t.Fatal("走 lease 的 CREATE 没拿到 durable —— Time Machine 这条链路断着")
+	}
+	if !hasCreateContext(resp.Contexts, wire.CreateContextDH2Q) {
+		t.Error("授予了 durable 却没回 DH2Q 响应 context")
+	}
+
+	// 同样的请求去掉 RqLs：lease 位还在（0xFF），但没有租约可判 → 不应授予。
+	// 这条是为了防止「只要写了 0xFF 就给 durable」这种假绿。
+	resetDurable()
+	reqNoLease := &wire.CreateRequest{
+		RequestedOplockLevel: wire.OplockLevelLease,
+		Contexts:             []wire.CreateContext{{Name: wire.CreateContextDH2Q, Data: dh2q}},
+	}
+	open2 := &Open{Persistent: 8, Volatile: 8, Path: "f.txt"}
+	h := &durableHandler{req: reqNoLease}
+	if err := h.Parse(ctx, wire.CreateContextDH2Q, dh2q); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := h.Registered(ctx, open2); err != nil {
+		t.Fatalf("Registered: %v", err)
+	}
+	if open2.Durable != nil && open2.Durable.Granted {
+		t.Error("没有 RqLs 却授予了 durable —— 判据放水了")
+	}
+}
+
 // TestLeaseContextRegistered
 //
 // 注册表必须认识 RqLs：不认识的话它会被当成「未知 context 静默忽略」，
