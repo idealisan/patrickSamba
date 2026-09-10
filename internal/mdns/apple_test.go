@@ -94,6 +94,23 @@ func TestADiskServiceDef(t *testing.T) {
 				"sys=waMa=0,adVF=0x100",
 			},
 		},
+
+		{
+			// 卷名里的分隔符必须转义：不转义的话 `a,b` 会被当成
+			// `adVN=a` + 一个畸形字段，条目直接废掉（或更糟，被解析成
+			// 一个不存在的卷名而静默丢掉这个备份卷）。
+			//
+			// config 层已经禁掉了这些字符，这里防的是「没走 config 校验」
+			// 的调用方（例如编程式构造的配置）。
+			name:    "卷名含分隔符要转义",
+			volumes: []string{`a,b`, `c\d`},
+			wantOK:  true,
+			wantTXT: []string{
+				`dk0=adVN=a\,b,adVF=0x82`,
+				`dk1=adVN=c\\d,adVF=0x82`,
+				"sys=waMa=0,adVF=0x100",
+			},
+		},
 	}
 
 	for _, tc := range tests {
