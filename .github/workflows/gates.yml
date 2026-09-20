@@ -1,0 +1,120 @@
+# Gates —— 从旧 CNB 流水线等价迁移过来的硬性门禁（2026-09-20 迁移）。
+#
+# 与 ci.yml（Extended Tests）的分工：
+#   本文件 = **门禁**（每次 push/PR 都必须绿的硬性检查，源自旧 .cnb.yml）；
+#   ci.yml = 扩展测试面（多 OS 单测 / 三客户端验收 / 交叉 vet）。
+#
+# 门禁清单（与 test/ci/negative-verify.sh 的防腐验证一一对应）：
+#   gofmt        —— gofmt -l 必须为空
+#   constraints  —— AGENTS.md C1/C3/C4/C6/C8/C9 硬性约束（scripts/check-constraints.sh）
+#   test-compile —— 测试代码编译校验：全部 build tag × 全部平台
+#                   （test/ci/check-test-compile.sh，堵「_test.go 从未被编译」两个洞）
+#   race         —— go test -race（CGO_ENABLED=1，race 检测器依赖 cgo）
+#   static-link  —— linux 产物必须静态链接（LC_ALL=C ldd 判定，不能依赖 locale）
+#   portable     —— filesystem_mode: portable 实测（builtin 底座必须在 CI 里真跑）
+#   gate-integrity —— 门禁自身的防腐（test/ci/negative-verify.sh：注入故障证明每关有牙）
+#
+# ⚠️ race/static-link/gate-integrity 三个 job 依赖 Linux 工具（gcc / ldd），
+#    只在 ubuntu 上有意义，不要搬到 windows/macos runner。
+
+name: Gates (门禁)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: gofmt -l 必须为空
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi
+
+  constraints:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: C1/C3/C4/C6/C8/C9 硬性约束
+        run: sh scripts/check-constraints.sh
+
+  test-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: 测试代码编译校验（全部 build tag × 全部平台）
+        run: sh test/ci/check-test-compile.sh
+
+  race:
+    runs-on: ubuntu-latest
+    # race 检测器依赖 cgo：CGO_ENABLED=0 时 `go test -race` 以退出码 2 拒绝执行
+    # （0.1 秒就"绿"了，一个测试都没跑）—— 这正是 negative-verify §3b 钉住的旧坑。
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: go test -race ./...
+        run: go test -race -count=1 ./...
+
+  static-link:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: linux 产物必须静态链接（LC_ALL=C ldd 判定）
+        run: |
+          go build -o /tmp/staticprobe ./cmd/stupidsamba
+          if LC_ALL=C ldd /tmp/staticprobe 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo '错误: 产物不是静态链接'; exit 1
+          fi
+
+  portable:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: portable 模式实测（builtin 底座必须在 CI 里真跑）
+        run: sh test/ci/portable-mode.sh
+
+  gate-integrity:
+    # 门禁自身的防腐：往工作树注入故障（语法错误/类型错误/数据竞争等），
+    # 证明每一关真的拦得住 —— 「一盏从来没亮过的红灯，和没有这盏灯是一回事」。
+    # 全程用 go 的 -overlay 注入，工作树零修改。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: negative-verify（逐关注入故障做反向对照）
+        run: sh test/ci/negative-verify.sh
