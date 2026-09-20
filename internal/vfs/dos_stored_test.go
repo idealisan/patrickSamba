@@ -76,15 +76,19 @@ func TestSetAttrFiltersObjectiveDOSBits(t *testing.T) {
 func TestStoredWinsClearsDerivedReadonly(t *testing.T) {
 	fs := metaFS(t)
 	writeFile(t, fs, "f.txt", "data")
-	// 宿主文件保持只读权限位（builtin 档不回写 chmod，这正是缺陷现场）：
-	if err := os.Chmod(fs.Root()+"/f.txt", 0o444); err != nil {
-		t.Fatal(err)
-	}
 
 	h, _, err := fs.Open(&OpenRequest{
 		Path: "f.txt", Flags: OpenWrite | OpenRead, Disposition: OpenExisting,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// 打开**之后**再置宿主只读位：非 root 进程无法以写方式打开宿主 0444
+	// 文件（GitHub runner 即如此，CNB 里是 root 才没暴露这个前提）。
+	// 本用例要验的是读路径的合成方向（存储值优先 vs 权限位推导），
+	// Stat 会重新按宿主实况推导，与打开先后无关，结论不变。
+	// builtin 档不回写 chmod，这正是缺陷现场。
+	if err := os.Chmod(fs.Root()+"/f.txt", 0o444); err != nil {
 		t.Fatal(err)
 	}
 	// 客户端「清除只读」：显式设 ARCHIVE（不含 READONLY）。

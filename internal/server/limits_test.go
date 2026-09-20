@@ -48,7 +48,7 @@ func newTestServer(t *testing.T, tune func(*Options)) *Server {
 
 	opts := Options{
 		Addresses: []string{"127.0.0.1"},
-		Port:      0, // 随机端口，避免与其它 agent 抢
+		Port:      freePort(t), // 随机端口，避免与其它 agent 抢 445/4445
 		Logger:    log,
 		Settings: &command.Settings{
 			ServerName:         "TESTSRV",
@@ -88,6 +88,26 @@ func newTestServer(t *testing.T, tune func(*Options)) *Server {
 		srv.Close()
 	})
 	return srv
+}
+
+// freePort 找一个当前空闲的 TCP 端口。
+//
+// Options.Port == 0 表示「用默认端口 445」而不是「随机端口」（见 server.Port
+// 字段注释与 config 层的归一化），所以不能直接传 0 —— 绑 445 需要特权，
+// 非 root 的 CI（GitHub runner）会 `bind: permission denied`。
+// 这里先 bind :0 拿到内核分配的端口再释放；存在极小的竞态窗口，
+// 但同包用例串行运行，实践中足够（与 test/integration 的 freePort 同款）。
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("探测空闲端口失败: %v", err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	if err := l.Close(); err != nil {
+		t.Fatalf("释放探测端口失败: %v", err)
+	}
+	return port
 }
 
 func serverAddr(t *testing.T, s *Server) string {
