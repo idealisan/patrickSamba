@@ -185,7 +185,7 @@ func (m *metadataServer) buildGetResponse(relatesTo string) ([]byte, error) {
 	buf.WriteString(`<wsd:MetadataSection Dialect="` + nsDevProf + `/ThisModel">`)
 	buf.WriteString(`<wsdp:ThisModel>`)
 	buf.WriteString(`<wsdp:Manufacturer>stupidSamba</wsdp:Manufacturer>`)
-	buf.WriteString(`<wsdp:ManufacturerUrl>https://cnb.cool/finalappstore/stupidSamba</wsdp:ManufacturerUrl>`)
+	buf.WriteString(`<wsdp:ManufacturerUrl>https://github.com/idealisan/patrickSamba</wsdp:ManufacturerUrl>`)
 	buf.WriteString(`<wsdp:ModelName>stupidSamba File Server</wsdp:ModelName>`)
 	if m.dev.PresentationURL != "" {
 		buf.WriteString(`<wsdp:PresentationUrl>`)

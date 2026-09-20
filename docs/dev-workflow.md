@@ -24,10 +24,8 @@ git commit -m "<模块>: <一句话>"
 git push -u origin <角色>/<主题>
 
 # ③ 阶段性成果 → 提 PR
-curl -sS -X POST -H "Authorization: Bearer $CNB_TOKEN" -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  -d '{"title":"<模块>: <一句话>","head":"<角色>/<主题>","base":"main","body":"<说明>"}' \
-  "https://api.cnb.cool/$CNB_REPO_SLUG/-/pulls"
+gh pr create --base main --head <角色>/<主题> \
+  --title "<模块>: <一句话>" --body "<说明>"
 
 # ④ DM team-lead 报 PR 号，等评审
 ```
@@ -177,49 +175,44 @@ gocross      # linux/amd64, linux/arm64, darwin/arm64, windows/amd64
 ### 5.2 创建 PR
 
 ```sh
-curl -sS -X POST \
-  -H "Authorization: Bearer $CNB_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  -d '{"title":"auth: 补齐 SMB 3.0 AES-128-CCM 加密","head":"auth/smb30-encryption","base":"main","body":"修复 encryption_required 在 3.0/3.0.2 下被静默忽略的问题。\n\n- 实测：smbclient --client-protection=encrypt 通过\n- 反向测试：2.1 客户端被拒绝"}' \
-  "https://api.cnb.cool/$CNB_REPO_SLUG/-/pulls"
+gh pr create --base main --head auth/smb30-encryption \
+  --title "auth: 补齐 SMB 3.0 AES-128-CCM 加密" \
+  --body "修复 encryption_required 在 3.0/3.0.2 下被静默忽略的问题。
+
+- 实测：smbclient --client-protection=encrypt 通过
+- 反向测试：2.1 客户端被拒绝"
 ```
 
-- `$CNB_TOKEN` 与 `$CNB_REPO_SLUG`（值为 `finalappstore/stupidSamba`）在容器环境变量里已有，
-  **不要把 token 打印出来、也不要写进任何文件或日志**。
-- `head` 是你的分支名，`base` 固定 `main`。
-- 返回体里的 `number` 就是 PR 号，记下来。
+- 私有仓库：`gh` 需要已登录（`gh auth status` 核对）且具备仓库写权限。
+- `--head` 是你的分支名，`--base` 固定 `main`。
+- 命令输出会给出 PR 的 URL 与编号，记下来。
 
 ### 5.3 合并 PR（评审通过后）
 
 ```sh
-curl -sS -X PUT \
-  -H "Authorization: Bearer $CNB_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json" \
-  -d '{"merge_style":"merge","commit_title":"Merge PR #12: auth: 补齐 SMB 3.0 AES-128-CCM 加密"}' \
-  "https://api.cnb.cool/$CNB_REPO_SLUG/-/pulls/12/merge"
+gh pr merge 12 --merge \
+  --subject "Merge PR #12: auth: 补齐 SMB 3.0 AES-128-CCM 加密"
 ```
 
-### 5.4 CNB API 的四个坑（**已经有人替你踩过了，别再试一遍**）
+### 5.4 平台 API 的坑（历史记录）
 
-| 症状 | 原因 | 正确做法 |
-|---|---|---|
-| `404` | 合并用了 `POST` | 合并是 **`PUT`**，只有创建 PR 是 `POST` |
-| `400` | 参数名写成 `merge_method` | CNB 用的是 **`merge_style`**（不是 GitHub 的那套） |
-| `400` | 漏了 `commit_title` | **`commit_title` 必填**，不是可选项 |
-| `406` `{"errcode":406,"errmsg":"either of 'application/json' or 'application/vnd.cnb.api+json' content type supported"}` | **GET 和 PUT 都要求 `Accept: application/json`**，缺了就报 406。报错文案说的是 content type，极易误导你去查 `Content-Type` 头——但 `Content-Type: application/json` 明明已经带了，真正缺的是 `Accept` | 请求务必带 `-H "Accept: application/json"`（上面的 curl 已经带了，照抄别漏） |
+上面被删掉的 curl 教程是 CNB 时代的产物（2026-09-20 起已迁 GitHub）。当时踩过的
+四个坑——合并用 `PUT` 而不是 `POST`、参数叫 `merge_style` 不是 `merge_method`、
+`commit_title` 必填、必须带 `Accept: application/json`——都随平台一起作废了：
+`gh pr merge` 不再需要关心这些细节。保留这一条只为提醒后人：**换平台时，
+API 层的坑要重新踩一遍、重新记档**（本项目「成功回显 ≠ 事情真的发生」的教训
+同样适用）。
 
 ### 5.5 评审与合并规则
 
 - PR 由 team-lead 或另一个 agent 评审后合并，**作者不自行合并**。
-- 合并前 CI 必须绿。**CI 现状是双轨（2026-08-25）**：
-  - **CNB 门禁（`.cnb.yml`，主门禁）**：build/vet/gofmt/测试代码编译校验/C1-C9
-    硬性约束/单测/race/交叉编译/静态链接/portable 实测等 stage，push 与 PR 两条路径同锚点复用；
-  - **GitHub Actions（`.github/workflows/ci.yml`，「更多测试」一层）**：多 OS 单测
-    （ubuntu/macos/windows）、跨平台 `go vet`（含 `_test.go` × 全部 build tag，
-    覆盖 linux/darwin/windows/freebsd）、三客户端真实验收（smbclient / impacket / go-smb2）。
-    该文件在 CNB 上不触发，只在仓库镜像到 github.com 后由 GA 执行。
+- 合并前 CI 必须绿。**CI 现状（2026-09-20 起单轨 GitHub Actions）**：
+  - **GitHub Actions（`.github/workflows/ci.yml`）**：多 OS 单测（ubuntu/macos/windows）、
+    跨平台 `go vet`（含 `_test.go` × 全部 build tag，覆盖 linux/darwin/windows/freebsd）、
+    三客户端真实验收（smbclient / impacket / go-smb2）；
+  - ⚠️ 旧 CNB 门禁里的 build/vet/gofmt/race/静态链接/portable 实测等 stage 已随迁移
+    移除，**其中仍有效的检查是否都在 GitHub Actions 侧有对应物，需要逐项核对**
+    （`gofmt` / 静态链接门禁的本地等价物见 `test/ci/negative-verify.sh`）。
 - 建完 PR **立刻 DM team-lead 报 PR 号**，不然没人知道它在等评审。
 
 ---

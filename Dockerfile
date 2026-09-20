@@ -47,7 +47,7 @@ ARG BUILD_DATE=unknown
 
 LABEL org.opencontainers.image.title="stupidSamba" \
       org.opencontainers.image.description="纯 Go 实现的极简 SMB/CIFS 文件共享服务器，自带进程内 mDNS/DNS-SD 广播与 Apple SMB 扩展" \
-      org.opencontainers.image.source="https://cnb.cool/finalappstore/stupidSamba" \
+      org.opencontainers.image.source="https://github.com/idealisan/patrickSamba" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${COMMIT}" \

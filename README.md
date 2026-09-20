@@ -143,96 +143,85 @@ Linux 内核客户端**——注意它与 `CAP_SYS_ADMIN` 无关（加 capabilit
 
 ### 方式一：下载预编译二进制（推荐）
 
-> **本仓库为私有仓库**：下载需要 **仓库访问权限** 与 **个人访问令牌（PAT）**。
-> 匿名访问 Release 页或附件会返回 **404**（平台对无权限者隐藏仓库存在性，不是链接错误）。
-> 先生成令牌并导出：
-> ```sh
-> export CNB_TOKEN=<你的个人访问令牌>
-> ```
+> **本仓库为私有仓库**：下载 Release 资产需要 **仓库访问权限** 与 **GitHub 个人访问
+> 令牌（PAT）**。
 
-最新版本 **v0.7.2** 发布在 CNB 仓库的 Release 页面（正式版通道；自 PR #156（`25e92d2`）起
-发布渠道按 **tag 名的 SemVer** 判定 —— 带连字符的 tag（`v0.2.0-rc1`）才走预发布。
-**「正式版通道」说的是发布渠道，不是成熟度背书**，成熟度以下文各节的实测证据为准）：
+发布渠道是 **GitHub Releases**（正式版通道按 **tag 名的 SemVer** 判定 —— 带连字符的
+tag（`v0.2.0-rc1`）才走预发布；**「正式版通道」说的是发布渠道，不是成熟度背书**，
+成熟度以下文各节的实测证据为准）：
 
-- **Release 页（推荐，普通用户点这里下载）**：
-  `https://cnb.cool/finalappstore/stupidSamba/-/releases/v0.7.2`
-  页面里的「下载」按钮由 web 会话处理跳转，能正常拿到文件。
-- **原始文件直链（给脚本 / CI 用）**：
-  `https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.7.2/stupidsamba_v0.7.2_<os>_<arch>.tar.gz`
-  （Windows 用 `.zip`；`SHA256SUMS` 在同目录 `.../download/v0.7.2/SHA256SUMS`）。
-  注意：该直链需在请求里带 `Authorization: Bearer <token>` 且跟随重定向（`-L`），
-  最终从公开 CDN `asset.cnb.cool` 取字节；浏览器在 Release 页点按不受此限。
-  ⚠️ 不要把 `cnb.cool` 这个 host 的 `/-/releases/download/...` 路径当可直接
-  `curl` 的链接——它不下发文件，需用上面的 `api.cnb.cool` 形态。
+- **Release 页（普通用户从这里下载）**：
+  `https://github.com/idealisan/patrickSamba/releases`
+- **脚本 / CI 直链**：
+  `https://github.com/idealisan/patrickSamba/releases/download/<tag>/stupidsamba_<tag>_<os>_<arch>.tar.gz`
+  （Windows 用 `.zip`；`SHA256SUMS` 在同一附件目录。）
+
+> ⚠️ **2026-09-20 起发布渠道从 CNB 迁到 GitHub Releases，历史资产尚未重新上传**
+> —— 下载页暂时为空属预期。资产补传之前请用「方式二：从源码构建」。
 
 每个压缩包内含二进制、本 `README.md`、`CHANGELOG.md` 与 `configs/example.yaml`：
 
 | 平台 | 文件 |
 |---|---|
-| Linux x86-64 | `stupidsamba_v0.7.2_linux_amd64.tar.gz` |
-| Linux ARM64（树莓派 4 等） | `stupidsamba_v0.7.2_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `stupidsamba_v0.7.2_darwin_arm64.tar.gz` |
-| Windows x86-64 | `stupidsamba_v0.7.2_windows_amd64.zip` |
+| Linux x86-64 | `stupidsamba_<tag>_linux_amd64.tar.gz` |
+| Linux ARM64（树莓派 4 等） | `stupidsamba_<tag>_linux_arm64.tar.gz` |
+| macOS Apple Silicon | `stupidsamba_<tag>_darwin_arm64.tar.gz` |
+| Windows x86-64 | `stupidsamba_<tag>_windows_amd64.zip` |
 
 下载、校验、解压、运行（**无需安装、无需任何依赖**，二进制名不带版本号）：
 
 ```sh
-BASE=https://api.cnb.cool/finalappstore/stupidSamba/-/releases/download/v0.7.2
+TAG=v0.7.2
+BASE=https://github.com/idealisan/patrickSamba/releases/download/$TAG
 
-# 必须带 Bearer 令牌（-H）并跟随跳转（-fL：-f 遇错不写文件，-L 跟 302 到 CDN）
-curl -fL -H "Authorization: Bearer $CNB_TOKEN" \
-  -o stupidsamba_v0.7.2_linux_amd64.tar.gz \
-  "$BASE/stupidsamba_v0.7.2_linux_amd64.tar.gz"
+# 私有仓库的资产需要带令牌（-fL：-f 遇错不写文件，-L 跟随跳转）
+curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -o stupidsamba_${TAG}_linux_amd64.tar.gz \
+  "$BASE/stupidsamba_${TAG}_linux_amd64.tar.gz"
 
 # 校验完整性
-curl -fL -H "Authorization: Bearer $CNB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
+curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" -o SHA256SUMS "$BASE/SHA256SUMS"
 sha256sum -c SHA256SUMS 2>/dev/null | grep linux_amd64
 
-tar -xzf stupidsamba_v0.7.2_linux_amd64.tar.gz
-./stupidsamba_v0.7.2_linux_amd64/stupidsamba -config stupidsamba_v0.7.2_linux_amd64/configs/example.yaml
+tar -xzf stupidsamba_${TAG}_linux_amd64.tar.gz
+./stupidsamba_${TAG}_linux_amd64/stupidsamba -config stupidsamba_${TAG}_linux_amd64/configs/example.yaml
 # Windows 解压出的是 stupidsamba.exe
 ```
 
-> 说明：Release 页面上保留着历史条目 `v0.1.0` ~ `v0.3.0`，以及发布流程验证用的
-> `v0.1.0-test` / `v0.0.99-probe` / `v0.2.0-rc0`。后三个是**流程验证记录**，
-> **请勿下载使用**；`v0.1.0` ~ `v0.3.0` 是旧版本，新部署请用 v0.7.2。
+> 历史条目说明：`v0.1.0` ~ `v0.3.0`，以及发布流程验证用的 `v0.1.0-test` /
+> `v0.0.99-probe` / `v0.2.0-rc0`（**请勿下载使用**）是旧版本；新部署请用最新 tag。
 
 ### 方式一之二：Docker 镜像（NAS / 家庭服务器推荐）
 
-v0.2.0 起每个版本同时发布**多架构容器镜像**（`linux/amd64` + `linux/arm64`），
-基础镜像是 `scratch`——镜像里只有一个静态二进制和一份配置，没有 shell、没有包管理器。
-镜像里的二进制与上面裸包里的是**同一份字节**（发布脚本从 `.tar.gz` 里解出来再 `COPY`
-进镜像），所以裸包做过的那几项自检对镜像同样成立。
+镜像发布在 **ghcr.io**，由 GitHub Actions 在打 `v*` tag 时自动构建并推送
+（`linux/amd64` + `linux/arm64`；基础镜像 `scratch`——里面只有一个静态二进制和
+一份配置，没有 shell、没有包管理器；镜像里的二进制与裸包是**同一份字节**，
+发布脚本从 `.tar.gz` 里解出来再 COPY 进镜像）：
 
-**先登录，镜像和本仓库一样是私密的**（实测：不登录直接 pull 会被拒，报
-`pull access denied ... no basic auth credentials`）：
-
-```sh
-# 用户名是固定字面量 cnb，不是你的账号名；密码是 CNB 访问令牌
-docker login docker.cnb.cool -u cnb -p "$CNB_TOKEN"
+```
+ghcr.io/idealisan/patricksamba:<tag>
 ```
 
+> ⚠️ 只有**迁移之后新打的 tag** 才有镜像，历史 tag 未补建。且仓库是私有的，
+> 拉取需要具备 `read:packages` 权限的 PAT：
+>
+> ```sh
+> docker login ghcr.io -u <GitHub用户名> -p "<具备 read:packages 的 PAT>"
+> ```
+
+试跑：一条命令起服务，内置配置自带演示账号（stupidsamba/stupidsamba），
+Windows 11 / macOS / Linux 客户端都能直接连。
+
 ```sh
-# 试跑：一条命令起服务，内置配置自带演示账号（stupidsamba/stupidsamba），
-# Windows 11 / macOS / Linux 客户端都能直接连。
 docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.7.2
+  ghcr.io/idealisan/patricksamba:<tag>
 
 smbclient //127.0.0.1/public -U stupidsamba%stupidsamba -m SMB3 -c ls
 ```
 
-> 注：镜像内置的 [`configs/docker.yaml`](configs/docker.yaml) **已经带演示账号**
-> （`stupidsamba` / `stupidsamba`，不是 guest 匿名），上面的用法开箱即用；
-> 启动日志会为这份公开凭据打一条 WARN。
-> v0.7.2 镜像里三套服务发现（mDNS / WS-Discovery / NetBIOS）都是**显式关闭**的 ——
-> 桥接网络下组播与广播出不去，广播一个连不上的地址比不广播更坏，详见下一节的须知。
 
-`docker pull` 会按当前平台自动挑架构，不需要指定。要在 amd64 机器上核对 arm64
-那一份，用 `docker pull --platform linux/arm64 ...`。
-
-### 从 Windows 访问
 
 1. 资源管理器地址栏输入 `\\<运行 Docker 的机器 IP>\public`
    （例如 `\\172.26.0.217\public`；也可以在「添加网络位置」向导里填同样的路径）。
@@ -258,7 +247,7 @@ docker run -d --name stupidsamba \
   -p 445:445 \
   -v /你的目录:/data \
   -v ./my-config.yaml:/etc/stupidsamba/config.yaml:ro \
-  docker.cnb.cool/finalappstore/stupidsamba:v0.7.2
+  ghcr.io/idealisan/patricksamba:<tag>
 ```
 
 两点须知：
@@ -291,7 +280,7 @@ go build -trimpath \
 
 > 版本号**没有硬编码在任何源文件里**：`cmd/stupidsamba/main.go` 里的默认值刻意是
 > `version = "dev"`，发布构建由 `scripts/build-release.sh` 经 `-ldflags -X` 注入，
-> 值来自 git tag（CI 里是 tag_push 事件的 `$CNB_BRANCH`）。
+> 值来自 git tag（CI 里是 tag push 事件的 `$GITHUB_REF_NAME`）。
 > 所以「发新版本」= 打新 tag，不需要改代码；反过来，直接 `go build` 出来的二进制
 > `-version` 会显示 `dev`，一眼就能看出它不是发布产物。
 

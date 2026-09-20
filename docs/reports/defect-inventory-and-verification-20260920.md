@@ -241,3 +241,44 @@ codebuddy 相关的目录排除掉，并且历史 commit 里也清理掉」）�
   GOOS=linux/darwin/windows vet 全过；`internal/config` 与 `internal/smb/command`
   全量 `-short` 全绿，测试输出已是新路径。
 - 本条落定后，§4 档 A 的 #4 从待办中移除。
+
+---
+
+## 更新（2026-09-20 17:00）—— CNB 全面退役
+
+所有者拍板「以后不再使用 CNB」。处置【实测】：
+
+**删除**（CNB 专属死物）：
+
+- `.cnb.yml`（CNB 流水线，20 处引用）；
+- `scripts/ci-status.sh`（查 CNB API 的 CI 状态诊断，18 处）——由 `gh run list/view` 取代；
+- `scripts/publish-release.sh`（CNB Open API 发版，24 处）——由 `gh release create` 取代；
+- `docs/docker-registry.md`（CNB 制品库文档，37 处）。
+
+**新增**：
+
+- `.github/workflows/docker.yml`：打 `v*` tag 时用 `scripts/docker-build.sh` 构建双架构
+  镜像并推送 **ghcr.io/idealisan/patricksamba**，同时把发布裸包挂到 GitHub Release
+  （顺带补上「方式一」里「资产尚未上传」的缺口）。
+
+**改**：
+
+- README：发版下载通道 → GitHub Releases；Docker 章节 → ghcr 拉取（`read:packages`
+  PAT）；`$CNB_BRANCH` → `$GITHUB_REF_NAME`；`docker.cnb.cool` 引用清零。
+- Dockerfile：`org.opencontainers.image.source` → GitHub 仓库地址。
+- `.github/workflows/ci.yml` 头注释：不再自称「CNB 之外的更多测试层」。
+- `internal/wsd/metadata.go`：WS-Discovery 的 `ManufacturerUrl` 原来广播的是
+  cnb.cool 链接（**真产品行为**），已改为 GitHub 仓库地址。
+- AGENTS.md（7 处）、`docs/dev-workflow.md`（CNB API 建/合 PR 教程 → `gh pr create/merge`）、
+  `docs/test-infra.md`、`test/ci/negative-verify.sh`、`scripts/docker-build.sh`、
+  `scripts/env/patch-codebuddy.sh`、`.gitignore`、`internal/vfs` 两处注释。
+
+**保留**（时间锚定的历史记录，不属于「CNB 描述」）：CHANGELOG 的历史条目、
+`docs/status-*`、`docs/v020-*`、`docs/security-audit-v0.1.0.md`、`RELEASE_*`、
+`VFS_TAG_REPORT.md`、`memory/`（23 个文件）、`docs/troubleshooting-codebuddy.md`
+里的口述引用。
+
+**⚠️ 迁移留下的真实缺口**：旧 CNB 门禁里的 build/vet/gofmt/race/静态链接/portable
+实测等 stage 已随 `.cnb.yml` 移除，**GitHub Actions 侧是否都有对应物需要逐项核对**
+（`dev-workflow.md` §5.5 与 `test-infra.md` 已标注）。`-race` 档尤其可疑 ——
+GitHub Actions 的三档 unit 都没带 race。

@@ -1,11 +1,9 @@
-# GitHub Actions —— 用 GitHub 的 action 额度跑「更多测试」。
+# GitHub Actions —— 本仓库的 CI（用 GitHub 的 runner 额度）。
 #
-# 本仓库主 CI 在 CNB（.cnb.yml），只跑 linux 单一镜像。这里用 GitHub Actions 的公开
-# runner 额度，把测试面扩到多 OS（ubuntu/macos/windows）+ 真实第三方客户端验收
-# （smbclient / impacket / go-smb2），作为 CNB 门禁之外的「更多测试」一层。
+# 测试面：多 OS unit（ubuntu/macos/windows）+ 真实第三方客户端验收
+# （smbclient / impacket / go-smb2）+ 6 档交叉编译 vet。
 #
-# 注意：本文件在 CNB 上不会触发（CNB 只看 .cnb.yml）；它只在仓库被镜像到
-# github.com 后、由 GitHub Actions 执行。
+# （2026-09-20 起本仓库不再使用 CNB；旧流水线配置已随迁移移除。）
 
 name: Extended Tests (GitHub Actions)
 

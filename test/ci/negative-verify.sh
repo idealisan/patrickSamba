@@ -4,7 +4,7 @@
 # 为什么必须有这个文件
 # --------------------
 # 本项目已经踩过不止一次「门禁看着存在、其实永远绿」的坑：
-#   - `.cnb.yml` 把 `main:` 写成了事件名，整段被静默忽略，
+#   - 旧 CNB 流水线把 `main:` 写成了事件名，整段被静默忽略，
 #     向 main 推了几十个 commit 一次校验都没跑过；
 #   - gofmt 门禁存在，但 HEAD 上就是红的，没人发现；
 #   - `test/` 靠 `//go:build integration` 隔离，而所有校验都不带 tag，
@@ -135,7 +135,7 @@ with_overlay() {
 # 后面「注入故障后变红」就毫无意义了（历史上 gofmt 门禁正是这个状态）。
 say "0. 正向对照：干净树上门禁必须全绿"
 assert_rc pass "干净树 · 新门禁 check-test-compile.sh" sh -c "$GATE"
-assert_rc pass "干净树 · gofmt 门禁（与 .cnb.yml 中逐字一致）" sh -c '
+assert_rc pass "干净树 · gofmt 门禁（与 CI 配置逐字一致）" sh -c '
     out=$(gofmt -l .)
     if [ -n "$out" ]; then echo "以下文件未格式化:"; echo "$out"; exit 1; fi'
 
@@ -256,7 +256,7 @@ say "3c. 静态链接门禁：判定不能取决于机器装了什么语言包"
 # 本地就是中文环境，正好当反向对照用。
 CGO_ENABLED=0 go build -o "$SCRATCH/staticprobe" ./cmd/stupidsamba
 
-assert_rc pass "静态链接门禁 · 加了 LC_ALL=C 之后判定正确（与 .cnb.yml 逐字一致）" sh -c "
+assert_rc pass "静态链接门禁 · 加了 LC_ALL=C 之后判定正确（与 CI 配置逐字一致）" sh -c "
     if LC_ALL=C ldd '$SCRATCH/staticprobe' 2>&1 | grep -qv 'not a dynamic executable'; then
         echo '错误: 产物不是静态链接'; exit 1
     fi"

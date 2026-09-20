@@ -305,7 +305,7 @@ Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要�
 | B-L4 | guest 策略（Win11 默认拒绝 guest） | `smbclient -N` 断言 `LOGON_FAILURE` | §B.3 **【实测】** |
 | B-L5 | 全部 5 个方言的协商 | `smbclient -m SMB2_02/SMB2_10/SMB3_00/SMB3_02/SMB3_11` | §B.3 **【实测】** |
 | B-L6 | NTLMv2 报文级正确性 | impacket（独立 Python 实现，第三家栈） | 现有 `scripts/acceptance.sh` |
-| B-L7 | Windows 版**编译期**正确性（含 `_test.go`） | `GOOS=windows go vet ./...` | §B.1 **【实测】**；**2026-08-25 起 CI 已做**（CNB 测试代码编译校验 stage + GA cross-vet job） |
+| B-L7 | Windows 版**编译期**正确性（含 `_test.go`） | `GOOS=windows go vet ./...` | §B.1 **【实测】**；**2026-08-25 起 CI 已做**（GA cross-vet job 的 `go vet` 连 `_test.go` 一起查；旧 CNB 门禁的对应 stage 已随 2026-09-20 迁移移除） |
 | B-L8 | 文件属性 / DOS attribute 往返 | smbtorture `smb2.getinfo` / `smb2.setinfo` | §B.2 |
 | B-L9 | Alternate Data Stream 语义 | smbtorture `smb2.streams` | §B.2 |
 
@@ -319,7 +319,7 @@ Windows 10 官方最低 2 GiB（实际体验需 4 GiB），Windows 11 硬性要�
 ### B.1 **仓库里已经有从未被执行过的 Windows 测试代码**
 
 > **2026-08-25 更新**：本节写作时的两条 CI 缺口此后都已闭合，原文保留作历史调研记录：
-> ① CNB 门禁已新增「测试代码编译校验（全部 build tag × 全部平台）」stage
+> ① 「测试代码编译校验（全部 build tag × 全部平台）」以 `test/ci/check-test-compile.sh` 形式存在（旧 CNB 门禁 stage 已随 2026-09-20 迁移移除）
 > （`test/ci/check-test-compile.sh`，含 windows/darwin/freebsd 的 `_test.go`）；
 > ② main 上已有 GitHub Actions 工作流 `.github/workflows/ci.yml`——多 OS 单测
 > （ubuntu/macos/windows 真实执行 `go test ./...`）+ 跨平台 `go vet`（含 `_test.go`，
@@ -352,7 +352,7 @@ $ grep -c '^func Test' internal/vfs/metadata_windows_test.go
 
 **它们从来没有运行过，一次都没有。** 原因：
 
-1. CI 的交叉编译门禁跑的是 `GOOS=windows ... go build ./...`（`.cnb.yml:63`）。
+1. CI 的交叉编译门禁跑的是 `GOOS=windows ... go build ./...`（旧 CNB 门禁，已移除）。
    **`go build` 根本不编译 `_test.go` 文件**，所以它连"能不能编过"都没检查。
 2. CI 的 `go test ./...` 只在 Linux 上跑，`//go:build windows` 的文件被直接跳过。
 
@@ -367,7 +367,7 @@ vet_rc=0
 
 `go vet` 会连 `_test.go` 一起做类型检查，所以这一跑至少证明了"Windows 测试代码目前能编译"。
 
-> **给 `qa` 的具体建议（我不改 `.cnb.yml`，请 team-lead 转达）**：
+> **给 `qa` 的具体建议（历史记录：当时的建议对象是旧 CNB 门禁）**：
 > 在交叉编译门禁里，把每个目标的 `go build ./...` **改成或补上** `go vet ./...`。
 > 成本几乎为零（本机实测两条命令都是秒级），收益是把 Windows/darwin 的
 > 测试代码纳入编译期校验。这不能替代真机运行，但能挡住"win-meta 改了接口、

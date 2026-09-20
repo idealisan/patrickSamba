@@ -182,7 +182,7 @@ D-Bus 或 socket 接口，不是禁组播）。别把这两件事搞混了去「
 | `filesystem_mode` 配置 | `internal/config`、`configs/example.yaml` | 已在 main（PR #126，`212d6f9`），取值判定委托 `oscap.ParseMode` 保持单一真源。落地时是三态，**`native` 档已于 v0.5 开发版移除**，现为 `auto` / `portable` 两态 |
 | native 适配器 | `internal/oscap/native/` | **已在 main**（PR #138，`d351683`），六项齐全，37 PASS / **0 SKIP** / 0 FAIL |
 | builtin 适配器 | `internal/oscap/builtin/` | **已在 main**（PR #129，`e4f0f80`），六项齐全，bbolt 旁路存储，49 PASS / 0 SKIP / 0 FAIL |
-| portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（`.cnb.yml` 的 `&gate_portable`），4 个变异体反向对照 4/4 变红 |
+| portable 模式 CI 门禁 | `test/ci/portable-mode.sh` | **已在 main**（PR #135，`ff77acb`），挂 push + pull_request 两条路径（原 CNB 流水线的 `&gate_portable`；该流水线已随 2026-09-20 迁移移除，GitHub Actions 侧的对应挂接待补），4 个变异体反向对照 4/4 变红 |
 | **运行期消费方** | `internal/vfs`、`internal/server`、`cmd/` | ⚠️ **全部已接进数据路径（v0.3.0）**。PR #159 把 `CapXattr`/`CapNamedStream` 接进 `internal/vfs` 真实路径；v0.3.0 的 `CapSparse`/`CapStableFileID`/`CapCreationTime`/`CapDOSAttributes` 由 `vfs-sparse`/`vfs-attr` 经 `caps.*()` 接进同一路径，`cmd/stupidsamba` 装配层逐共享下传 `filesystem_mode`；判据 `go list -deps ./cmd/stupidsamba \| grep -c oscap` = **3**。见下方「OSCAP 接线状态」 |
 
 上面那张能力表因此已经是**对现有代码的描述**，不再是「将要建成的东西」。
@@ -499,7 +499,7 @@ YAML，尽量简单，能跑起来只需几行。示例见 `configs/example.yaml
 - 公共文件（如 `internal/smb/wire/const.go`）规定为**只追加、加完立刻单独提交**。
   **两个全队都会碰的 CI 文件同样适用，且要求更严**：
   - `test/ci/check-test-compile.sh` 的 `TAGS=` 行（逗号列表）
-  - `.cnb.yml` 的 `&gate_*` 锚点及其在各 stage 列表里的引用
+  - 旧 CNB 流水线的 `&gate_*` 锚点（该文件已随 2026-09-20 迁移移除；现行 CI 配置在 `.github/workflows/`）
 
   这两处**只允许在列表末尾追加一项**，**不要顺手重排既有条目、也不要重写周围的注释**。
   理由：追加造成的冲突是**单行、语义无歧义**的，谁都能在一分钟内解掉；
@@ -1052,11 +1052,13 @@ agent 记忆的**权威副本是仓库里的 `memory/`**，`~/.codebuddy/.../mem
    false，冲突检测形同虚设。
    **一律用 `git rev-parse --git-common-dir`（跨 worktree 共享的真 .git）与
    `git rev-parse --git-path <名字>`（当前 worktree 的私有路径），不要自己拼 `.git/`。**
-10. **CI 的红绿要看事件类型**：`push` 事件与 `pull_request` 事件跑的是不同版本的 `.cnb.yml`，
-    同一个 commit 可以 push 红、PR 绿。已实测：`tm-handle/durable` 与 `r-infra/test-infra`
-    开 PR 前只有 push 记录且全红，开 PR 后 PR 事件立刻 success。
+10. **CI 的红绿要看事件类型**（旧 CNB 流水线的教训，GitHub Actions 同理）：
+    `push` 与 `pull_request` 触发的 job 集合不同，同一个 commit 可以 push 红、PR 绿。
+    已实测：`tm-handle/durable` 与 `r-infra/test-infra` 开 PR 前只有 push 记录且全红，
+    开 PR 后 PR 事件立刻 success。
     **合并前要看的是 PR 事件的构建**，不要被 push 的「假红」吓住。
-    查询用 `scripts/ci-status.sh <分支名>`（退出码 0=绿 1=红 2=跑着 3=无记录 4=调用失败）。
+    查询用 `gh run list --branch <分支名>`（旧流水线的 `scripts/ci-status.sh`
+    已随 2026-09-20 迁移移除）。
 11. **自动后台化会让你误以为别人在动你的树。**
 
     **长命令超时后不会被杀，而是转入后台继续跑**（工具会回一句

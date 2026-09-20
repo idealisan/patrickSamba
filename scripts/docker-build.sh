@@ -63,18 +63,14 @@ done
 
 # ------------------------------------------------------------------ 镜像名
 #
-# CNB 流水线里这两个变量是内置的，不用配任何凭据就能推：
-#   CNB_DOCKER_REGISTRY=docker.cnb.cool
-#   CNB_REPO_SLUG_LOWERCASE=finalappstore/stupidsamba
-# 注意必须用 **LOWERCASE** 那个：仓库名本身是 stupidSamba（带大写 S），
-# 而镜像名不允许大写字母，用 $CNB_REPO_SLUG 会拼出非法镜像名并在 push 时才报错。
+# 发布渠道：ghcr.io/idealisan/patricksamba，由 GitHub Actions 的 docker.yml 推送：
+#   ghcr.io/idealisan/patricksamba
+
+# 注意必须用 **LOWERCASE** 那个：仓库名本身是 patrickSamba（带大写 S），
+# 而镜像名不允许大写字母，用大写会拼出非法镜像名并在 push 时才报错。
 
 if [ -z "$IMAGE" ]; then
-    if [ -n "${CNB_DOCKER_REGISTRY:-}" ] && [ -n "${CNB_REPO_SLUG_LOWERCASE:-}" ]; then
-        IMAGE="$CNB_DOCKER_REGISTRY/$CNB_REPO_SLUG_LOWERCASE"
-    else
-        IMAGE=stupidsamba
-    fi
+    IMAGE=stupidsamba
 fi
 
 case "$IMAGE" in

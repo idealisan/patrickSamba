@@ -1,0 +1,52 @@
+# Docker —— 打 v* tag 时构建多架构镜像并发布到 ghcr.io，
+# 同时把发布裸包（.tar.gz / SHA256SUMS）挂到对应的 GitHub Release。
+#
+# 为什么镜像里的二进制不在 CI 里重编：见 Dockerfile 文件头 ——
+# 二进制来自 scripts/build-release.sh 的发布包（带五项自检），Dockerfile 是
+# COPY-only（零 RUN），buildx 出双架构 manifest list 是纯文件搬运，不需要 QEMU。
+#
+# 镜像名必须全小写：仓库是 patrickSamba（大写 S），ghcr 要求小写 →
+# ghcr.io/idealisan/patricksamba
+#
+# （2026-09-20 起镜像发布渠道从 CNB 制品库迁到这里。）
+
+name: Docker (ghcr.io)
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/idealisan/patricksamba
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: 登录 ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # docker-build.sh 会：跑 build-release.sh 出四平台裸包（含五项自检）→
+      # 从 tar.gz 摆放构建上下文 → buildx 双架构构建 → 推送 →
+      # manifest 架构齐全性 + host 架构可执行 + 版本号 三重自检。
+      - name: 构建并推送多架构镜像
+        run: sh scripts/docker-build.sh --tag "${GITHUB_REF_NAME}" --image "${IMAGE}" --push --latest
+
+      - name: 把发布裸包挂到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --generate-notes --title "${GITHUB_REF_NAME}"
+          gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS --clobber
