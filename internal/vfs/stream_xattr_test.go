@@ -11,11 +11,20 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/finalappstore/stupidsamba/internal/oscap"
 )
+
+// streamsCaseInsensitive 报告本平台上**流名**的内核匹配是否大小写不敏感。
+//
+// 注意这与「路径折不折叠大小写」（hostFoldsCase）**不是一回事**，别用后者当
+// 代理：Windows 的通用流落在 NTFS **备用数据流**上，ADS 名由内核做大小写不敏感
+// 匹配；POSIX 落在 xattr 上，xattr 名在内核里就是字节串 —— 同一条流名的两种
+// 大小写是两条**不同**的属性。所以这条判据按流后端分平台，而不是按路径折叠。
+const streamsCaseInsensitive = runtime.GOOS == "windows"
 
 // openGeneric 打开一个通用流。
 func openGeneric(t *testing.T, fs *LocalFS, path, stream string, d Disposition) Handle {
@@ -270,13 +279,11 @@ func TestGenericStreamNameCaseSensitiveShare(t *testing.T) {
 		Path: "f", Stream: "meta",
 		Flags: OpenRead, Disposition: OpenExisting,
 	})
-	if hostFoldsCase(t) {
-		// 折叠宿主（NTFS/APFS）：内核连 ADS / 流名也折叠，
-		// CaseInsensitive=false 拦不住它 —— 与路径查找那批用例同一类平台事实
-		// （见 casehost_test.go）。此时只要求「回访到的是同一条流」，而不是
-		// 「必须落空」。
+	if streamsCaseInsensitive {
+		// 流后端把名字交给内核做大小写不敏感匹配（Windows 的 ADS）：
+		// CaseInsensitive=false 拦不住它，此时只要求「回访到的是同一条流」。
 		if err != nil {
-			t.Errorf("宿主折叠名字，回访 :meta 应命中同一条流，得到 %v", err)
+			t.Errorf("本平台流名匹配大小写不敏感，回访 :meta 应命中同一条流，得到 %v", err)
 		}
 		return
 	}
