@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -45,11 +46,76 @@ const openFlockTimeout = 5 * time.Second
 
 // boltMetadataStore 是 MetadataStore 的 bbolt 实现。
 //
-// bbolt 自身的 API 就是并发安全的（单写多读 + 内部锁），
-// 这里不需要再加一层 mutex。
+// 它不直接持有 *bolt.DB，而是持有一个**进程内共享**的 storeRef：
+// 一个共享根被导出多次（例如同一目录一个可写共享、一个只读共享）时，
+// 两个 LocalFS 会算出同一个库路径，而 bbolt 按 path 拿 flock —— 不共享句柄
+// 的话第二个会卡满 flock 超时再报「是否已被另一个实例占用」，而占用者
+// 就是自己，把人引向完全错误的方向（oscap builtin 侧 builtin/store.go 的
+// openDBs 早已如此，这里与之对齐）。
+//
+// **共享的是句柄，不是视图**：每个 boltMetadataStore 各自持一份引用，
+// 关闭时按引用计数归还，最后一个归还者才真正 Close。
 type boltMetadataStore struct {
-	db   *bolt.DB
+	ref  *storeRef
 	path string
+}
+
+// storeRef 是一个被进程内共享的 bbolt 句柄及其引用计数。
+type storeRef struct {
+	db   *bolt.DB
+	refs int
+}
+
+var (
+	openStoresMu sync.Mutex
+	openStores   = map[string]*storeRef{}
+)
+
+// acquireMetadataStore 取得库文件 p 的句柄，已打开过就复用并把引用计数加一。
+// 第二个返回值为 true 表示本次是**新建**（调用方据此决定要不要初始化 bucket）。
+func acquireMetadataStore(p string) (*storeRef, bool, error) {
+	key, err := filepath.Abs(p)
+	if err != nil {
+		// 拿不到绝对路径就退回原样：宁可退化成「不复用」（老行为，顶多撞锁
+		// 报错），也不能用一个可能与别人不一致的 key 去共用句柄。
+		key = p
+	}
+
+	openStoresMu.Lock()
+	defer openStoresMu.Unlock()
+
+	if r, ok := openStores[key]; ok {
+		r.refs++
+		return r, false, nil
+	}
+	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout})
+	if err != nil {
+		return nil, false, err
+	}
+	r := &storeRef{db: db, refs: 1}
+	openStores[key] = r
+	return r, true, nil
+}
+
+// releaseMetadataStore 归还句柄，最后一个使用者负责真正关闭。
+func releaseMetadataStore(p string, ref *storeRef) error {
+	key, err := filepath.Abs(p)
+	if err != nil {
+		key = p
+	}
+
+	openStoresMu.Lock()
+	defer openStoresMu.Unlock()
+
+	ref.refs--
+	if ref.refs > 0 {
+		return nil
+	}
+	// 只删自己那一条：同一个 key 有可能已经被后来者重新打开成另一个 storeRef。
+	if cur, ok := openStores[key]; ok && cur == ref {
+		delete(openStores, key)
+	}
+	return ref.db.Close()
 }
 
 // openMetadataStore 打开（必要时创建）旁路存储。
@@ -73,18 +139,20 @@ func openMetadataStore(root, metadataPath, instanceID string) (MetadataStore, er
 		return nil, mapError(err)
 	}
 
-	db, err := bolt.Open(p, 0o600, &bolt.Options{Timeout: openFlockTimeout})
+	ref, created, err := acquireMetadataStore(p)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: 打开元数据存储 %s 失败（是否已被另一个实例占用？）: %w", p, err)
 	}
-	if err := db.Update(func(tx *bolt.Tx) error {
-		_, e := tx.CreateBucketIfNotExists(metadataBucket)
-		return e
-	}); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("vfs: 初始化元数据存储 %s 失败: %w", p, err)
+	if created {
+		if err := ref.db.Update(func(tx *bolt.Tx) error {
+			_, e := tx.CreateBucketIfNotExists(metadataBucket)
+			return e
+		}); err != nil {
+			_ = releaseMetadataStore(p, ref)
+			return nil, fmt.Errorf("vfs: 初始化元数据存储 %s 失败: %w", p, err)
+		}
 	}
-	return &boltMetadataStore{db: db, path: p}, nil
+	return &boltMetadataStore{ref: ref, path: p}, nil
 }
 
 // defaultMetadataPath 给出未配置 metadata_path 时的默认落点。
@@ -126,7 +194,7 @@ func (s *boltMetadataStore) Get(key string) (Metadata, bool) {
 		md Metadata
 		ok bool
 	)
-	_ = s.db.View(func(tx *bolt.Tx) error {
+	_ = s.ref.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(metadataBucket)
 		if b == nil {
 			return nil
@@ -142,7 +210,7 @@ func (s *boltMetadataStore) Put(key string, md Metadata) error {
 	if key == "" {
 		return ErrInvalidArg
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.ref.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(metadataBucket)
 		if err != nil {
 			return err
@@ -159,7 +227,7 @@ func (s *boltMetadataStore) Delete(key string) error {
 	if key == "" {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.ref.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(metadataBucket)
 		if b == nil {
 			return nil
@@ -181,7 +249,7 @@ func (s *boltMetadataStore) Rename(oldKey, newKey string) error {
 	if oldKey == "" || newKey == "" || oldKey == newKey {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	return s.ref.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(metadataBucket)
 		if b == nil {
 			return nil
@@ -231,8 +299,10 @@ func (s *boltMetadataStore) Rename(oldKey, newKey string) error {
 }
 
 // Close 实现 MetadataStore。
+//
+// 按引用计数归还共享句柄：只有最后一个使用者才真的关库、还回 flock。
 func (s *boltMetadataStore) Close() error {
-	return s.db.Close()
+	return releaseMetadataStore(s.path, s.ref)
 }
 
 // subtreeKeys 返回 key 的所有后代键（不含 key 自身）的**副本**。

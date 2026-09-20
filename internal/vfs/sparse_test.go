@@ -369,6 +369,11 @@ func newSparseTestFS(t *testing.T) (fs *LocalFS, punch, alloc, setSpar *int64) {
 	if err != nil {
 		t.Fatalf("oscap.Open: %v", err)
 	}
+	// 注入的 Provider 归**调用方**所有（LocalFS.Close 只关自己造的那个），
+	// 所以这里必须自己收尾：漏关会让 builtin 的 bbolt 句柄一直占着库文件，
+	// Windows 上 t.TempDir 的清理会直接删不掉它（unlink 报「被另一个进程占用」）。
+	// 注册顺序保证它先于 TempDir 清理执行（cleanup 是 LIFO）。
+	t.Cleanup(func() { _ = real.Close() })
 	var cp, ca, cs int64
 	cc := countingCaps{
 		Provider: real,

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -483,7 +484,9 @@ func TestWarnings(t *testing.T) {
 	if !strings.Contains(ws, "明文口令") {
 		t.Errorf("明文口令应告警，实际:\n%s", ws)
 	}
-	if os.Geteuid() != 0 && !strings.Contains(ws, "cap_net_bind_service") {
+	// Windows 没有特权端口概念（配置层在 hostOS == "windows" 时不告警），
+	// 这条断言只对有特权端口语义的平台成立。
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 && !strings.Contains(ws, "cap_net_bind_service") {
 		t.Errorf("非 root 下特权端口应告警，实际:\n%s", ws)
 	}
 }
