@@ -7,9 +7,15 @@ package vfs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
+// mustResolver 造一个 Resolver，并返回**它实际使用的根**。
+//
+// 不能直接返回 t.TempDir() 的原值：NewResolver 会对 root 做 EvalSymlinks，
+// 而 macOS 上 /var 是指向 /private/var 的软链，两者字面不等 —— 拿原值比对
+// 会把「路径解析正确」误判成失败。
 func mustResolver(t *testing.T, caseInsensitive bool) (*Resolver, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -17,7 +23,7 @@ func mustResolver(t *testing.T, caseInsensitive bool) (*Resolver, string) {
 	if err != nil {
 		t.Fatalf("NewResolver: %v", err)
 	}
-	return r, root
+	return r, r.root
 }
 
 func touch(t *testing.T, path string) {
@@ -63,8 +69,15 @@ func TestResolveParentFoldsOnMiss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveParent: %v", err)
 	}
-	if name != "report.txt" {
-		t.Errorf("name = %q, want %q —— 大小写回退失效了", name, "report.txt")
+	// 两条分支都必须落在磁盘上那个对象上：
+	//   大小写敏感宿主 —— 精确 stat 落空，回退折叠，拿回磁盘写法 "report.txt"；
+	//   折叠宿主（APFS/NTFS）—— 精确 stat 直接命中，拿回客户端请求的写法。
+	// 后者是宿主特性不是缺陷，但仍要求它与磁盘上的名字是同一个（忽略大小写）。
+	if !strings.EqualFold(name, "report.txt") {
+		t.Fatalf("name = %q，与磁盘上的 %q 不是同一个名字", name, "report.txt")
+	}
+	if !hostFoldsCase(t) && name != "report.txt" {
+		t.Errorf("name = %q，want %q —— 大小写回退没折叠回磁盘写法", name, "report.txt")
 	}
 }
 

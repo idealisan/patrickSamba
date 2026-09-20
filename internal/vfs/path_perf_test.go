@@ -115,9 +115,10 @@ type scanCounts struct {
 // 断言它**确实报红**。理由见 memory/feedback_falsifiable_assertions.md：
 // 一个从来没红过的判据，和没有判据是一回事。
 //
-// 注意 missingScans **故意不判**：那条路径（末级名字不存在）目前仍是 O(n)，
-// 是 path.go 里记录在案的未修热点，不是本用例要守的命题。
-func scanViolations(n int, iters int, c scanCounts) []string {
+// 注意 missingScans 在**大小写敏感**宿主上**故意不判**：那条路径（末级名字
+// 不存在）目前仍是 O(n)，是 path.go 里记录在案的未修热点，不是本用例要守的
+// 命题。在折叠宿主上它是反向对照（见下），那时才参与判定。
+func scanViolations(n int, iters int, c scanCounts, caseSensitive bool) []string {
 	var out []string
 
 	// 「已存在且大小写一致」是绝对多数的调用形态（客户端用的是枚举里拿到的
@@ -136,14 +137,28 @@ func scanViolations(n int, iters int, c scanCounts) []string {
 				"却做了 %d 次全目录扫描（共 1 次调用），resolveComponents 的精确匹配失效了",
 			n, c.resolveExistingScans))
 	}
-	// 反向对照：这一条挂了说明计数器根本没接在全扫那条路上
-	// （或者大小写回退被砍了）—— 一个永远读到 0 的计数器
-	// 会让上面两条断言变成永远通过的摆设。
-	if c.variantScans <= 0 {
-		out = append(out, fmt.Sprintf(
-			"目录 %d 条目：查大小写变体的名字竟然一次全扫都没做，"+
-				"说明计数器没接在全扫路径上，上面两条零全扫断言不可信。"+
-				"（若已改用折叠索引替代全目录扫描，请把计数点挪到新实现里）", n))
+	// 反向对照：这一条挂了说明计数器根本没接在全扫那条路上 ——
+	// 一个永远读到 0 的计数器会让上面两条断言变成永远通过的摆设。
+	//
+	// 用哪条路径当对照，取决于宿主折不折叠大小写：
+	if caseSensitive {
+		// 大小写敏感宿主：「只有大小写不同」的名字精确 stat 必 miss，
+		// 一定走全扫（variantScans）。一次都不做 ⇒ 计数器没接上。
+		if c.variantScans <= 0 {
+			out = append(out, fmt.Sprintf(
+				"目录 %d 条目：查大小写变体的名字竟然一次全扫都没做，"+
+					"说明计数器没接在全扫路径上，上面两条零全扫断言不可信。"+
+					"（若已改用折叠索引替代全目录扫描，请把计数点挪到新实现里）", n))
+		}
+	} else {
+		// 折叠宿主（APFS/NTFS）：大小写变体会被内核精确命中，压根不走全扫，
+		// 不能当反向对照。改用「目录里完全不存在的名字」——它必然走全扫
+		// （missing 那条路径目前仍是 O(n)），同样能证明计数器接在全扫路径上。
+		if c.missingScans <= 0 {
+			out = append(out, fmt.Sprintf(
+				"目录 %d 条目：查不存在的名字竟然一次全扫都没做，"+
+					"说明计数器没接在全扫路径上，上面两条零全扫断言不可信", n))
+		}
 	}
 	return out
 }
@@ -160,6 +175,11 @@ func TestPathLookupScaling(t *testing.T) {
 	if testing.Short() {
 		t.Skip("要建 6.1 万个文件，-short 下跳过")
 	}
+
+	// 宿主折不折叠大小写，决定「只有大小写不同」的名字能不能当反向对照：
+	// 折叠宿主（APFS/NTFS）上它会精确命中、压根不走全扫。
+	// 两条分支的判据见 scanViolations。
+	caseSensitive := !hostFoldsCase(t)
 
 	// 四种调用形态，分别对应真实的 SMB 操作：
 	//   existing —— 末级名字**存在且大小写完全一致**：Remove / Rename / SetInfo
@@ -196,9 +216,13 @@ func TestPathLookupScaling(t *testing.T) {
 			t.Fatalf("规模 %d 的末尾名字 %q 不含字母，大小写反向对照会失效；"+
 				"请调整 pathScaleSizes 让 %%x 的结果带字母", n, last)
 		}
-		if _, err := os.Lstat(filepath.Join(dir, variant)); !os.IsNotExist(err) {
-			t.Fatalf("反向对照失效：%q 在磁盘上真实存在（err=%v），"+
-				"精确 Lstat 会直接命中，压根不会走全扫", variant, err)
+		// 反向对照的前提只在大小写敏感的宿主上成立：折叠宿主上这个变体会
+		// 被内核当成同一个名字精确命中，「落空 → 全扫」这条路走不到。
+		if caseSensitive {
+			if _, err := os.Lstat(filepath.Join(dir, variant)); !os.IsNotExist(err) {
+				t.Fatalf("反向对照失效：%q 在磁盘上真实存在（err=%v），"+
+					"精确 Lstat 会直接命中，压根不会走全扫", variant, err)
+			}
 		}
 
 		var g row
@@ -237,16 +261,22 @@ func TestPathLookupScaling(t *testing.T) {
 		})
 		// 反向对照：只有大小写不同 ⇒ 精确 Lstat 必 miss ⇒ 必须回退到全扫，
 		// 且必须真的把名字折叠回磁盘上的那一个。
-		g.variantScans = fullScansDuring(func() {
-			_, name, err := r.ResolveParent(variant)
-			if err != nil {
-				t.Fatalf("ResolveParent(%q): %v", variant, err)
-			}
-			if name != last {
-				t.Errorf("ResolveParent(%q) = %q，期望折叠回 %q —— 大小写回退没生效",
-					variant, name, last)
-			}
-		})
+		//
+		// 折叠宿主上这条对照不成立（变体会被精确命中），照原样跑会得到
+		// 「0 次全扫」并把判据判红。此时反向对照改由 missingScans 承担，
+		// 所以这里整块跳过、variantScans 保持 0，由 scanViolations 走另一条分支。
+		if caseSensitive {
+			g.variantScans = fullScansDuring(func() {
+				_, name, err := r.ResolveParent(variant)
+				if err != nil {
+					t.Fatalf("ResolveParent(%q): %v", variant, err)
+				}
+				if name != last {
+					t.Errorf("ResolveParent(%q) = %q，期望折叠回 %q —— 大小写回退没生效",
+						variant, name, last)
+				}
+			})
+		}
 
 		got[n] = g
 	}
@@ -269,7 +299,7 @@ func TestPathLookupScaling(t *testing.T) {
 	//
 	// 判定逻辑在 scanViolations 里（纯函数，便于反向对照）。
 	for _, n := range pathScaleSizes {
-		for _, msg := range scanViolations(n, pathScaleIters, got[n].scanCounts) {
+		for _, msg := range scanViolations(n, pathScaleIters, got[n].scanCounts, caseSensitive) {
 			t.Error(msg)
 		}
 	}
@@ -290,51 +320,71 @@ func TestScanViolationsCatchesRegression(t *testing.T) {
 	// 实现也能让下面所有用例通过 —— 那同样是个假判据。
 	if v := scanViolations(n, iters, scanCounts{
 		existingScans: 0, resolveExistingScans: 0, variantScans: 1,
-	}); len(v) != 0 {
+	}, true); len(v) != 0 {
 		t.Errorf("合规输入不该报错，却报了 %d 条：%v", len(v), v)
 	}
+	// 折叠宿主那一侧的合规输入同理：反向对照由 missingScans 承担，
+	// 此时 variantScans 恒为 0 不该被当成违规。
+	if v := scanViolations(n, iters, scanCounts{
+		existingScans: 0, resolveExistingScans: 0, missingScans: 1,
+	}, false); len(v) != 0 {
+		t.Errorf("折叠宿主的合规输入不该报错，却报了 %d 条：%v", len(v), v)
+	}
 
-	// missingScans 是纯诊断字段，无论多大都不该影响红绿。
+	// missingScans 在**大小写敏感**宿主上是纯诊断字段：无论多大都不该影响红绿。
 	// 单独钉一条，防止将来有人顺手把那条未修的 O(n) 热点也加进判据 ——
 	// 那会让用例在一个已知且**故意**未修的问题上长期红着，最后被整体禁用。
+	// （折叠宿主上它是反向对照，为 0 反而要报红，见下面表格最后一条。）
 	if v := scanViolations(n, iters, scanCounts{
 		missingScans: 12345, variantScans: 1,
-	}); len(v) != 0 {
+	}, true); len(v) != 0 {
 		t.Errorf("missingScans 只做诊断，不该参与判定，却报了：%v", v)
 	}
 
 	for _, tc := range []struct {
-		name string
-		in   scanCounts
-		want string // 期望出现在报错文本里的关键词
+		name          string
+		in            scanCounts
+		caseSensitive bool
+		want          string // 期望出现在报错文本里的关键词
 	}{
 		{
 			// 这就是要防的那个真回归：20 次调用全部走了全扫，
 			// 也就是「精确匹配优先」被改没了，退回 O(目录条目数)。
-			name: "ResolveParent 每次调用都全扫（精确匹配优先失效）",
-			in:   scanCounts{existingScans: iters, variantScans: 1},
-			want: "精确匹配优先",
+			name:          "ResolveParent 每次调用都全扫（精确匹配优先失效）",
+			in:            scanCounts{existingScans: iters, variantScans: 1},
+			caseSensitive: true,
+			want:          "精确匹配优先",
 		},
 		{
-			name: "只泄漏一次也要抓到（不是「大部分没全扫就算过」）",
-			in:   scanCounts{existingScans: 1, variantScans: 1},
-			want: "精确匹配优先",
+			name:          "只泄漏一次也要抓到（不是「大部分没全扫就算过」）",
+			in:            scanCounts{existingScans: 1, variantScans: 1},
+			caseSensitive: true,
+			want:          "精确匹配优先",
 		},
 		{
-			name: "Resolve 的 resolveComponents 分支退回全扫",
-			in:   scanCounts{resolveExistingScans: 1, variantScans: 1},
-			want: "resolveComponents",
+			name:          "Resolve 的 resolveComponents 分支退回全扫",
+			in:            scanCounts{resolveExistingScans: 1, variantScans: 1},
+			caseSensitive: true,
+			want:          "resolveComponents",
 		},
 		{
 			// 计数器没接线 / 大小写回退被砍：此时上面两条零全扫断言
 			// 会因为恒读到 0 而永远通过，必须由这一条兜住。
-			name: "计数器没接在全扫路径上（variantScans 恒为 0）",
-			in:   scanCounts{variantScans: 0},
-			want: "计数器没接在全扫路径上",
+			name:          "计数器没接在全扫路径上（variantScans 恒为 0）",
+			in:            scanCounts{variantScans: 0},
+			caseSensitive: true,
+			want:          "计数器没接在全扫路径上",
+		},
+		{
+			// 折叠宿主那一侧的反向对照：缺了它，折叠分支的门禁就是空判据。
+			name:          "折叠宿主：计数器没接在全扫路径上（missingScans 恒为 0）",
+			in:            scanCounts{missingScans: 0},
+			caseSensitive: false,
+			want:          "计数器没接在全扫路径上",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := scanViolations(n, iters, tc.in)
+			v := scanViolations(n, iters, tc.in, tc.caseSensitive)
 			if len(v) == 0 {
 				t.Fatalf("判据漏报：输入 %+v 明显违规，scanViolations 却返回空。"+
 					"说明判定逻辑已失效，TestPathLookupScaling 的全绿不可信", tc.in)

@@ -443,14 +443,21 @@ func TestCaseInsensitiveLookup(t *testing.T) {
 		}
 	}
 
-	// 关掉大小写不敏感之后只能精确匹配
+	// 关掉大小写不敏感之后只能精确匹配 —— 但这条只在**宿主也大小写敏感**时
+	// 成立：折叠宿主（APFS/NTFS）上内核自己就把 "report.txt" 认成 "Report.TXT"，
+	// 本层的 CaseInsensitive=false 拦不住它。按宿主能力走两条分支。
 	strict, err := NewLocalFS(LocalConfig{Root: fs.Root(), CaseInsensitive: false})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer strict.Close()
-	if _, err := strict.Stat("report.txt"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("大小写敏感模式下 %q 应当找不到，得到 %v", "report.txt", err)
+	_, statErr := strict.Stat("report.txt")
+	if hostFoldsCase(t) {
+		if statErr != nil {
+			t.Errorf("宿主折叠大小写，严格模式也应命中同一个对象，得到 %v", statErr)
+		}
+	} else if !errors.Is(statErr, ErrNotFound) {
+		t.Errorf("大小写敏感模式下 %q 应当找不到，得到 %v", "report.txt", statErr)
 	}
 }
 

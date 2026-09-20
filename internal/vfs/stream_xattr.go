@@ -88,11 +88,15 @@ const (
 	// dosStreamSuffix 是拼进 xattr 名的流类型后缀，见文件头。
 	dosStreamSuffix = ":" + streamTypeData
 
-	// maxXattrNameLen 是 Linux 对**完整** xattr 名（含命名空间前缀）的
-	// 长度上限（XATTR_NAME_MAX，<linux/limits.h>）。macOS 的上限是 127，
-	// 但取严的那个不会错 —— 宁可拒绝一个 macOS 上本可接受的超长流名，
-	// 也不要在 Linux 上写出两个被内核截断成同名的不同流。
-	maxXattrNameLen = 255
+	// maxXattrNameLen 是**宿主内核**对完整 xattr 名（含命名空间前缀）的
+	// 长度上限，按平台取严：darwin 127 / 其余 255（见 xattrlimit_*.go）。
+	//
+	// 为什么不一律用 Linux 的 255：这个预算是拿来**事先回答客户端**
+	// 「这个名字能不能用」的。取宽会让 macOS 上「预算内」的流名到真正落盘
+	// 时被内核拒（ENAMETOOLONG）—— 预算与内核真实能力对不上，等于假承诺。
+	// 代价是同一个长流名在 macOS 与 Linux 上的可用范围不同；那是平台事实，
+	// 由预算如实反映比由我们这边假装它不存在好。
+	maxXattrNameLen = platformXattrNameMax
 
 	// xattrUserNamespace 是 Linux 上非特权进程唯一可写的命名空间前缀。
 	// 这里只用来算长度预算，实际拼接由 encodeName 负责（且它是 unix 专有的，
@@ -108,15 +112,15 @@ const (
 	maxDosStreamSize = 64 * 1024
 )
 
-// maxDosStreamNameLen 是通用流名的最大字节数（算出来是 234）。
+// maxDosStreamNameLen 是通用流名的最大字节数，随平台上限变化
+// （linux 234 / darwin 106）。
 //
 // 完整 xattr 名是 "user." + "DosStream." + <流名> + ":$DATA"，
 // 必须整体不超过 maxXattrNameLen。
 //
-// **总是按最长的平台前缀（Linux 的 "user."）算预算**，即使在
-// macOS/Windows 上前缀更短或不存在。理由：同一份数据可能在平台之间
-// 迁移，如果各平台的上限不同，一个在 macOS 上写得进去的流名到 Linux
-// 上就会突然写不进去 —— 那种「换个机器就坏」的行为极难排查。
+// 前缀一律按最长的 "user." 计（即使某些平台并不加这个前缀）：
+// 各平台用同一个算式，少一个「前缀长度不同、差几个字节」的隐藏变量；
+// 代价是 darwin 上比内核真上限再保守几个字节，安全侧。
 //
 // **绝不能静默截断**：截断会让两个不同的长流名映射到同一个 xattr，
 // 后写的那个会把先写的悄悄覆盖掉。超长一律 ErrInvalidPath。

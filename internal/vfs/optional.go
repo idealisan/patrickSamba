@@ -398,7 +398,11 @@ func (h *localHandle) AllocatedRanges(off, length int64) ([]Range, error) {
 	if off >= end {
 		return nil, nil
 	}
-	rs, err := h.fs.caps.Sparse().AllocatedRanges(oscap.Ref{Path: h.host, Handle: f}, off, end)
+	// 第 3 参是**长度**（oscap.SparseFile 契约：返回 [off, off+length) 内的区间），
+	// 不是绝对结束位置。传 end 会让实现再算一次 off+length，把窗口多算一个 off：
+	// Linux 上多出来的那段通常落在洞里、侥幸不显形，而 builtin（macOS 走的那条）
+	// 会直接把超出窗口的区间报给客户端。
+	rs, err := h.fs.caps.Sparse().AllocatedRanges(oscap.Ref{Path: h.host, Handle: f}, off, end-off)
 	if err != nil {
 		return nil, mapOscapError(err)
 	}

@@ -374,6 +374,24 @@ func TestQAResolveParentCaseCollisionRoundTrip(t *testing.T) {
 	writeFile(t, fs, "A.TXT", "UPPER")
 	root := fs.Root()
 
+	// 折叠宿主（APFS/NTFS）：两个名字指的是同一个对象，第二次写把第一次的内容
+	// 覆盖掉（O_TRUNC），根本造不出「仅大小写不同的两个文件」。此时本用例原本
+	// 要验的「指名哪个就打到哪个」无从成立 —— 没有「另一个」可打。
+	// 改为按宿主能力核实折叠语义：两个名字共享一个对象，Remove 其一即删掉它。
+	if hostFoldsCase(t) {
+		got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+		if err != nil || string(got) != "UPPER" {
+			t.Fatalf("折叠宿主上两次写应落在同一对象、后者胜出：a.txt = (%q, %v)", got, err)
+		}
+		if err := fs.Remove("A.TXT"); err != nil {
+			t.Fatalf("Remove(A.TXT): %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+			t.Errorf("折叠宿主上 A.TXT 与 a.txt 是同一对象，Remove 后不该还在（err=%v）", err)
+		}
+		return
+	}
+
 	// Remove 指名 "A.TXT"：小写的那个必须还在。
 	if err := fs.Remove("A.TXT"); err != nil {
 		t.Fatalf("Remove(A.TXT): %v", err)

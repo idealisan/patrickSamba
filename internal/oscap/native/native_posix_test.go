@@ -65,6 +65,14 @@ func mkFile(t *testing.T, root, name string, size int) string {
 
 // --- 扩展属性 ---------------------------------------------------------------
 
+// roundTripAttr 是本用例使用的扩展属性名。
+//
+// 刻意用普通名字而不是 com.apple.FinderInfo：后者是 macOS 的**系统属性**，
+// 内核对它的值有硬约束（FinderInfo 必须 32 字节），而本用例只做几个短值的
+// 往返，在 macOS 上会被内核直接拒掉（result too large）。
+// SMB 侧真实的 FinderInfo 也是 32 字节，不是这里的短值 —— 那是另一码事。
+const roundTripAttr = "oscap.roundtrip"
+
 // TestXattrRoundTrip 钉住 Xattr 的写入-读回往返，以及 ports.go 里那几条
 // 容易被实现方忽略的边角契约。
 func TestXattrRoundTrip(t *testing.T) {
@@ -74,7 +82,7 @@ func TestXattrRoundTrip(t *testing.T) {
 	}
 	ref := oscap.Ref{Path: mkFile(t, root, "x.bin", 16)}
 
-	err := set.Xattr.SetXattr(ref, "com.apple.FinderInfo", []byte("finder"))
+	err := set.Xattr.SetXattr(ref, roundTripAttr, []byte("finder"))
 	if !hostSupports(t, oscap.CapXattr, root) {
 		// 反向断言：做不到就必须如实说，不能静默成功。
 		if !errors.Is(err, oscap.ErrNotSupported) {
@@ -86,7 +94,7 @@ func TestXattrRoundTrip(t *testing.T) {
 		t.Fatalf("SetXattr: %v", err)
 	}
 
-	got, err := set.Xattr.GetXattr(ref, "com.apple.FinderInfo")
+	got, err := set.Xattr.GetXattr(ref, roundTripAttr)
 	if err != nil {
 		t.Fatalf("GetXattr: %v", err)
 	}
@@ -95,10 +103,10 @@ func TestXattrRoundTrip(t *testing.T) {
 	}
 
 	// 覆盖写：不是追加，也不该报 ErrExist。
-	if err := set.Xattr.SetXattr(ref, "com.apple.FinderInfo", []byte("v2")); err != nil {
+	if err := set.Xattr.SetXattr(ref, roundTripAttr, []byte("v2")); err != nil {
 		t.Fatalf("覆盖 SetXattr: %v", err)
 	}
-	if got, _ := set.Xattr.GetXattr(ref, "com.apple.FinderInfo"); string(got) != "v2" {
+	if got, _ := set.Xattr.GetXattr(ref, roundTripAttr); string(got) != "v2" {
 		t.Fatalf("覆盖后读回 %q，期望 %q", got, "v2")
 	}
 
@@ -119,17 +127,17 @@ func TestXattrRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListXattr: %v", err)
 	}
-	if !contains(names, "com.apple.FinderInfo") || !contains(names, "empty") {
+	if !contains(names, roundTripAttr) || !contains(names, "empty") {
 		t.Fatalf("ListXattr = %v，两个已写入的名字都该在里面", names)
 	}
 
-	if err := set.Xattr.RemoveXattr(ref, "com.apple.FinderInfo"); err != nil {
+	if err := set.Xattr.RemoveXattr(ref, roundTripAttr); err != nil {
 		t.Fatalf("RemoveXattr: %v", err)
 	}
-	if _, err := set.Xattr.GetXattr(ref, "com.apple.FinderInfo"); !errors.Is(err, oscap.ErrNotFound) {
+	if _, err := set.Xattr.GetXattr(ref, roundTripAttr); !errors.Is(err, oscap.ErrNotFound) {
 		t.Fatalf("删除后 GetXattr 应当返回 ErrNotFound，实际 %v", err)
 	}
-	if err := set.Xattr.RemoveXattr(ref, "com.apple.FinderInfo"); !errors.Is(err, oscap.ErrNotFound) {
+	if err := set.Xattr.RemoveXattr(ref, roundTripAttr); !errors.Is(err, oscap.ErrNotFound) {
 		t.Fatalf("重复删除应当返回 ErrNotFound，实际 %v", err)
 	}
 }

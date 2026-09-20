@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,7 +69,18 @@ func TestReadDirExactNameMissFallsBackToScan(t *testing.T) {
 
 	h, _ := dirHandle(t, fs, "bands")
 	got := readDirOnce(t, h, "bandfile", false)
-	if len(got) != 1 || got[0].Name != "BandFile" {
+	if len(got) != 1 {
+		t.Fatalf("大小写不敏感查询得到 %v，期望恰好一条", names(got))
+	}
+	gotName := got[0].Name
+	nameOK := gotName == "BandFile"
+	if hostFoldsCase(t) {
+		// 折叠宿主（APFS/NTFS）：精确 stat 直接命中，返回的是客户端请求的
+		// 写法 —— 要拿回磁盘写法就得再做一次 readdir，而那正是这条快速路径
+		// 要避免的开销。此时只要求「是同一个名字」（忽略大小写）。
+		nameOK = strings.EqualFold(gotName, "BandFile")
+	}
+	if !nameOK {
 		t.Fatalf("大小写不敏感查询得到 %v，期望 [BandFile]", names(got))
 	}
 
@@ -108,6 +120,16 @@ func TestReadDirExactNameSameAsWildcardScan(t *testing.T) {
 		t.Fatal("基准扫描不应列出 ._plain")
 	}
 
+	foldsCase := hostFoldsCase(t)
+	// 折叠宿主上，精确查一个大小写变体会被内核直接命中，返回的是**请求的写法**
+	// （要磁盘写法就得回退全扫，快速路径刻意不做）。比较名字时按宿主能力放宽。
+	nameMatches := func(got, want string) bool {
+		if foldsCase {
+			return strings.EqualFold(got, want)
+		}
+		return got == want
+	}
+
 	for _, name := range []string{
 		".", "..", "plain", "UPPER", "名字", "with space", "sub",
 		"._plain", "nosuch", "PLAIN", "upper",
@@ -125,7 +147,7 @@ func TestReadDirExactNameSameAsWildcardScan(t *testing.T) {
 		switch {
 		case wantN == "" && len(got) != 0:
 			t.Errorf("精确查 %q 得到 %v，期望空", name, names(got))
-		case wantN != "" && (len(got) != 1 || got[0].Name != wantN):
+		case wantN != "" && (len(got) != 1 || !nameMatches(got[0].Name, wantN)):
 			t.Errorf("精确查 %q 得到 %v，期望 [%s]", name, names(got), wantN)
 		}
 	}
