@@ -272,17 +272,53 @@ func TestQASnapshotFiltersUnrepresentableNames(t *testing.T) {
 // 整段删掉，改动前全包测试全绿。这正是 AGENTS.md 说的「写好没接线」的
 // 变种——写好了、接上了，但没人证明接上了，下一个人顺手删掉不会有人知道。
 //
-// 触发条件必须是「Lstat(dst) 成功且 dst 就是 src 自己」。ext4 上唯一能造出
-// 这个局面的是**同目录硬链接**（大小写折叠那条要 NTFS/APFS，本容器造不出，
-// 见 rename_alias_test.go 文件头的诚实说明）。
+// 触发条件必须是「Lstat(dst) 成功且 dst 就是 src 自己」。**两条分支**：
 //
-// 断言的是 local.go:598 明文写下的取舍：同目录互为硬链接的两个名字，
-// rename 退化为 no-op，两个名字都还在、内容都还在。变异体下则会先
-// os.Remove(dst) 再 rename —— 名字 b 的目录项被删掉过，行为可区分。
+//   - 大小写敏感的宿主（ext4 等）：唯一能造出这个局面的是**同目录硬链接**，
+//     断言 local.go 明文写下的取舍 —— 互为硬链接的两个名字 rename 退化为
+//     no-op，两个名字与内容都还在；
+//   - 折叠名字的宿主（NTFS/APFS）：硬链接那条**区分不出变异体**（宿主自己的
+//     rename 就没有 POSIX 的 no-op 语义，两种实现的终态相同），改用「宿主
+//     折叠名字、但配置关掉 CaseInsensitive」这个**真正会丢数据**的场景：
+//     判据失效时会先 os.Remove(dst) —— 而 dst 就是 src 自己 —— 源文件当场
+//     被删掉。
+//
+// 变异体下则先 os.Remove(dst) 再 rename，目录项被删过，行为可区分。
 func TestQARenameSameDirEntryIsWiredIn(t *testing.T) {
 	fs := newTestFS(t, false)
 	writeFile(t, fs, "a.txt", "DATA")
 	root := fs.Root()
+
+	if hostFoldsCase(t) {
+		// 折叠宿主（NTFS/APFS）上，同目录硬链接**验不出**接线：宿主自己的
+		// rename 就不把「同 inode 硬链接」当 POSIX 那种 no-op，于是
+		// 「跳过删除」与「先删后改名」的**终态完全相同**，变异体照样绿。
+		//
+		// 改用这条用例真正要防的那个数据丢失场景：宿主折叠名字，但配置把
+		// CaseInsensitive 关掉了 —— 于是 Rename 里那段「按配置折叠」的
+		// sameObject 不生效（local.go 的 CaseInsensitive 分支），只剩
+		// sameDirEntry 这道**问内核**的判据兜底。判据失效时：replace=true
+		// 会先 os.Remove(dst) —— 而 dst 就是 src 自己 —— 源文件当场被删掉，
+		// 紧接着 rename 报 ENOENT。
+		sens, err := NewLocalFS(LocalConfig{Root: root, CaseInsensitive: false})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = sens.Close() }()
+
+		if err := sens.Rename("a.txt", "A.TXT", true); err != nil {
+			t.Fatalf("同对象改名（仅大小写不同）= %v —— sameDirEntry 的调用点被"+
+				"架空，先删后改名把源文件删掉了", err)
+		}
+		got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+		if err != nil || string(got) != "DATA" {
+			t.Fatalf("改名后内容 = (%q, %v)，期望 (\"DATA\", nil) —— 数据丢了", got, err)
+		}
+		return
+	}
+
+	// 大小写敏感宿主：唯一能造出「Lstat(dst) 成功且 dst 就是 src 自己」的是
+	// 同目录硬链接。
 	if err := os.Link(filepath.Join(root, "a.txt"), filepath.Join(root, "b.txt")); err != nil {
 		t.Skipf("宿主不支持硬链接: %v", err)
 	}
@@ -293,10 +329,10 @@ func TestQARenameSameDirEntryIsWiredIn(t *testing.T) {
 	}
 
 	// 接线在：判成同一对象 → 跳过 Remove → POSIX rename 同 inode 是 no-op。
+	// （Windows 的 MoveFileEx 没有这条 no-op 语义，所以折叠宿主走上面那条分支。）
 	if _, err := os.Lstat(filepath.Join(root, "a.txt")); err != nil {
 		t.Errorf("a.txt 不见了：%v —— sameDirEntry 的调用点被架空了，"+
-			"走的是「先 os.Remove(dst) 再 rename」那条路（在会折叠名字的宿主上"+
-			"这条路会直接删掉源文件、丢数据）", err)
+			"走的是「先 os.Remove(dst) 再 rename」那条路", err)
 	}
 	got, err := os.ReadFile(filepath.Join(root, "b.txt"))
 	if err != nil || string(got) != "DATA" {

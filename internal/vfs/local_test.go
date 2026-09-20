@@ -392,8 +392,17 @@ func TestColonPathCreatesBaseNotEscape(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(fs.Root(), "na")); err != nil {
 		t.Errorf("基础文件 na 应被创建: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(fs.Root(), "na:me")); err == nil {
-		t.Errorf("共享根里出现了名为 na:me 的条目 —— 冒号没有被当成流分隔符")
+	// 判据不能写成 os.Lstat(root/"na:me")：在 Windows 上那个字符串**本身就是
+	// ADS 语法**（文件 na 的流 me），Lstat 必然命中，跟「有没有一个叫这个名字
+	// 的目录项」完全是两回事。直接枚举目录项，跨平台口径才一致。
+	entries, err := os.ReadDir(fs.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() == "na:me" {
+			t.Errorf("共享根里出现了名为 na:me 的条目 —— 冒号没有被当成流分隔符")
+		}
 	}
 }
 

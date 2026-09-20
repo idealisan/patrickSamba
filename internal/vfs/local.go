@@ -579,6 +579,11 @@ func (l *LocalFS) statHost(host, name string) (*Attr, error) {
 		}
 	}
 	a := attrFromFileInfo(fi, name, l.cfg.ReadOnly)
+	// 平台补充：Windows 的路径式 stat 拿不到真实分配长度与硬链接数
+	// （Win32FileAttributeData 里根本没有这两项）。POSIX 上是空操作。
+	if id, ok := hostIdentityAt(host); ok {
+		applyHostIdentity(a, id)
+	}
 	if bt, ok := l.creationTimeAt(host, nil); ok {
 		a.CreateTime = bt
 	}

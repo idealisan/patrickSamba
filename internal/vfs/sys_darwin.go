@@ -42,6 +42,12 @@ func platformFullSync(f *os.File) error {
 	return nil
 }
 
+// platformSync 是普通强度的刷盘：macOS 上就是 fsync(2)（只把数据交给磁盘
+// 控制器），与 platformFullSync 的 F_FULLFSYNC（要求落盘片）是两回事。
+func platformSync(f *os.File) error {
+	return f.Sync()
+}
+
 // platformPunchHole：macOS 有 F_PUNCHHOLE（0x63，10.11+），但
 // x/sys/unix 没有导出对应的 fpunchhole_t 结构体与封装，硬拼要用 unsafe。
 //

@@ -190,7 +190,9 @@ func (h *localHandle) Sync(full bool) error {
 	if full {
 		return mapError(platformFullSync(f))
 	}
-	return mapError(f.Sync())
+	// 普通强度（SMB2 FLUSH 的 full=false 档）也走平台接缝：Windows 上同样要
+	// 容忍「只读句柄/目录句柄没有写权限」这一平台事实（见 platformSync）。
+	return mapError(platformSync(f))
 }
 
 // ---------------------------------------------------------------- 属性
@@ -208,6 +210,10 @@ func (h *localHandle) Stat() (*Attr, error) {
 			// 用 caps 的稳定 FileID 覆盖 fillSysAttr 填的 st.Ino。
 			a.FileID = h.fs.fileIDAt(h.host, h.f, a.FileID)
 			fillSysAttrFromFile(h.f, a)
+			// 同一个句柄再取补齐项（真实分配长度等），不再开一次。
+			if id, ok := hostIdentityFromFile(h.f); ok {
+				applyHostIdentity(a, id)
+			}
 			h.fs.mergeStoredDOS(h.host, h.f, a, h.name)
 			h.fs.applyMetadata(h.host, a)
 			return a, nil

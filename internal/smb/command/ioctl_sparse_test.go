@@ -41,19 +41,38 @@ func TestIoctlSetSparseEmptyInputMeansTrue(t *testing.T) {
 		t.Fatalf("SetSparse=TRUE 应成功，实际 err=%v", err)
 	}
 
-	// 显式 FALSE：POSIX 后端做不到「取消稀疏」，如实回 STATUS_NOT_SUPPORTED。
+	// 显式 FALSE：后端**可以**做到，也**可以**做不到，但不许谎报。
 	//
-	// 这里断言的是**失败**，不是笔误。我们的 FILE_ATTRIBUTE_SPARSE_FILE 由
-	// `Alloc < Size` 现算（vfs/attr.go），谎称取消成功会让客户端回头查属性时
-	// 照样看到 SPARSE 位；而真的取消就得把洞全填零，Time Machine band 会当场
-	// 从几 KiB 涨到 8 MiB。详见 ioctlSetSparse 的注释。
+	//   POSIX 后端做不到「取消稀疏」，如实回 STATUS_NOT_SUPPORTED
+	//   （理由见 ioctlSetSparse 的注释：SPARSE 位由 Alloc < Size 现算，
+	//   谎称取消会让客户端回头查属性时照样看到 SPARSE，而真取消得把洞全填零，
+	//   Time Machine band 会当场从几 KiB 涨到 8 MiB）；
+	//   NTFS 上 FSCTL_SET_SPARSE 的清标志是真实生效的，可以回成功。
 	//
-	// 与 Samba 的分歧（它存 user.DOSATTRIB 的 bit，所以 FALSE 能成功）也记在
-	// 那里。没有已知客户端会发 FALSE，改动此断言前先确认是哪个客户端在发。
+	// 所以判据不是「必须失败」，而是二选一、且各自可证伪：
+	// 要么诚实拒绝（NOT_SUPPORTED），要么报成功且属性位**确实没了**。
+	// 写成「必须 NOT_SUPPORTED」在 NTFS 上会把正确实现判成缺陷。
+	//
+	// 与 Samba 的分歧（它存 user.DOSATTRIB 的 bit，所以 FALSE 总能成功）也记在
+	// ioctlSetSparse 的注释里。没有已知客户端会发 FALSE。
 	ctx.Out = ctx.Out[:0]
 	req.Input = []byte{0}
-	if err := ioctlSetSparse(ctx, req); err != status.NotSupported {
-		t.Fatalf("SetSparse=FALSE err = %v, 期望 %v", err, status.NotSupported)
+	switch err := ioctlSetSparse(ctx, req); {
+	case err == status.NotSupported:
+		// 诚实拒绝，符合 POSIX 侧契约。
+	case err != nil:
+		t.Fatalf("SetSparse=FALSE err = %v，只允许 nil（真做到）或 %v（如实拒绝）",
+			err, status.NotSupported)
+	default:
+		// 说成功就得真做到：SPARSE 属性位必须已经消失，否则就是谎报。
+		a, statErr := ctx.Chain.LastOpen.Handle.Stat()
+		if statErr != nil {
+			t.Fatalf("SetSparse(FALSE) 后查属性失败: %v", statErr)
+		}
+		if a.FileAttributes&vfs.FileAttributeSparse != 0 {
+			t.Errorf("SetSparse(FALSE) 报成功，但属性里仍是 SPARSE（位图 %#x）—— 谎报",
+				a.FileAttributes)
+		}
 	}
 }
 

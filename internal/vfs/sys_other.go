@@ -14,6 +14,9 @@ func platformStatFS(string, *FSInfo) error { return ErrNotSupported }
 
 func platformFullSync(f *os.File) error { return f.Sync() }
 
+// platformSync 是普通强度的刷盘（SMB2 FLUSH 的 full=false 档）。
+func platformSync(f *os.File) error { return f.Sync() }
+
 func platformPunchHole(*os.File, int64, int64) error { return ErrNotSupported }
 
 func platformPreallocate(*os.File, int64, int64) error { return ErrNotSupported }

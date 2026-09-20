@@ -3,6 +3,7 @@
 package vfs
 
 import (
+	"errors"
 	"os"
 	"time"
 	"unsafe"
@@ -54,11 +55,33 @@ func platformStatFS(path string, info *FSInfo) error {
 	return nil
 }
 
-// platformFullSync：Windows 的 FlushFileBuffers 本来就是「刷到介质」的语义，
-// 没有 macOS 那种两级刷盘的区分。
-func platformFullSync(f *os.File) error {
-	return f.Sync()
+// flushFileBuffers 调 FlushFileBuffers，并把「句柄没有写权限」这一平台事实
+// 归一成「无可刷」。
+//
+// ⚠️ FlushFileBuffers 要求句柄带**写权限**：只读句柄与目录句柄都会拿到
+// ERROR_ACCESS_DENIED。这两种句柄没有缓冲写要落盘（只读句柄写不了；目录句柄
+// 本身没有数据流），所以这里的 ACCESS_DENIED 不是「刷失败」，而是「无可刷」。
+// 不能把它当错误上报：SMB 的 FLUSH 在这两种句柄上必须成功 —— macOS 的
+// Time Machine 会把 FLUSH 失败当作备份目标不可靠并**中止备份**，而 TM 会大量
+// 建目录、也会 FLUSH 只读句柄。写句柄仍照常真刷，不影响
+// TestFlushReallyCallsFullSync 钉的契约。
+func flushFileBuffers(f *os.File) error {
+	if err := f.Sync(); err != nil {
+		if errors.Is(err, errAccessDenied) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
+
+// platformFullSync：Windows 的 FlushFileBuffers 本来就是「刷到介质」的语义，
+// 没有 macOS 那种两级刷盘的区分，所以两种强度落到同一个调用。
+func platformFullSync(f *os.File) error { return flushFileBuffers(f) }
+
+// platformSync 是普通强度的刷盘（SMB2 FLUSH 传 full=false，以及内部
+// write-through 之外的收尾）。Windows 上与 full 强度同义，见上。
+func platformSync(f *os.File) error { return flushFileBuffers(f) }
 
 // fsctlSetSparse 与 fsctlSetZeroData 的控制码（winioctl.h）。
 //
@@ -104,13 +127,11 @@ func platformPreallocate(*os.File, int64, int64) error {
 	return ErrNotSupported
 }
 
-// openNoFollow：Windows 的 CreateFile 没有 O_NOFOLLOW 对应物。
-// NTFS 的重解析点（junction / symlink）需要 FILE_FLAG_OPEN_REPARSE_POINT，
-// 而 Go 的 os.OpenFile 不暴露它，故这里为 0。
+// openNoFollow 在 Windows 上是空操作，**不是缺口**。
 //
-// 影响面有限：Windows 上创建符号链接默认需要管理员权限或开发者模式，
-// 共享内出现攻击者可控软链的前提本就不成立。
-// TODO: 若要在 Windows 上严格化，需绕开 os.OpenFile 直接调 CreateFileW。
+// 「不跟随最后一跳」那件事改由 openhost_windows.go 的 CreateFileW 常开
+// FILE_FLAG_OPEN_REPARSE_POINT 承担（flag 计算见 winopen.go 的
+// winOpenParamsFor），不再需要调用方在这里传一个标志位。
 const openNoFollow = 0
 
 // platformSetCreateTime 用 SetFileTime 设置真实创建时间。

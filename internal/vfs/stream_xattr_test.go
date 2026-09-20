@@ -266,10 +266,21 @@ func TestGenericStreamNameCaseSensitiveShare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := sens.Open(&OpenRequest{
+	_, _, err = sens.Open(&OpenRequest{
 		Path: "f", Stream: "meta",
 		Flags: OpenRead, Disposition: OpenExisting,
-	}); !errors.Is(err, ErrNotFound) {
+	})
+	if hostFoldsCase(t) {
+		// 折叠宿主（NTFS/APFS）：内核连 ADS / 流名也折叠，
+		// CaseInsensitive=false 拦不住它 —— 与路径查找那批用例同一类平台事实
+		// （见 casehost_test.go）。此时只要求「回访到的是同一条流」，而不是
+		// 「必须落空」。
+		if err != nil {
+			t.Errorf("宿主折叠名字，回访 :meta 应命中同一条流，得到 %v", err)
+		}
+		return
+	}
+	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("大小写敏感共享上回访 :meta = %v, 期望 ErrNotFound", err)
 	}
 }

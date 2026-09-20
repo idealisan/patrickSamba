@@ -132,7 +132,7 @@ func dosAttributes(fi fs.FileInfo, a *Attr, name string, readOnlyShare bool) uin
 		out |= FileAttributeReadonly
 	}
 
-	if !mode.IsDir() && a.Alloc > 0 && a.Alloc < a.Size {
+	if sparseByAlloc(a, mode.IsDir()) {
 		out |= FileAttributeSparse
 	}
 
@@ -140,6 +140,53 @@ func dosAttributes(fi fs.FileInfo, a *Attr, name string, readOnlyShare bool) uin
 		out = FileAttributeArchive
 	}
 	return out
+}
+
+// sparseByAlloc 是「分配长度小于逻辑长度 ⇒ SPARSE_FILE」这条推导规则的判据。
+//
+// 只用于 attrFromFileInfo 的**初次合成**（dosAttributes）。Windows 上不需要它：
+// 那边 NTFS 自己就有 FILE_ATTRIBUTE_SPARSE_FILE，fillSysAttr 原样采信，
+// 比按 Alloc < Size 推导更权威 —— 例如客户端刚用 FSCTL_SET_SPARSE 清掉标志、
+// 但洞还没填实的文件，NTFS 说「不稀疏」，我们就该跟着说「不稀疏」，
+// 不能再按 Alloc 合成回去（那正好是 ioctlSetSparse 注释里点名的「谎报」）。
+func sparseByAlloc(a *Attr, isDir bool) bool {
+	return !isDir && a.Alloc > 0 && a.Alloc < a.Size
+}
+
+// hostIdentity 是宿主给出的、**lstat 结构里没有**的补充信息。
+//
+// 存在的理由：Windows 的 os.Stat 只给出 Win32FileAttributeData —— 没有真实
+// 分配长度（要 FileStandardInfo），也没有硬链接数与文件索引（要句柄）。
+// POSIX 的 lstat 这三项都有，故那一侧 hostIdentityAt 恒返回 false（空操作）。
+//
+// Alloc 需要**单独的 HasAlloc** 而不是「> 0 即有效」：0 是完全合法的真实
+// 分配长度（整段被打了洞的文件一个簇都不占），不能和「查不到」混为一谈。
+// NLink / FileID 没有这个歧义（活的文件 NLink ≥ 1，FileID 0 是 NTFS 的
+// 「拿不到」哨兵）。
+type hostIdentity struct {
+	Alloc    int64  // 真实分配长度（字节）
+	HasAlloc bool   // Alloc 是否有效
+	NLink    uint32 // 硬链接数；0 表示拿不到
+	FileID   uint64 // 宿主文件索引（NTFS file reference number）；0 表示拿不到
+}
+
+// applyHostIdentity 把平台补充的信息并入 a。
+//
+// 必须在 DOS 属性初次合成**之后**调用：DOS 位在 attrFromFileInfo 里按当时的
+// Alloc 算过一次，而真实 Alloc 是这里才补齐的（Windows）。
+//
+// 刻意**不碰 FileAttributes**：DOS 位里的 SPARSE 在 Windows 上以 NTFS 的原生
+// 属性位为准（见 sparseByAlloc 的说明），这里只补「结构里没有的字段」。
+func applyHostIdentity(a *Attr, id hostIdentity) {
+	if id.HasAlloc {
+		a.Alloc = id.Alloc
+	}
+	if id.NLink > 0 {
+		a.NLink = id.NLink
+	}
+	if id.FileID != 0 {
+		a.FileID = id.FileID
+	}
 }
 
 // allocSizeFallback 在拿不到真实 st_blocks 时按 512 字节向上取整估算分配长度。

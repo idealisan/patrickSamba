@@ -41,6 +41,13 @@ func platformFullSync(f *os.File) error {
 	return f.Sync()
 }
 
+// platformSync 是普通强度的刷盘。Linux 上 fsync 本就要求刷到持久介质，
+// 与 platformFullSync 同义 —— 接缝存在只是为了给 Windows 留一处统一的
+// 「容忍无可刷」的位置（见 sys_windows.go 的 platformSync）。
+func platformSync(f *os.File) error {
+	return f.Sync()
+}
+
 // platformPunchHole 打洞：把 [off, off+length) 变成稀疏空洞。
 // Time Machine 的 .sparsebundle 会大量删除 band 文件内容，
 // 没有打洞能力会让备份卷持续膨胀。

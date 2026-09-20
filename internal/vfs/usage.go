@@ -97,6 +97,12 @@ func scanUsage(root string, deadline time.Time) (total uint64, complete bool) {
 		// 与 attrFromFileInfo 同样的顺序：先兜底，再让平台实现覆盖成真值。
 		a.Alloc = allocSizeFallback(fi.Size())
 		fillSysAttr(fi, &a)
+		// Windows 的路径式 stat 拿不到真实分配长度、硬链接数与文件索引，
+		// 而下面按「NLink > 1 + FileID」去重这三项缺一不可（缺了会把硬链接
+		// 重复计数）。POSIX 上是空操作。
+		if id, ok := hostIdentityAt(p); ok {
+			applyHostIdentity(&a, id)
+		}
 
 		if a.NLink > 1 && !fi.IsDir() {
 			if seen == nil {
