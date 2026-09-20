@@ -14,8 +14,23 @@
 # CodeBuddy 的工作状态目录（会话缓存、shell 环境快照、file-history、插件市场副本）。
 # 曾经被 `git add -A` 误扫进 docs/ 下并入库 149 MB，其中 shell-snapshots 里含
 # 明文 CNB_TOKEN —— 见 commit 2e327a6 / 8624094。任何层级都不得再入库。
-# 会话历史要归档请走 scripts/save-history.sh，它落到仓库的 history/ 目录。
+# 会话历史归档请落到**仓库之外**的持久位置（2026-09-20 起仓库不再收 history/，见下）。
 .codebuddy/
+
+# 会话历史快照（history/）与 CodeBuddy 辅助目录：2026-09-20 起不入库。
+#
+# 为什么改口：AGENTS.md §10 的「历史痕迹一律保留」原为防止丢记录；但实测
+# history/ 工作树已达 138 MB（单文件 20 MB），且 .cnb.yml:66-72 记着它是
+# 「目前最大的一处浪费」——每次入库都会把 12 关整套跑一遍。
+# 处置（所有者 2026-09-20 拍板）：从工作树排除（磁盘保留）、加 .gitignore、
+# 并用 git filter-branch 从全部历史提交中清除（commit 8f199ac 之前的旧历史
+# 另存于 refs/backups/pre-purge-8f199ac 与 ../pre-purge-8f199ac.bundle）。
+#
+# ⚠️ 待办：scripts/save-history.sh 的默认落点仍是仓库内 history/，需改为
+# 仓库之外的持久位置（AGENTS.md §10 的「归档入仓」条目需同步修订）。
+/history/
+/codebuddy-files/
+/conversation-*.txt
 
 # test/perf 基准程序在仓库根/本目录的构建产物
 /perf
