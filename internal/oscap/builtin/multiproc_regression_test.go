@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/oscap/native"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap/native"
 )
 
 // 子进程与父进程之间的约定。名字带全前缀，避免与其他包的环境变量撞车。

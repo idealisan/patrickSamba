@@ -21,7 +21,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // ListStreams 实现 oscap.NamedStream。

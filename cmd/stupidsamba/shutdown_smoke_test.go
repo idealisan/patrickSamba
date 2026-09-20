@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // smokePort 是本 agent 的专属调试端口，避免与其他并行测试抢端口。

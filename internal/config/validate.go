@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // isAbsPath 判断是否为**本平台**的绝对路径。

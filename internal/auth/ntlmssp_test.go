@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 func testProvider(t *testing.T, users []config.User, allowGuest, allowAnon bool) *NTLMProvider {

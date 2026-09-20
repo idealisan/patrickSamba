@@ -41,7 +41,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // New 构造本平台的原生能力集合，是本包**唯一**的导出入口。

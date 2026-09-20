@@ -28,9 +28,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/oscap/builtin"
-	"github.com/finalappstore/stupidsamba/internal/oscap/native"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap/builtin"
+	"github.com/idealisan/patrickSamba/internal/oscap/native"
 )
 
 // openCaps 按 cfg.FilesystemMode 组装能力集合，或采用调用方注入的那个。

@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // share_access_test.go —— 共享模式（ShareAccess）冲突判定。

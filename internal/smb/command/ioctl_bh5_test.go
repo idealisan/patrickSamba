@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // bh5 轮 FSCTL 缺陷的回归测试（docs/bughunt-20260825/findings-bh5.md）。

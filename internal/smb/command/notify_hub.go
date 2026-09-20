@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // ---------------------------------------------------------------------------

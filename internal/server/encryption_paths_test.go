@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // smb1NegotiateFrame 拼一条 SMB1 SMB_COM_NEGOTIATE（MS-CIFS §2.2.4.52）。

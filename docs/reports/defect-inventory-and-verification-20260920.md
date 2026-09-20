@@ -223,3 +223,21 @@ codebuddy 相关的目录排除掉，并且历史 commit 里也清理掉」）�
    归档仍在，只是**不再入仓**。
 4. 强推后 **GitHub 上的 SHA 会第三次全变**（第一次作者统一、第二次本次清理），
    CNB 侧的原始历史与 GitHub 的分叉进一步扩大。
+
+---
+
+## 更新（2026-09-20 16:35）—— 模块路径迁移完成
+
+§5 建议顺序里第 4 条（模块路径 vs 仓库名）已按所有者的选择落地：**改模块路径**
+（不动仓库名）。
+
+- `go.mod`：`module github.com/finalappstore/stupidsamba` →
+  `module github.com/idealisan/patrickSamba`；180 个 `.go` 文件的 import 同步
+  机械替换（含测试）。
+- 刻意**未动**的两类引用：`docker.cnb.cool/finalappstore/stupidsamba` 是 CNB
+  镜像仓库名，与 Go 模块路径是两回事；`docs/status-v0.2.0.md` 等历史快照里
+  引用旧路径的测试输出属于时间锚定记录，不改。
+- 验证【实测】：`go mod tidy` 无意外改动（go.sum 未变）；`go build ./...` 通过；
+  GOOS=linux/darwin/windows vet 全过；`internal/config` 与 `internal/smb/command`
+  全量 `-short` 全绿，测试输出已是新路径。
+- 本条落定后，§4 档 A 的 #4 从待办中移除。

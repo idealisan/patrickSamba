@@ -5,7 +5,7 @@ package integration
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // TestADSReadWrite 验证备用数据流（ADS / 命名流）的读写：

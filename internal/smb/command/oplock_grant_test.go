@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // 本文件钉的是 oplock / lease 的授予与打破（oplock_grant.go / oplock_state.go）。

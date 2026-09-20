@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // 本文件钉的是 bh4-A#1：字节范围锁此前只是记账空壳 —— LOCK 命令把锁

@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // mapPosixErr 把 errno 映射成 oscap 的 sentinel。

@@ -31,10 +31,10 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // rawClient 是一个最小但正确的 SMB2/3 客户端，仅用于测试。

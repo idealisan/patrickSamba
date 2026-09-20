@@ -14,7 +14,7 @@ package command
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
 )
 
 func TestSplitCreateNameTrailingColon(t *testing.T) {

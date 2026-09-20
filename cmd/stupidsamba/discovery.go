@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/mdns"
-	"github.com/finalappstore/stupidsamba/internal/nbns"
-	"github.com/finalappstore/stupidsamba/internal/wsd"
+	"github.com/idealisan/patrickSamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/mdns"
+	"github.com/idealisan/patrickSamba/internal/nbns"
+	"github.com/idealisan/patrickSamba/internal/wsd"
 )
 
 // ---------------------------------------------------------------------------

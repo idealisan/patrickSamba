@@ -1,4 +1,4 @@
-module github.com/finalappstore/stupidsamba
+module github.com/idealisan/patrickSamba
 
 go 1.25.0
 

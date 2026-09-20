@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // newTestServer 起一个监听 127.0.0.1 随机端口的真实服务端。

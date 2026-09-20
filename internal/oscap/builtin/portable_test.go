@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // probeAllFalse 说「宿主什么可选能力都没有」。

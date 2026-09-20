@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 func TestPortableCreationTimeRoundTrip(t *testing.T) {

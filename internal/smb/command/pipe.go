@@ -3,7 +3,7 @@ package command
 import (
 	"errors"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/auth"
 )
 
 // IPC$ 上的命名管道后端契约。

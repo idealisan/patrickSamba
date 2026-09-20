@@ -3,9 +3,9 @@ package server
 import (
 	"errors"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // 本文件实现 command.AsyncSink：把一条**挂起后异步完成**的响应写回客户端。

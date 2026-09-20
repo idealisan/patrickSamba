@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // TestFilesystemModeDefaultsToAuto：不写这一项时必须落到 auto。

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 // micHandshake 跑一遍完整的 SPNEGO + NTLMv2 握手，客户端侧按 RFC 4178 §5

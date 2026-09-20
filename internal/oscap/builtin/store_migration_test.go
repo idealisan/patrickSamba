@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // seedAllBuckets 在 path（宿主文件）上给六个 bucket 都种一条记录，

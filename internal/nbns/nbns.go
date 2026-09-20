@@ -27,8 +27,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/netiface"
-	"github.com/finalappstore/stupidsamba/internal/sockopt"
+	"github.com/idealisan/patrickSamba/internal/netiface"
+	"github.com/idealisan/patrickSamba/internal/sockopt"
 )
 
 // 默认值。宣告周期取 4 分钟：宣告是"我还在"的保活，太稀疏会让刚开机的

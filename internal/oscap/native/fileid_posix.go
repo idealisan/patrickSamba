@@ -11,7 +11,7 @@ package native
 import (
 	"golang.org/x/sys/unix"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // posixIDs 实现 oscap.StableFileID。

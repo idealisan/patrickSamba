@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
 )
 
 // 默认的服务端参数。

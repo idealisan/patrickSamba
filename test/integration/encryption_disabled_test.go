@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // 本文件是 encrypted_test.go（加密「开」正向探针）的**反向**探针：验证当服务端

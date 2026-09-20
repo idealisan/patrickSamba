@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/dcerpc"
+	"github.com/idealisan/patrickSamba/internal/dcerpc"
 )
 
 type fakeLister struct{ shares []dcerpc.ShareEntry }

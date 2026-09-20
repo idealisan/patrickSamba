@@ -27,13 +27,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/server"
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/server"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // 测试账户。口令只存在于本文件，不读任何系统用户数据库（AGENTS.md C8）。

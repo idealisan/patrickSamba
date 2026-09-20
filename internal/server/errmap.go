@@ -3,8 +3,8 @@ package server
 import (
 	"errors"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // 错误 → NTSTATUS 的集中映射（AGENTS.md §5 P5：禁止在 handler 里裸写魔数）。

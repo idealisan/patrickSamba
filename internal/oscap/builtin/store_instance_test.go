@@ -17,7 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // TestMetadataFileNameEmptyInstanceIsHistoricalName 用测试内**独立复算**的

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/sockopt"
+	"github.com/idealisan/patrickSamba/internal/sockopt"
 )
 
 // ---------------------------------------------------------------------------

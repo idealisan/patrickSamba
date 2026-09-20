@@ -12,7 +12,7 @@ package native
 //
 // 注意这不是「窄档分支」：走的仍然是同一条装配路径（§1.2 铁律 1）。
 
-import "github.com/finalappstore/stupidsamba/internal/oscap"
+import "github.com/idealisan/patrickSamba/internal/oscap"
 
 func newSet(oscap.Options) (oscap.Set, error) {
 	return oscap.Set{

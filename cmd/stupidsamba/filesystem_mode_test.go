@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // buildOneShare 用给定的 filesystem_mode 装配一个临时共享，返回它的 LocalFS。

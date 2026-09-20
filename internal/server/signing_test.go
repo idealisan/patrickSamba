@@ -3,12 +3,12 @@ package server
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // testSigningKey 是单测用的固定签名密钥（长度必须是 AES-128 的 16 字节）。

@@ -31,7 +31,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 var (

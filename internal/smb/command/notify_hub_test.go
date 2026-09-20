@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // 本文件钉的是目录变更事件中心（notify_hub.go）—— CHANGE_NOTIFY 的服务端侧。

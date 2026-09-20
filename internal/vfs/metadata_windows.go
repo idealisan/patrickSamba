@@ -26,7 +26,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // metadataBucket 是存放 POSIX 属主/权限位的 bucket 名。

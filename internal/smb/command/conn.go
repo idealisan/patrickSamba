@@ -4,10 +4,10 @@ import (
 	"crypto/sha512"
 	"sync"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/dialect"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/dialect"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // Conn 是一条 TCP 连接上的 **SMB2 协议状态**（MS-SMB2 §3.3.1.5 Connection）。

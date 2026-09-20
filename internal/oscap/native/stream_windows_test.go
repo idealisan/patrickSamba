@@ -24,7 +24,7 @@ package native
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // TestWindowsStreamProcsMissingYieldsNilStreams 验证：三项 kernel32 导出缺失时，

@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // TestNoSyncReopenDOSAndCreationTimeSurvive 验证拍板边界里「进程崩溃不丢」

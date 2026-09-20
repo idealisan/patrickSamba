@@ -3,7 +3,7 @@ package command
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // leaseReq 造一个带 RqLs 的 CREATE 请求，state 为请求的租约状态位。

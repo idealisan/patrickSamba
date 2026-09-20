@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 // New 根据配置构造一个 mDNS responder。

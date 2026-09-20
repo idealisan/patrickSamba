@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // compoundPart 是复合请求链中的一段。related=true 表示本段复用上一段的

@@ -3,8 +3,8 @@ package command
 import (
 	"sync"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // Open 是一个已打开的文件/目录句柄（MS-SMB2 §3.3.1.10 Open）。

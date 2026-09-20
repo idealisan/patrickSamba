@@ -3,8 +3,8 @@ package command
 import (
 	"log/slog"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // Chain 是一条复合请求链（compound request）在处理过程中的共享状态。

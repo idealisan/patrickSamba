@@ -40,7 +40,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // zeroBlockSize 是判定「这一块是不是空洞」的粒度。

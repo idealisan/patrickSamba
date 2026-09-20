@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/oscap/builtin"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap/builtin"
 )
 
 // hostJoin 把共享内相对路径（'/' 分隔）拼成宿主机路径。

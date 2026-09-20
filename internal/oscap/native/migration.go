@@ -24,7 +24,7 @@ package native
 // 按路径的持久状态，本文件的注释与实现必须一起重写 —— 别只改实现不改文档，
 // 那会让下一个读者以为无操作仍然是正确答案。
 
-import "github.com/finalappstore/stupidsamba/internal/oscap"
+import "github.com/idealisan/patrickSamba/internal/oscap"
 
 type noopMigration struct{}
 

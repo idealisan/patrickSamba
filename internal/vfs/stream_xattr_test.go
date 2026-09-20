@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // streamsCaseInsensitive 报告本平台上**流名**的内核匹配是否大小写不敏感。

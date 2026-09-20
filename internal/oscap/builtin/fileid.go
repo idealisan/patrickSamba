@@ -26,7 +26,7 @@ package builtin
 // **不发一个会变的号**，因为一个会变的 FileID 比没有 FileID 更糟。
 
 import (
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // FileID 实现 oscap.StableFileID。

@@ -25,7 +25,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/server"
+	"github.com/idealisan/patrickSamba/internal/server"
 )
 
 func startAdminFromEnv(log *slog.Logger) error {

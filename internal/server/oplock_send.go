@@ -3,8 +3,8 @@ package server
 import (
 	"math"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // breakNotifyMessageID 是 break 通知头里的 MessageId。

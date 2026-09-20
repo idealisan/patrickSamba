@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 type localHandle struct {

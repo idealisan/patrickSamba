@@ -12,7 +12,7 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // Status 是一个 32 位 NTSTATUS 值。

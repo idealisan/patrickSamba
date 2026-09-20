@@ -1,7 +1,7 @@
 package command
 
 import (
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // Tree 是一个树连接（MS-SMB2 §3.3.1.10 TreeConnect）：会话 × 共享。

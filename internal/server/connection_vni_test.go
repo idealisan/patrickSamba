@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // bh5-F6：VALIDATE_NEGOTIATE_INFO 复核失败后，服务端不能只回 ACCESS_DENIED

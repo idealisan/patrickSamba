@@ -4,9 +4,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
 )
 
 // Session 是一个已认证（或认证中）的 SMB2 会话（MS-SMB2 §3.3.1.8 Session）。

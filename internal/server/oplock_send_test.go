@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // newPipeConn 构造一条跑在 net.Pipe 上的服务端连接，并返回客户端侧的

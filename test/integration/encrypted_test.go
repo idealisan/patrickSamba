@@ -7,8 +7,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/crypto"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/crypto"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // readRawFrame 读回一条 Direct TCP 帧的**原始**字节（不做解密），用于断言

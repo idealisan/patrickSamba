@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // 本文件钉的是 v0.5 读路径去双拷贝（perf-v050 报告 §4/§8 移交项）：

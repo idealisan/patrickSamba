@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // TestCancelNoResponse 验证 SMB2 CANCEL（命令 0xC）的特殊语义：

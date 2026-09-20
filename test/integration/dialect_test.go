@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // TestMultiDialect 验证 2.0.2 / 2.1 / 3.0 / 3.0.2 / 3.1.1 五种方言各自能完成

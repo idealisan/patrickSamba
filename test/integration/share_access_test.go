@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // share_access_test.go —— 共享模式（ShareAccess）冲突判定的**跨连接**端到端验证。

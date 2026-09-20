@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // btimeRecordIs 测 ref 的旁路 btime 是否存在且落在 [now-Δ, now+Δ] 内。

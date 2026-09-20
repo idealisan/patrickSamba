@@ -15,7 +15,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // dosRecordLen 是一条 DOS 属性记录的字节数：uint32，显式小端。

@@ -45,7 +45,7 @@ package builtin
 import (
 	"os"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // adapter 一个类型实现全部六项能力。

@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // 表中的值取自 MS-ERREF §2.3.1，与 docs/protocol-notes.md §13 一致。

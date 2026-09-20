@@ -10,7 +10,7 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // openRead / openWrite 的取用次序：**先按路径开，拿不到才用 Ref.Handle**。

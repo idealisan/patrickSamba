@@ -5,10 +5,10 @@ import (
 	"io"
 	"strings"
 
-	"github.com/finalappstore/stupidsamba/internal/auth"
-	"github.com/finalappstore/stupidsamba/internal/dcerpc"
-	"github.com/finalappstore/stupidsamba/internal/dcerpc/srvsvc"
-	"github.com/finalappstore/stupidsamba/internal/smb/command"
+	"github.com/idealisan/patrickSamba/internal/auth"
+	"github.com/idealisan/patrickSamba/internal/dcerpc"
+	"github.com/idealisan/patrickSamba/internal/dcerpc/srvsvc"
+	"github.com/idealisan/patrickSamba/internal/smb/command"
 )
 
 // IPC$ 上的命名管道装配。

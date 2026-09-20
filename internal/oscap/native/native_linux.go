@@ -16,7 +16,7 @@ package native
 //	creation_time     probeBirthTimeLinux         linuxTimes（只读，见该文件说明）
 //	dos_attributes    固定 false                   nil ← 见下
 
-import "github.com/finalappstore/stupidsamba/internal/oscap"
+import "github.com/idealisan/patrickSamba/internal/oscap"
 
 func newSet(o oscap.Options) (oscap.Set, error) {
 	return oscap.Set{

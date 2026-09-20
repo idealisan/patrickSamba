@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 // 本文件验证 Apple 生态三组服务的 TXT/SRV 构造。

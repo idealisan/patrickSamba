@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 // StaticStore 是基于配置文件的静态账户表，并发安全（构造后只读）。

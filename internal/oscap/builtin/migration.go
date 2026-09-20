@@ -15,7 +15,7 @@ package builtin
 // 达成同样的可观测语义。
 
 import (
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // RenameMetadata 实现 oscap.MetadataMigration：把 oldPath 名下全部旁路记录

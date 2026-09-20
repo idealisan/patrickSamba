@@ -20,7 +20,7 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // recVersion 是每条记录的版本前缀字节。

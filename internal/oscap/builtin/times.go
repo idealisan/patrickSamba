@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // timeRecordLen 是一条时间记录的字节数：sec(int64) + nsec(int32)，显式小端。

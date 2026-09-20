@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // discardCap 是一个**哑**能力实现，仅供本文件的 provider 接线测试当桩用。

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/vfs"
+	"github.com/idealisan/patrickSamba/internal/vfs"
 )
 
 // renameTarget 是 SET_INFO 的 FileRenameInformation / FileLinkInformation

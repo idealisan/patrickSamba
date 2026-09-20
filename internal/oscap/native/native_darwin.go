@@ -14,7 +14,7 @@ package native
 //	creation_time     probeBirthTimeDarwin        darwinTimes（可读可写）
 //	dos_attributes    固定 false                   nil
 
-import "github.com/finalappstore/stupidsamba/internal/oscap"
+import "github.com/idealisan/patrickSamba/internal/oscap"
 
 func newSet(o oscap.Options) (oscap.Set, error) {
 	return oscap.Set{

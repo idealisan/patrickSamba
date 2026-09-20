@@ -45,7 +45,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 const (

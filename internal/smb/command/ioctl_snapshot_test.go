@@ -3,8 +3,8 @@ package command
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // FSCTL_SRV_ENUMERATE_SNAPSHOTS 的 handler 测试。

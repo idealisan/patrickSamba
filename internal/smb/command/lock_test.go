@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // el 拼一条加锁用的 LockElement。excl 为 true 时是独占锁，否则共享锁。

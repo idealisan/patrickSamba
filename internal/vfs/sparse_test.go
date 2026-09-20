@@ -18,9 +18,9 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
-	"github.com/finalappstore/stupidsamba/internal/oscap/builtin"
-	"github.com/finalappstore/stupidsamba/internal/oscap/native"
+	"github.com/idealisan/patrickSamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap/builtin"
+	"github.com/idealisan/patrickSamba/internal/oscap/native"
 )
 
 // sparseBlk 取 1 MiB：空洞探测的粒度是文件系统块（ext4 通常 4 KiB，

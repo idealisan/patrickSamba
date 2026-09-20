@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // sessionSetupSeeds 只取真实抓包里客户端方向的 SESSION_SETUP 报文。

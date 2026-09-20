@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // LocalConfig 是构造 LocalFS 所需的参数。

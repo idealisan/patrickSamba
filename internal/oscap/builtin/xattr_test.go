@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 func TestPortableXattrRoundTrip(t *testing.T) {

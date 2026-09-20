@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
-	"github.com/finalappstore/stupidsamba/internal/server"
+	"github.com/idealisan/patrickSamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/server"
 )
 
 // 版本信息由 scripts/build-release.sh 通过 -ldflags -X main.xxx 注入。

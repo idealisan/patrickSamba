@@ -3,8 +3,8 @@ package command
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/smb/status"
-	"github.com/finalappstore/stupidsamba/internal/smb/wire"
+	"github.com/idealisan/patrickSamba/internal/smb/status"
+	"github.com/idealisan/patrickSamba/internal/smb/wire"
 )
 
 // TestReleaseAllSurvivesRename 是一条**回归测试**，钉死一个真实存在过的锁泄漏。

@@ -9,7 +9,7 @@ package main
 import (
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 func TestListenerInstanceID(t *testing.T) {

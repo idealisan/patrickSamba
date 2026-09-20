@@ -27,8 +27,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/netiface"
-	"github.com/finalappstore/stupidsamba/internal/sockopt"
+	"github.com/idealisan/patrickSamba/internal/netiface"
+	"github.com/idealisan/patrickSamba/internal/sockopt"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )

@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/net/ipv4"
 
-	"github.com/finalappstore/stupidsamba/internal/config"
+	"github.com/idealisan/patrickSamba/internal/config"
 )
 
 // TestResponderAnswersLegacyQuery 用一个源端口 ≠5353 的普通 UDP socket 发查询，

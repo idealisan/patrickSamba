@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/finalappstore/stupidsamba/internal/netiface"
+	"github.com/idealisan/patrickSamba/internal/netiface"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )

@@ -10,7 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/finalappstore/stupidsamba/internal/dcerpc"
+	"github.com/idealisan/patrickSamba/internal/dcerpc"
 )
 
 // 接口 UUID 与版本（MS-SRVS §1.1 / §3.1.4）。

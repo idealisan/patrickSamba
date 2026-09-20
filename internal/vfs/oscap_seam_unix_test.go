@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // requireHostXattr 确认这台机器**能**承载「宿主落盘」类断言。

@@ -7,7 +7,7 @@ package builtin
 // 「ListXattr 报出来的名字必须能拿去 GetXattr 取到」在本实现里是构造性成立的。
 
 import (
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // GetXattr 实现 oscap.Xattr。

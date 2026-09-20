@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/finalappstore/stupidsamba/internal/oscap"
+	"github.com/idealisan/patrickSamba/internal/oscap"
 )
 
 // TestNewNeverFailsOnMissingCapability 钉住 New 的错误契约。
