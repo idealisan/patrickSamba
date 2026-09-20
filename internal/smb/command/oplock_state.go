@@ -272,8 +272,14 @@ func (t *oplockTable) ackLease(key [16]byte, state wire.LeaseState) bool {
 		return false
 	}
 	w := e.breaking
-	// 确认到达即落地新状态：客户端说它降到了什么就是什么，
-	// 它比服务端要求的更低也合法（例如直接放弃全部缓存）。
+	// 收敛：客户端回报的状态**不得高于**服务端要求的降级目标（wantState）。
+	// 合规客户端只会回报等于或更低的状态；回报里若还带着被要求放弃的位
+	// （例如要求降到 R|H、客户端却仍报 W），不能采信 —— 按要求的值落地。
+	// 否则谎报的客户端会继续攥着写缓存，第二个客户端读到的就是旧数据
+	// （静默脏读，README 已知限制第 6 条最坏的那种）。
+	// 与 breakNow 的 `e.leaseState &= state` 同一口径：等不到确认的路径早就
+	// 这么收敛了，ACK 路径不能是另一套。
+	state &= w.wantState
 	e.leaseState = state
 	if state == wire.LeaseNone {
 		// 降到"什么都不缓存"= 不再持有，整条摘掉（H 位单独留着仍是有效授予，
@@ -315,6 +321,11 @@ func (t *oplockTable) ackOplock(o *Open, level wire.OplockLevel) bool {
 		return false
 	}
 	w := hit.breaking
+	// 收敛：回报的级别**不得高于**要求的降级目标（wantLevel）。
+	// oplock 的目标只有 None（对方要写）与 Level II（对方只读）两种
+	// （见 breakTarget）；回报 Exclusive / Batch 属于谎报，按目标级别落地。
+	// 与 breakNow 的 `e.level = level` 同一口径。
+	level = convergeOplockLevel(level, w.wantLevel)
 	hit.level = level
 	if level == wire.OplockLevelNone {
 		t.removeEntry(key, hit)
@@ -325,6 +336,31 @@ func (t *oplockTable) ackOplock(o *Open, level wire.OplockLevel) bool {
 
 	w.ack(level, 0)
 	return true
+}
+
+// convergeOplockLevel 把客户端回报的 break 确认级别收敛到服务端要求的范围内。
+//
+// oplock 的降级目标只有两种（breakTarget）：None（对方要写）与 Level II
+// （对方只读）。MS-SMB2 §2.2.24.1 里确认报文的 OplockLevel 是客户端**当前**
+// 持有的级别 —— 合规客户端只会回报等于或低于要求的值；回报 Exclusive/Batch
+// 属于谎报，按要求的值落地，不能让谎报者继续持有更高档的缓存。
+//
+// 唯二允许的「低于要求」：要求降到 II 而客户端回报 None（自愿放弃全部缓存）。
+func convergeOplockLevel(acked, want wire.OplockLevel) wire.OplockLevel {
+	switch want {
+	case wire.OplockLevelNone:
+		// 要求全放弃：任何回报都按 None 落地。
+		return wire.OplockLevelNone
+	case wire.OplockLevelII:
+		if acked == wire.OplockLevelNone {
+			return wire.OplockLevelNone
+		}
+		return wire.OplockLevelII
+	default:
+		// 目标级别只可能取这两种（breakTarget 的全部返回值）；走到这里说明
+		// 上游传了别的值，防御性地原样返回。
+		return acked
+	}
 }
 
 // oplockKeyOf 取条目所属对象的键（用于 ackLease 里反查 m）。

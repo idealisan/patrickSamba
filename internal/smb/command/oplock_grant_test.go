@@ -723,3 +723,121 @@ func TestDurableWaitingHolderInvalidatedAndBrokenAtOnce(t *testing.T) {
 		t.Fatalf("断开的持有者不该收到 break 通知，实际发了 %d 条", got)
 	}
 }
+
+// TestAckClampsClientReportedState（v0.6.0 遗留的收敛缺口）：客户端回的
+// break 确认**不得高于**服务端要求的降级目标。合规客户端只会回报等于或低于
+// 要求的状态；回报里若还带着被要求放弃的缓存位/级别，必须钳到要求值落地 ——
+// 否则谎报的客户端会继续攥着写缓存，第二个客户端读到的就是旧数据
+// （静默脏读，README 已知限制第 6 条最坏的那种）。
+//
+// breakNow（等不到确认的路径）早已按同一口径收敛（e.leaseState &= state /
+// e.level = level）；本用例钉住 ACK 路径不再直接采信。
+// 变异自检：删掉 ackLease 里的 `state &= w.wantState` → 第 1、4 条变红；
+// 把 convergeOplockLevel 改成原样返回 → 第 2 条变红。
+func TestAckClampsClientReportedState(t *testing.T) {
+	t.Run("lease：要求降到 R|H，客户端谎报仍持 W", func(t *testing.T) {
+		var tbl oplockTable
+		owner := &Open{oplockFileID: 1}
+		key := oplockKey{fileID: 1}
+		e := &oplockEntry{
+			owner: owner, lease: true, leaseKey: [16]byte{1},
+			leaseState: wire.LeaseReadCaching | wire.LeaseHandleCaching | wire.LeaseWriteCaching,
+		}
+		tbl.grant(key, e)
+
+		_, ok := tbl.beginBreak(e, wire.OplockLevelNone,
+			wire.LeaseReadCaching|wire.LeaseHandleCaching)
+		if !ok {
+			t.Fatal("beginBreak 失败")
+		}
+		// 谎报：确认报文里仍带着 R|H|W（没放弃写缓存）。
+		if !tbl.ackLease([16]byte{1},
+			wire.LeaseReadCaching|wire.LeaseHandleCaching|wire.LeaseWriteCaching) {
+			t.Fatal("ackLease 应成功")
+		}
+
+		if e.leaseState&wire.LeaseWriteCaching != 0 {
+			t.Errorf("落地状态 %#x 仍含写缓存位 —— 谎报被采信，客户端会继续攥着写缓存",
+				e.leaseState)
+		}
+		if e.leaseState != wire.LeaseReadCaching|wire.LeaseHandleCaching {
+			t.Errorf("落地状态 = %#x，期望钳到 %#x", e.leaseState,
+				wire.LeaseReadCaching|wire.LeaseHandleCaching)
+		}
+	})
+
+	t.Run("lease：要求降到 None（对方要写），客户端谎报仍持 R|H|W", func(t *testing.T) {
+		var tbl oplockTable
+		owner := &Open{oplockFileID: 2}
+		key := oplockKey{fileID: 2}
+		e := &oplockEntry{
+			owner: owner, lease: true, leaseKey: [16]byte{2},
+			leaseState: wire.LeaseReadCaching | wire.LeaseHandleCaching | wire.LeaseWriteCaching,
+		}
+		tbl.grant(key, e)
+
+		if _, ok := tbl.beginBreak(e, wire.OplockLevelNone, wire.LeaseNone); !ok {
+			t.Fatal("beginBreak 失败")
+		}
+		if !tbl.ackLease([16]byte{2},
+			wire.LeaseReadCaching|wire.LeaseHandleCaching|wire.LeaseWriteCaching) {
+			t.Fatal("ackLease 应成功")
+		}
+
+		if got := tbl.countFor(key); got != 0 {
+			t.Errorf("全放弃后条目应被摘掉，实际剩 %d", got)
+		}
+		if e.leaseState != wire.LeaseNone {
+			t.Errorf("落地状态 = %#x，期望 None（整段清零）", e.leaseState)
+		}
+	})
+
+	t.Run("oplock：要求降到 None，客户端谎报仍是 Batch", func(t *testing.T) {
+		var tbl oplockTable
+		owner := &Open{oplockFileID: 3}
+		key := oplockKey{fileID: 3}
+		e := &oplockEntry{owner: owner, level: wire.OplockLevelBatch}
+		tbl.grant(key, e)
+
+		if _, ok := tbl.beginBreak(e, wire.OplockLevelNone, wire.LeaseState(0)); !ok {
+			t.Fatal("beginBreak 失败")
+		}
+		if !tbl.ackOplock(owner, wire.OplockLevelBatch) {
+			t.Fatal("ackOplock 应成功")
+		}
+
+		if e.level != wire.OplockLevelNone {
+			t.Errorf("落地级别 = %v，期望钳到 None —— 谎报被采信", e.level)
+		}
+		if got := tbl.countFor(key); got != 0 {
+			t.Errorf("全放弃后条目应被摘掉，实际剩 %d", got)
+		}
+	})
+
+	t.Run("合规回报不受影响：lease 如实降到 R|H", func(t *testing.T) {
+		var tbl oplockTable
+		owner := &Open{oplockFileID: 4}
+		key := oplockKey{fileID: 4}
+		e := &oplockEntry{
+			owner: owner, lease: true, leaseKey: [16]byte{4},
+			leaseState: wire.LeaseReadCaching | wire.LeaseHandleCaching | wire.LeaseWriteCaching,
+		}
+		tbl.grant(key, e)
+
+		if _, ok := tbl.beginBreak(e, wire.OplockLevelNone,
+			wire.LeaseReadCaching|wire.LeaseHandleCaching); !ok {
+			t.Fatal("beginBreak 失败")
+		}
+		if !tbl.ackLease([16]byte{4}, wire.LeaseReadCaching|wire.LeaseHandleCaching) {
+			t.Fatal("ackLease 应成功")
+		}
+
+		if e.leaseState != wire.LeaseReadCaching|wire.LeaseHandleCaching {
+			t.Errorf("落地状态 = %#x，期望 %#x", e.leaseState,
+				wire.LeaseReadCaching|wire.LeaseHandleCaching)
+		}
+		if got := tbl.countFor(key); got != 1 {
+			t.Errorf("R|H 仍是有效授予，条目应保留，实际剩 %d", got)
+		}
+	})
+}
