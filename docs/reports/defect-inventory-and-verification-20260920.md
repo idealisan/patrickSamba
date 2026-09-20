@@ -282,3 +282,32 @@ codebuddy 相关的目录排除掉，并且历史 commit 里也清理掉」）�
 实测等 stage 已随 `.cnb.yml` 移除，**GitHub Actions 侧是否都有对应物需要逐项核对**
 （`dev-workflow.md` §5.5 与 `test-infra.md` 已标注）。`-race` 档尤其可疑 ——
 GitHub Actions 的三档 unit 都没带 race。
+
+---
+
+## 更新（2026-09-20 17:20）—— 缺口已补：Gates 门禁工作流
+
+上面的迁移缺口已落地：新增 **`.github/workflows/gates.yml`**（push/PR 触发），
+等价迁移旧 CNB 门禁的七道检查：
+
+| job | 内容 |
+|---|---|
+| `gofmt` | `gofmt -l` 必须为空 |
+| `constraints` | C1/C3/C4/C6/C8/C9（`scripts/check-constraints.sh`） |
+| `test-compile` | 测试代码编译校验：全部 build tag × 全部平台（`test/ci/check-test-compile.sh`） |
+| `race` | `CGO_ENABLED=1 go test -race ./...`（race 依赖 cgo，`=0` 时 0.1 秒假绿） |
+| `static-link` | linux 产物 `LC_ALL=C ldd` 必须静态链接 |
+| `portable` | `test/ci/portable-mode.sh`（builtin 底座必须在 CI 里真跑） |
+| `gate-integrity` | `test/ci/negative-verify.sh`（注入故障证明每关有牙） |
+
+分工：`gates.yml` = 门禁（push/PR 必须绿）；`ci.yml` = 扩展测试面。
+
+本机（Windows）能验的部分已验【实测】：`check-constraints.sh` 全绿；
+`check-test-compile.sh` 全绿（4 平台 × 全部 tag 类型检查）；`portable-mode.sh`
+在本机因 `TestPortablePunchHoleLeavesExistingHoleAlone` 被 SKIP 而红 —— 根因是
+`fileBlocks` 没有 Windows 实现（`blocks_other_test.go` 恒返回 ok=false），
+**CI 的 ubuntu runner 上会真跑**（CNB 时代即如此）。曾考虑给 Windows 补
+`fileBlocks`（用 FILE_STANDARD_INFO.AllocationSize），核实后**放弃**：builtin 的
+打洞在 NTFS 上是写零实现，会让「本来就是洞」的区间真的变胖，用例会由 SKIP 变
+FAIL —— 这暴露的是 builtin 路径在 NTFS 上的真实平台事实，归入「语义类另立」，
+不用改测试口径去迁就。
